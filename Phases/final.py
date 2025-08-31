@@ -1268,6 +1268,8 @@ class MousePortal(ShowBase):
         # Add attributes to store time points
         self.enter_go_time = 0.0
         self.enter_stay_time = 0.0
+        self.speed_zero_start_time = None
+        self.time_spent_at_zero_speed = self.cfg["time_spent_at_zero_speed"]
 
     def doMethodLaterStopwatch(base, delay, func, name):
         target_time = global_stopwatch.get_elapsed_time() + delay
@@ -1354,9 +1356,24 @@ class MousePortal(ShowBase):
         # Get the elapsed time from the global stopwatch
         current_time = global_stopwatch.get_elapsed_time()
 
+        # Track when treadmill speed becomes 0 and reset if speed is not 0
+        if self.treadmill.data.speed == 0:
+            if self.speed_zero_start_time is None:
+                self.speed_zero_start_time = current_time
+        else:
+            self.speed_zero_start_time = None
+
+        #print(self.treadmill.data.speed)
+
         if selected_texture == self.corridor.stop_texture:
             #print(self.zone_length)
-            if self.segments_with_stay_texture <= self.zone_length and self.fsm.state != 'Reward' and current_time >= self.enter_stay_time + (self.reward_time * self.zone_length):
+            # Check if speed has been 0 for exactly 1 second
+            speed_zero_for_one_second = (self.speed_zero_start_time is not None and 
+                                       current_time >= self.speed_zero_start_time + self.time_spent_at_zero_speed)
+
+            if (self.segments_with_stay_texture <= self.zone_length and 
+                self.fsm.state != 'Reward' and 
+                speed_zero_for_one_second):
                 #print("Requesting Reward state")
                 self.fsm.request('Reward')
         elif selected_texture == self.corridor.go_texture:
