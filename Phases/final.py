@@ -31,6 +31,10 @@ import serial
 import random
 import subprocess
 import sys
+import socket
+import threading
+import signal
+import atexit
 import numpy as np
 from typing import Any, Dict
 from dataclasses import dataclass
@@ -39,6 +43,7 @@ from datetime import datetime
 from direct.showbase.ShowBase import ShowBase
 from direct.task import Task
 from panda3d.core import CardMaker, NodePath, Texture, WindowProperties, Fog, GraphicsPipe
+from panda3d.core import StreamReader, ConnectionManager, NetAddress
 from direct.showbase import DirectObject
 from direct.fsm.FSM import FSM
 import pandas as pd
@@ -1053,6 +1058,237 @@ class RewardCalculator:
             print(f"Error calculating x for y={y}, slope={slope}, intercept={intercept}: {e}")
             return None
 
+class TCPStreamClient(DirectObject.DirectObject):
+    """
+    TCP client to receive data from run_me.py TCP server.
+    Handles dynamic level changing and other commands.
+    Thread-safe with proper cleanup mechanisms.
+    """
+    def __init__(self, base: ShowBase, host='localhost', port=None):
+        """
+        Initialize the TCP client.
+        
+        Args:
+            base: The Panda3D ShowBase instance
+            host: Server hostname (default: localhost)
+            port: Server port (read from TCP_SERVER_PORT environment variable if not provided)
+        """
+        self.base = base
+        self.host = host
+        self.port = port or int(os.environ.get("TCP_SERVER_PORT", "0"))
+        self.socket = None
+        self.connected = False
+        self.receive_buffer = ""
+        self.connection_thread = None
+        self._shutdown_lock = threading.Lock()
+        self._running = True
+        
+        if self.port == 0:
+            print("Warning: No TCP server port specified. TCP client disabled.")
+            return
+            
+        # Start connection in a separate thread to avoid blocking
+        self.connection_thread = threading.Thread(
+            target=self._connect_to_server, 
+            daemon=True, 
+            name="TCPClient"
+        )
+        self.connection_thread.start()
+        
+        # Add task to check for incoming data
+        self.base.taskMgr.add(self._check_for_data, "TCPClientDataCheck")
+    
+    def _connect_to_server(self):
+        """Connect to the TCP server in a separate thread with proper error handling."""
+        try:
+            if not self._running:
+                return
+                
+            print(f"Attempting to connect to TCP server at {self.host}:{self.port}...")
+            
+            # Create socket and connect
+            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.socket.settimeout(10.0)  # 10 second timeout for connection
+            self.socket.connect((self.host, self.port))
+            
+            # Set to non-blocking for continuous reading
+            self.socket.setblocking(False)
+            
+            with self._shutdown_lock:
+                if self._running:
+                    self.connected = True
+                    print(f"Connected to TCP server at {self.host}:{self.port}")
+                else:
+                    # Shutdown was called while connecting
+                    self.socket.close()
+                    
+        except Exception as e:
+            print(f"Failed to connect to TCP server: {e}")
+            with self._shutdown_lock:
+                self.connected = False
+    
+    def _check_for_data(self, task):
+        """Task to continuously check for incoming data with proper error handling."""
+        if not self._running or not self.connected or not self.socket:
+            return Task.cont
+            
+        try:
+            # Try to receive data (non-blocking)
+            data = self.socket.recv(1024).decode('utf-8')
+            if data:
+                self.receive_buffer += data
+                # Process complete lines
+                while '\n' in self.receive_buffer:
+                    line, self.receive_buffer = self.receive_buffer.split('\n', 1)
+                    if line.strip():
+                        self._process_command(line.strip())
+            elif not data:  # Empty data means connection closed
+                print("TCP server closed connection")
+                self.connected = False
+                        
+        except socket.error as e:
+            # No data available or connection error
+            import errno
+            if hasattr(errno, 'EAGAIN') and hasattr(errno, 'EWOULDBLOCK'):
+                if e.errno not in (errno.EAGAIN, errno.EWOULDBLOCK):
+                    print(f"Socket error: {e}")
+                    self.connected = False
+            else:
+                # Fallback for systems without errno constants
+                error_msg = str(e).lower()
+                if 'would block' not in error_msg and 'try again' not in error_msg:
+                    print(f"Socket error: {e}")
+                    self.connected = False
+        except Exception as e:
+            print(f"Error reading TCP data: {e}")
+            self.connected = False
+            
+        return Task.cont
+    
+    def _process_command(self, command):
+        """Process incoming commands from the TCP server."""
+        try:
+            print(f"Received TCP command: {command}")
+            
+            if command.startswith("CHANGE_LEVEL:"):
+                # Extract level filename
+                level_file = command[13:]  # Remove "CHANGE_LEVEL:" prefix
+                self._change_level(level_file)
+            elif command == "reward":
+                # Trigger reward event
+                self.base.messenger.send('reward-event')
+            elif command == "puff":
+                # Trigger puff event
+                self.base.messenger.send('puff-event')
+            elif command == "neutral":
+                # Trigger neutral event
+                self.base.messenger.send('neutral-event')
+            else:
+                print(f"Unknown command: {command}")
+                
+        except Exception as e:
+            print(f"Error processing command '{command}': {e}")
+    
+    def _change_level(self, level_file):
+        """Dynamically change the game level."""
+        try:
+            print(f"Changing level to: {level_file}")
+            
+            # Construct full path to level file
+            level_path = os.path.join("Levels", level_file)
+            
+            if not os.path.exists(level_path):
+                print(f"Level file not found: {level_path}")
+                return
+            
+            # Load new configuration
+            with open(level_path, 'r') as f:
+                new_config = json.load(f)
+            
+            # Update the base configuration
+            old_config = self.base.cfg.copy()
+            self.base.cfg.update(new_config)
+            
+            # Reload corridor with new configuration if needed
+            self._reload_corridor_config()
+            
+            print(f"Successfully changed level to: {level_file}")
+            
+        except Exception as e:
+            print(f"Error changing level to '{level_file}': {e}")
+    
+    def _reload_corridor_config(self):
+        """Reload corridor configuration with new settings."""
+        try:
+            # Update corridor configuration
+            corridor = self.base.corridor
+            
+            # Update texture settings
+            if hasattr(corridor, 'go_texture'):
+                corridor.go_texture = self.base.cfg.get("go_texture", corridor.go_texture)
+            if hasattr(corridor, 'stop_texture'):
+                corridor.stop_texture = self.base.cfg.get("stop_texture", corridor.stop_texture)
+            if hasattr(corridor, 'probe_onset'):
+                corridor.probe_onset = self.base.cfg.get("probe_onset", corridor.probe_onset)
+            if hasattr(corridor, 'probe_duration'):
+                corridor.probe_duration = self.base.cfg.get("probe_duration", corridor.probe_duration)
+            if hasattr(corridor, 'probe_probability'):
+                corridor.probe_probability = self.base.cfg.get("probe_probability", corridor.probe_probability)
+            if hasattr(corridor, 'stop_texture_probability'):
+                corridor.stop_texture_probability = self.base.cfg.get("stop_texture_probability", corridor.stop_texture_probability)
+                
+            # Update other relevant settings
+            self.base.reward_time = self.base.cfg.get("reward_time", getattr(self.base, 'reward_time', 1.0))
+            self.base.puff_time = self.base.cfg.get("puff_time", getattr(self.base, 'puff_time', 1.0))
+            
+            print("Corridor configuration reloaded successfully")
+            
+        except Exception as e:
+            print(f"Error reloading corridor configuration: {e}")
+    
+    def close(self):
+        """Close the TCP connection with proper thread cleanup."""
+        with self._shutdown_lock:
+            if not self._running:
+                return  # Already closing
+                
+            print("Closing TCP client...")
+            self._running = False
+            self.connected = False
+            
+            # Close socket
+            if self.socket:
+                try:
+                    self.socket.shutdown(socket.SHUT_RDWR)
+                    self.socket.close()
+                except:
+                    pass
+                self.socket = None
+            
+            # Remove the data checking task
+            try:
+                self.base.taskMgr.remove("TCPClientDataCheck")
+            except:
+                pass  # Task might not exist
+            
+            # Wait for connection thread to finish
+            if self.connection_thread and self.connection_thread.is_alive():
+                print("Waiting for TCP client thread to finish...")
+                self.connection_thread.join(timeout=3)
+                if self.connection_thread.is_alive():
+                    print("Warning: TCP client thread did not stop cleanly")
+                else:
+                    print("TCP client thread stopped successfully")
+            
+            print("TCP client connection closed")
+    
+    def __del__(self):
+        """Destructor to ensure cleanup."""
+        try:
+            self.close()
+        except:
+            pass
+
 class MousePortal(ShowBase):
     """
     Main application class for the infinite corridor simulation.
@@ -1063,6 +1299,13 @@ class MousePortal(ShowBase):
         corridor geometry, and add the update task.
         """
         ShowBase.__init__(self)
+        
+        # Set up signal handlers for graceful shutdown
+        signal.signal(signal.SIGINT, self._signal_handler)
+        signal.signal(signal.SIGTERM, self._signal_handler)
+        
+        # Register cleanup on exit
+        atexit.register(self._cleanup)
         
         # Load configuration from JSON
         with open(config_file, 'r') as f:
@@ -1269,7 +1512,19 @@ class MousePortal(ShowBase):
         self.enter_go_time = 0.0
         self.enter_stay_time = 0.0
         self.speed_zero_start_time = None
+
+        # Initialize TCP client for dynamic level changing
+        self.tcp_client = TCPStreamClient(self)
         self.time_spent_at_zero_speed = self.cfg["time_spent_at_zero_speed"]
+
+    def _signal_handler(self, signum, frame):
+        """Handle system signals for graceful shutdown."""
+        print(f"\nReceived signal {signum}, shutting down gracefully...")
+        try:
+            self._cleanup()
+        except:
+            pass
+        sys.exit(0)
 
     def doMethodLaterStopwatch(base, delay, func, name):
         target_time = global_stopwatch.get_elapsed_time() + delay
@@ -1415,6 +1670,9 @@ class MousePortal(ShowBase):
         # Remove serial reading tasks before closing ports
         self.taskMgr.remove("readTeensySerial")
         self.taskMgr.remove("readArduinoSerial")
+        # Close TCP client connection
+        if hasattr(self, 'tcp_client') and self.tcp_client:
+            self.tcp_client.close()
         if self.arduino_serial and self.arduino_serial.is_open:
             self.arduino_serial.close()
         if self.treadmill:
