@@ -292,7 +292,8 @@ class Corridor:
         self.probe_duration = config["probe_duration"]
         self.probe_probability = config.get("probe_probability", 1.0)  # Default to 100% if not specified
         self.stop_texture_probability = config.get("stop_texture_probability", 0.5)  # Default to 50% if not specified
-        
+        self.probe = config.get("probe", False)  # Default to False if not specified
+
         # Create a parent node for all corridor segments.
         self.parent: NodePath = base.render.attachNewNode("corridor")
         
@@ -568,9 +569,9 @@ class Corridor:
             self.apply_texture(left_node, self.left_wall_texture)
         for right_node in self.right_segments:
             self.apply_texture(right_node, self.right_wall_texture)
-        
-        #Conditional to make probe optional
-        if self.base.cfg.get("probe", True):
+
+        # Conditional to make probe optional
+        if self.probe:
             # Configurable chance of calling the probe function
             if random.random() < self.probe_probability:
                 # Schedule a task to change the wall textures temporarily after reverting
@@ -1223,7 +1224,7 @@ class TCPStreamClient(DirectObject.DirectObject):
             # Update corridor configuration
             corridor = self.base.corridor
             
-            # Update texture settings
+            # Update corridor texture settings
             if hasattr(corridor, 'go_texture'):
                 corridor.go_texture = self.base.cfg.get("go_texture", corridor.go_texture)
             if hasattr(corridor, 'stop_texture'):
@@ -1236,12 +1237,36 @@ class TCPStreamClient(DirectObject.DirectObject):
                 corridor.probe_probability = self.base.cfg.get("probe_probability", corridor.probe_probability)
             if hasattr(corridor, 'stop_texture_probability'):
                 corridor.stop_texture_probability = self.base.cfg.get("stop_texture_probability", corridor.stop_texture_probability)
-                
-            # Update other relevant settings
-            self.base.reward_time = self.base.cfg.get("reward_time", getattr(self.base, 'reward_time', 1.0))
-            self.base.puff_time = self.base.cfg.get("puff_time", getattr(self.base, 'puff_time', 1.0))
-            
-            print("Corridor configuration reloaded successfully")
+            if hasattr(corridor, 'probe'):
+                corridor.probe = self.base.cfg.get("probe", corridor.probe)
+
+            # Update wall and surface textures
+            corridor.left_wall_texture = self.base.cfg.get("left_wall_texture", corridor.left_wall_texture)
+            corridor.right_wall_texture = self.base.cfg.get("right_wall_texture", corridor.right_wall_texture)
+            corridor.floor_texture = self.base.cfg.get("floor_texture", corridor.floor_texture)
+            corridor.ceiling_texture = self.base.cfg.get("ceiling_texture", corridor.ceiling_texture)
+
+            # Update MousePortal-level configuration settings (only attributes that exist on MousePortal)
+            if hasattr(self.base, 'reward_time'):
+                self.base.reward_time = self.base.cfg.get("reward_time", self.base.reward_time)
+            if hasattr(self.base, 'puff_time'):
+                self.base.puff_time = self.base.cfg.get("puff_time", self.base.puff_time)
+            if hasattr(self.base, 'fog_color'):
+                self.base.fog_color = self.base.cfg.get("fog_color", self.base.fog_color)
+            if hasattr(self.base, 'time_spent_at_zero_speed'):
+                self.base.time_spent_at_zero_speed = self.base.cfg.get("time_spent_at_zero_speed", self.base.time_spent_at_zero_speed)
+            if hasattr(self.base, 'puff_duration'):
+                self.base.puff_duration = self.base.cfg.get("puff_duration", self.base.puff_duration)
+            if hasattr(self.base, 'reward_duration'):
+                self.base.reward_duration = self.base.cfg.get("reward_duration", self.base.reward_duration)
+
+            # Update RewardOrPuff FSM if it exists
+            if hasattr(self.base, 'fsm') and self.base.fsm:
+                self.base.fsm.reward_duration = self.base.cfg.get("reward_duration", getattr(self.base.fsm, 'reward_duration', None))
+                self.base.fsm.puff_duration = self.base.cfg.get("puff_duration", getattr(self.base.fsm, 'puff_duration', None))
+                self.base.fsm.puff_to_neutral_time = self.base.cfg.get("puff_to_neutral_time", getattr(self.base.fsm, 'puff_to_neutral_time', None))
+
+            print("Configuration reloaded successfully")
             
         except Exception as e:
             print(f"Error reloading corridor configuration: {e}")
@@ -1332,7 +1357,8 @@ class MousePortal(ShowBase):
         )
 
         self.trial_csv_path = os.path.join(os.environ.get("OUTPUT_DIR"), f"{int(time.time())}trial_log.csv")
-            
+
+        max_trials = 1000
         self.segments_to_wait_history = np.array([], dtype=int)
         self.texture_history = np.array([], dtype=str)
         self.texture_time_history = np.array([], dtype=float)
@@ -1343,19 +1369,19 @@ class MousePortal(ShowBase):
         self.puff_history = np.array([], dtype=float)
         self.reward_history = np.array([], dtype=float)
         trial_df = pd.DataFrame({
-            'rounded_base_hallway_data': self.rounded_base_hallway_data,
-            'rounded_stay_data': self.rounded_stay_data,
-            'rounded_go_data': self.rounded_go_data,
-            'segments_to_wait': np.full_like(self.rounded_base_hallway_data, np.nan, dtype=float),
-            'texture_history': np.full_like(len(self.rounded_base_hallway_data), np.nan, dtype=object),
-            'texture_change_time': np.full_like(self.rounded_base_hallway_data, np.nan, dtype=float),
-            'segments_until_revert': np.full_like(self.rounded_base_hallway_data, np.nan, dtype=float),
-            'texture_revert': np.full_like(self.rounded_base_hallway_data, np.nan, dtype=float),
-            'probe_texture_history': np.full_like(self.rounded_base_hallway_data, np.nan, dtype=object),
-            'probe_time': np.full_like(self.rounded_base_hallway_data, np.nan, dtype=float),
-            'puff_event': np.full_like(self.rounded_base_hallway_data, np.nan, dtype=object),
-            'reward_event': np.full_like(self.rounded_base_hallway_data, np.nan, dtype=object),
-            })
+            'rounded_base_hallway_data': np.full(max_trials, np.nan),
+            'rounded_stay_data': np.full(max_trials, np.nan),
+            'rounded_go_data': np.full(max_trials, np.nan),
+            'segments_to_wait': np.full(max_trials, np.nan),
+            'texture_history': np.full(max_trials, np.nan, dtype=object),
+            'texture_change_time': np.full(max_trials, np.nan),
+            'segments_until_revert': np.full(max_trials, np.nan),
+            'texture_revert': np.full(max_trials, np.nan),
+            'probe_texture_history': np.full(max_trials, np.nan, dtype=object),
+            'probe_time': np.full(max_trials, np.nan),
+            'puff_event': np.full(max_trials, np.nan, dtype=object),
+            'reward_event': np.full(max_trials, np.nan, dtype=object),
+        })
         trial_df.to_csv(self.trial_csv_path, index=False)
         self.trial_df = trial_df
 
@@ -1471,13 +1497,13 @@ class MousePortal(ShowBase):
 
         # Add the update task
         self.taskMgr.add(self.update, "updateTask")
-        
+
+        self.fog_color = tuple(self.cfg["fog_color"])
         # Initialize fog effect
         self.fog_effect = FogEffect(
             self,
             density=self.cfg["fog_density"],
-            fog_color=(0.5, 0.5, 0.5)
-        )
+            fog_color=self.fog_color)
         
         # Set up task chain for serial input
         self.taskMgr.setupTaskChain(
