@@ -1089,7 +1089,8 @@ class MousePortal(ShowBase):
         )
 
         self.trial_csv_path = os.path.join(os.environ.get("OUTPUT_DIR"), f"{int(time.time())}trial_log.csv")
-            
+
+        max_trials = 1000    
         self.segments_to_wait_history = np.array([], dtype=int)
         self.texture_history = np.array([], dtype=str)
         self.texture_time_history = np.array([], dtype=float)
@@ -1100,18 +1101,18 @@ class MousePortal(ShowBase):
         self.puff_history = np.array([], dtype=float)
         self.reward_history = np.array([], dtype=float)
         trial_df = pd.DataFrame({
-            'rounded_base_hallway_data': self.rounded_base_hallway_data,
-            'rounded_stay_data': self.rounded_stay_data,
-            'rounded_go_data': self.rounded_go_data,
-            'segments_to_wait': np.full_like(self.rounded_base_hallway_data, np.nan, dtype=float),
-            'texture_history': np.full_like(len(self.rounded_base_hallway_data), np.nan, dtype=object),
-            'texture_change_time': np.full_like(self.rounded_base_hallway_data, np.nan, dtype=float),
-            'segments_until_revert': np.full_like(self.rounded_base_hallway_data, np.nan, dtype=float),
-            'texture_revert': np.full_like(self.rounded_base_hallway_data, np.nan, dtype=float),
-            'probe_texture_history': np.full_like(self.rounded_base_hallway_data, np.nan, dtype=object),
-            'probe_time': np.full_like(self.rounded_base_hallway_data, np.nan, dtype=float),
-            'puff_event': np.full_like(self.rounded_base_hallway_data, np.nan, dtype=object),
-            'reward_event': np.full_like(self.rounded_base_hallway_data, np.nan, dtype=object),
+            'rounded_base_hallway_data': np.full(max_trials, np.nan),
+            'rounded_stay_data': np.full(max_trials, np.nan),
+            'rounded_go_data': np.full(max_trials, np.nan),
+            'segments_to_wait': np.full(max_trials, np.nan, dtype=float),
+            'texture_history': np.full(max_trials, np.nan, dtype=object),
+            'texture_change_time': np.full(max_trials, np.nan, dtype=float),
+            'segments_until_revert': np.full(max_trials, np.nan, dtype=float),
+            'texture_revert': np.full(max_trials, np.nan, dtype=float),
+            'probe_texture_history': np.full(max_trials, np.nan, dtype=object),
+            'probe_time': np.full(max_trials, np.nan, dtype=float),
+            'puff_event': np.full(max_trials, np.nan, dtype=object),
+            'reward_event': np.full(max_trials, np.nan, dtype=object),
             })
         trial_df.to_csv(self.trial_csv_path, index=False)
         self.trial_df = trial_df
