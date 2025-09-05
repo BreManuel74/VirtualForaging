@@ -49,18 +49,35 @@ def analyze_mouse_data(data_files, markers):
                 
                 # Read trial log data for texture history and reward events
                 trial_log = pd.read_csv(row['trial_log'])
-                texture_count = len(trial_log['texture_history'].dropna())  # Count non-null texture entries
+                
+                # Print first few rows to verify data structure
+                if idx == 0 and timestamp == df.index[0]:  # Only for first mouse, first date
+                    print("\nSample of trial_log data for verification:")
+                    print(trial_log[['texture_history', 'reward_event']].head())
+                    print("\nUnique texture types:")
+                    print(trial_log['texture_history'].unique())
+                
+                # Count only reward texture opportunities (assets/reward_mean100.jpg)
+                reward_opportunities = len(trial_log[trial_log['texture_history'] == 'assets/reward_mean100.jpg'])
                 reward_count = len(trial_log['reward_event'].dropna())  # Count non-null reward events
                 
-                # Calculate misses (texture changes minus hits)
-                misses = texture_count - reward_count
+                # Calculate misses (reward opportunities minus hits)
+                misses = reward_opportunities - reward_count
                 
-                # Calculate sensitivity (hits / total trials)
+                # Calculate sensitivity (hits / reward opportunities)
                 # Convert to float to ensure proper division
-                sensitivity = float(reward_count) / float(texture_count) if texture_count > 0 else 0.0
+                sensitivity = float(reward_count) / float(reward_opportunities) if reward_opportunities > 0 else 0.0
                 
                 # Convert Unix timestamp to datetime and store results
                 date = datetime.fromtimestamp(int(timestamp))
+                
+                # Print detailed stats for verification
+                print(f"\nDate: {date.strftime('%Y-%m-%d')}")
+                print(f"Reward opportunities (reward texture count): {reward_opportunities}")
+                print(f"Actual rewards (hits): {reward_count}")
+                print(f"Misses: {misses}")
+                print(f"Sensitivity: {sensitivity:.3f}")
+                
                 dates.append(date)
                 speeds.append(avg_speed)
                 hits.append(reward_count)
