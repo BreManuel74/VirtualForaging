@@ -19,9 +19,13 @@ def generate_colors(n):
     return colors
 
 def analyze_mouse_data(data_files, markers):
+    # Create a dictionary to map mouse names to markers
+    markers = {os.path.basename(file).split("_")[0]: marker for file, marker in zip(data_files, markers)}
+    
     speed_fig = plt.figure(figsize=(12, 6))
     sensitivity_fig = plt.figure(figsize=(12, 6))
     lick_fig = plt.figure(figsize=(12, 6))
+    reward_fig = plt.figure(figsize=(12, 6))
     colors = generate_colors(len(data_files))  # Generate colors based on number of mice
     
     all_results = []
@@ -147,6 +151,7 @@ def analyze_mouse_data(data_files, markers):
             'mouse': mouse_name,
             'dates': dates,
             'speeds': speeds,
+            'hits': hits,
             'df': results_df
         })
         
@@ -167,6 +172,11 @@ def analyze_mouse_data(data_files, markers):
         # Plot lick count data
         plt.figure(lick_fig.number)
         plt.plot(day_numbers, results_df['lick_count'], 
+            f'{markers[mouse_name]}-', color=colors[idx], markersize=8, label=mouse_name)
+            
+        # Plot reward count data
+        plt.figure(reward_fig.number)
+        plt.plot(day_numbers, results_df['hits'], 
             f'{markers[mouse_name]}-', color=colors[idx], markersize=8, label=mouse_name)
     
     # Configure speed plot
@@ -214,9 +224,24 @@ def analyze_mouse_data(data_files, markers):
     ax.xaxis.set_major_locator(plt.MultipleLocator(5))
     ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
     
-    return speed_fig, sensitivity_fig, lick_fig, all_results
+    # Configure reward count plot
+    plt.figure(reward_fig.number)
+    plt.title('Number of Rewards Over Time')
+    plt.xlabel('Day')
+    plt.ylabel('Number of Rewards')
+    plt.grid(True)
+    ax = plt.gca()
+    ax.tick_params(axis='both', direction='in')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.set_ylim(bottom=0)  # Reward counts cannot be negative
+    ax.set_xlim(left=0)
+    ax.xaxis.set_major_locator(plt.MultipleLocator(5))
+    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+    
+    return speed_fig, sensitivity_fig, lick_fig, reward_fig, all_results
 
-if __name__ == "__main__":
+def main():
     # Create and hide the root window
     root = tk.Tk()
     root.withdraw()
@@ -229,95 +254,64 @@ if __name__ == "__main__":
     )
     
     if file_paths:
-        # Create a dictionary to store marker choices
-        markers = {}
-        
-        # Ask for marker type for each mouse
+        # Ask user for marker type for each mouse
+        markers = []
         for file_path in file_paths:
             mouse_name = os.path.basename(file_path).split("_")[0]
             while True:
                 choice = input(f"Enter marker type for {mouse_name} (s for square, o for circle): ").lower().strip()
                 if choice in ['s', 'o']:
-                    markers[mouse_name] = choice
+                    markers.append(choice)
                     break
                 else:
                     print("Invalid choice. Please enter 's' for square or 'o' for circle.")
-        
-        # Run the analysis with marker choices
-        speed_fig, sensitivity_fig, lick_fig, results = analyze_mouse_data(file_paths, markers)
+            
+        # Analyze data and plot results
+        speed_fig, sensitivity_fig, lick_fig, reward_fig, all_results = analyze_mouse_data(file_paths, markers)
 
-        # Configure speed figure
-        plt.figure(speed_fig.number)
-        if len(file_paths) > 10:
-            plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-            plt.subplots_adjust(right=0.85)
-        else:
-            plt.legend()
-        plt.tight_layout()
-
-        # Configure sensitivity figure
-        plt.figure(sensitivity_fig.number)
-        if len(file_paths) > 10:
-            plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-            plt.subplots_adjust(right=0.85)
-        else:
-            plt.legend()
-        plt.tight_layout()
-
-        # Configure lick count figure
-        plt.figure(lick_fig.number)
-        if len(file_paths) > 10:
-            plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-            plt.subplots_adjust(right=0.85)
-        else:
-            plt.legend()
-        plt.tight_layout()
+        # Configure all figures
+        for fig in [speed_fig, sensitivity_fig, lick_fig, reward_fig]:
+            plt.figure(fig.number)
+            if len(file_paths) > 10:
+                plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+                plt.subplots_adjust(right=0.85)
+            else:
+                plt.legend()
+            plt.tight_layout()
 
         # Display all plots
-        speed_fig.show()
-        sensitivity_fig.show()
-        lick_fig.show()
+        for fig in [speed_fig, sensitivity_fig, lick_fig, reward_fig]:
+            fig.show()
         plt.show()
 
-        # Ask if user wants to save the plot
-        save = input("Would you like to save the plot? (yes/no): ").lower().strip()
+        # Ask if user wants to save the plots
+        save = input("Would you like to save the plots? (yes/no): ").lower().strip()
         if save.startswith('y'):
             # Set common plot parameters
             plt.rcParams['font.family'] = 'sans-serif'
             plt.rcParams['font.sans-serif'] = ['Arial']
             plt.rcParams['svg.fonttype'] = 'none'
 
-            # Save speed plot
-            speed_save_path = filedialog.asksaveasfilename(
-                defaultextension=".svg",
-                filetypes=[("SVG files", "*.svg"), ("All files", "*.*")],
-                title="Save speed plot as",
-                initialfile=f"mouse_speed_comparison_{len(file_paths)}mice.svg"
-            )
-            if speed_save_path:
-                speed_fig.savefig(speed_save_path, bbox_inches='tight', format='svg')
-                print(f"Speed plot saved to: {speed_save_path}")
-            
-            # Save sensitivity plot
-            sensitivity_save_path = filedialog.asksaveasfilename(
-                defaultextension=".svg",
-                filetypes=[("SVG files", "*.svg"), ("All files", "*.*")],
-                title="Save sensitivity plot as",
-                initialfile=f"mouse_sensitivity_comparison_{len(file_paths)}mice.svg"
-            )
-            if sensitivity_save_path:
-                sensitivity_fig.savefig(sensitivity_save_path, bbox_inches='tight', format='svg')
-                print(f"Sensitivity plot saved to: {sensitivity_save_path}")
-                
-            # Save lick count plot
-            lick_save_path = filedialog.asksaveasfilename(
-                defaultextension=".svg",
-                filetypes=[("SVG files", "*.svg"), ("All files", "*.*")],
-                title="Save lick count plot as",
-                initialfile=f"mouse_lick_count_comparison_{len(file_paths)}mice.svg"
-            )
-            if lick_save_path:
-                lick_fig.savefig(lick_save_path, bbox_inches='tight', format='svg')
-                print(f"Lick count plot saved to: {lick_save_path}")
+            # Plot configurations to save
+            plot_configs = [
+                (speed_fig, 'speed', 'Speed plot'),
+                (sensitivity_fig, 'sensitivity', 'Sensitivity plot'),
+                (lick_fig, 'lick_count', 'Lick count plot'),
+                (reward_fig, 'reward_count', 'Reward count plot')
+            ]
+
+            # Save all plots
+            for fig, name, title in plot_configs:
+                save_path = filedialog.asksaveasfilename(
+                    defaultextension=".svg",
+                    filetypes=[("SVG files", "*.svg"), ("All files", "*.*")],
+                    title=f"Save {title} as",
+                    initialfile=f"mouse_{name}_comparison_{len(file_paths)}mice.svg"
+                )
+                if save_path:
+                    fig.savefig(save_path, bbox_inches='tight', format='svg')
+                    print(f"{title} saved to: {save_path}")
     else:
         print("No file selected. Exiting...")
+if __name__ == "__main__":
+    main()
