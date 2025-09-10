@@ -1,7 +1,7 @@
 import pandas as pd
 import os
 import tkinter as tk
-from tkinter import filedialog, messagebox, simpledialog
+from tkinter import filedialog, messagebox
 import numpy as np
 from datetime import datetime
 import colorsys
@@ -132,12 +132,18 @@ def analyze_mouse_data(behavior_files, cohort_files):
         # Initialize lists to store results
         dates = []
         reward_counts = []
+        avg_speeds = []
         
         # Process each date's data
         for timestamp, row in df.iterrows():
             try:
-                # Read only the trial log file
+                # Read trial log file for rewards
                 trial_log = pd.read_csv(row['trial_log'])
+                
+                # Read treadmill file for speed data
+                treadmill_data = pd.read_csv(row['treadmill'])
+                # Calculate average speed (excluding NaN values)
+                avg_speed = treadmill_data['speed'].mean()
                 
                 # Convert Unix timestamp to datetime
                 date = datetime.fromtimestamp(int(timestamp))
@@ -148,6 +154,7 @@ def analyze_mouse_data(behavior_files, cohort_files):
                 # Store the data
                 dates.append(date)
                 reward_counts.append(reward_count)
+                avg_speeds.append(avg_speed)
                 
             except Exception as e:
                 print(f"Error processing date {timestamp}: {str(e)}")
@@ -159,7 +166,8 @@ def analyze_mouse_data(behavior_files, cohort_files):
         # Create daily metrics DataFrame
         daily_df = pd.DataFrame({
             'day': range(len(dates)),
-            'reward_count': reward_counts
+            'reward_count': reward_counts,
+            'avg_speed': avg_speeds
         })
         
         # Get cohort data for this mouse if available
@@ -227,6 +235,74 @@ def plot_correlation(valid_data, mouse, corr_coef, p_value):
             defaultextension=".svg",
             initialfile=f'correlation_weight_and_rewards_{mouse}.svg',
             title="Save Plot As",
+            filetypes=[("SVG files", "*.svg"), ("All files", "*.*")]
+        )
+        if save_path:
+            fig.savefig(save_path, format='svg', dpi=300, bbox_inches='tight')
+    
+    plt.close(fig)
+
+def create_speed_correlation_subplots(all_results, correlations_list):
+    """Create a single figure with speed vs reward correlation subplots for all mice."""
+    # Set global font parameters
+    plt.rcParams['font.family'] = 'sans-serif'
+    plt.rcParams['font.sans-serif'] = ['Arial']
+    plt.rcParams['svg.fonttype'] = 'none'
+    
+    # Count mice with valid data for subplot layout
+    n_mice = len(all_results)
+    
+    if n_mice == 0:
+        return
+    
+    # Calculate optimal subplot layout
+    if n_mice <= 4:
+        n_cols = min(2, n_mice)
+    else:
+        n_cols = 3  # Use 3 columns for 5 or more mice
+    
+    n_rows = (n_mice + n_cols - 1) // n_cols
+    
+    # Create figure with subplots
+    fig = plt.figure(figsize=(8*n_cols, 6*n_rows))
+    plt.subplots_adjust(hspace=0.5, wspace=0.4)
+    
+    for idx, (result, corr_data) in enumerate(zip(all_results, correlations_list)):
+        mouse = result['mouse']
+        daily_metrics = result['daily_metrics']
+        
+        # Create subplot
+        ax = fig.add_subplot(n_rows, n_cols, idx + 1)
+        
+        # Plot scatter points
+        ax.scatter(daily_metrics['reward_count'], daily_metrics['avg_speed'], alpha=0.6)
+        
+        # Add trend line
+        z = np.polyfit(daily_metrics['reward_count'], daily_metrics['avg_speed'], 1)
+        p = np.poly1d(z)
+        ax.plot(daily_metrics['reward_count'], p(daily_metrics['reward_count']), "r--", alpha=0.8)
+        
+        # Add labels and title with adjusted font sizes
+        ax.set_xlabel('Number of Rewards', fontsize=10)
+        ax.set_ylabel('Average Speed', fontsize=10)
+        ax.set_title(f'Mouse {mouse}\nr = {corr_data["reward_vs_speed_correlation"]:.3f}\np = {corr_data["reward_vs_speed_p_value"]:.3f}',
+                    fontsize=11, pad=10)
+        
+        # Adjust tick label sizes
+        ax.tick_params(axis='both', which='major', labelsize=9)
+        
+        # Add grid
+        ax.grid(True, linestyle='--', alpha=0.7)
+    
+    plt.show()
+    
+    # Ask user if they want to save the plot
+    save_plot = messagebox.askyesno("Save Plot", "Would you like to save the speed correlation plot?")
+    if save_plot:
+        save_path = filedialog.asksaveasfilename(
+            defaultextension=".svg",
+            initialfile='speed_correlation_plots_all_mice.svg',
+            title="Save Speed Correlation Plot As",
             filetypes=[("SVG files", "*.svg"), ("All files", "*.*")]
         )
         if save_path:
@@ -367,15 +443,19 @@ def calculate_correlations(all_results):
                 if len(valid_data) >= 2:  # Need at least 2 points for correlation
                     # Calculate correlations between daily rewards and percent weight loss
                     corr_rewards = stats.pearsonr(valid_data['reward_count'], valid_data['Value'])
+                    # Calculate correlations between speed and rewards
+                    corr_speed = stats.pearsonr(valid_data['reward_count'], valid_data['avg_speed'])
                     print("\nCorrelation based on valid data points:")
-                    print(valid_data[['day', 'reward_count', 'Value']].to_string())
+                    print(valid_data[['day', 'reward_count', 'Value', 'avg_speed']].to_string())
                 else:
                     print("\nWARNING: Not enough valid data points for correlation")
                 
                 correlations.append({
                     'mouse': mouse,
                     'reward_vs_weight_loss_correlation': corr_rewards[0],
-                    'reward_vs_weight_loss_p_value': corr_rewards[1]
+                    'reward_vs_weight_loss_p_value': corr_rewards[1],
+                    'reward_vs_speed_correlation': corr_speed[0],
+                    'reward_vs_speed_p_value': corr_speed[1]
                 })
     
     return pd.DataFrame(correlations)
@@ -426,6 +506,10 @@ def main():
             print(f"Average daily rewards: {result['daily_metrics']['reward_count'].mean():.2f}")
             print(f"Max daily rewards: {result['daily_metrics']['reward_count'].max()}")
             print(f"Min daily rewards: {result['daily_metrics']['reward_count'].min()}")
+            print(f"\nTreadmill speed summary:")
+            print(f"Average speed: {result['daily_metrics']['avg_speed'].mean():.2f}")
+            print(f"Max speed: {result['daily_metrics']['avg_speed'].max():.2f}")
+            print(f"Min speed: {result['daily_metrics']['avg_speed'].min():.2f}")
             
             if result['cohort_metrics'] is not None:
                 # Get only valid weight measurements (non-NaN)
@@ -553,8 +637,17 @@ def main():
             print("\nCorrelation Results:")
             print(correlations_df.to_string(index=False))
             
-            # Create correlation subplots
+            # Create weight loss correlation subplots
             create_correlation_subplots(all_results, correlations_df.to_dict('records'))
+            
+            # Create speed correlation subplots
+            create_speed_correlation_subplots(all_results, correlations_df.to_dict('records'))
+            
+            # Print speed correlation results
+            print("\nSpeed vs Reward Correlation Results:")
+            print("Mouse\tCorrelation\tP-value")
+            for _, row in correlations_df.iterrows():
+                print(f"{row['mouse']}\t{row['reward_vs_speed_correlation']:.3f}\t{row['reward_vs_speed_p_value']:.3f}")
     else:
         print("No behavior files selected. Exiting...")
 
