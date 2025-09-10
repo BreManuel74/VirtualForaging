@@ -27,7 +27,7 @@ def get_behavioral_start_day():
             "Behavioral Data Start Day",
             "Enter the cohort day number when behavioral data starts:\n(e.g., if training day 0 = citric acid day 19, enter 19)",
             initialvalue=19)
-        print(f"Behavioral data starts at cohort day: {answer}")
+        #print(f"Behavioral data starts at cohort day: {answer}")
         return answer
     except Exception as e:
         print(f"Error getting behavioral start day: {e}")
@@ -76,8 +76,8 @@ def load_cohort_data(file_path):
     melted_df = melted_df.sort_values(['ID', 'Day'])
     
     # Print day range for verification
-    print(f"\nCohort data day range after alignment: {melted_df['Day'].min()} to {melted_df['Day'].max()}")
-    print("Note: Day 0 corresponds to the first day in the behavioral data")
+    # print(f"\nCohort data day range after alignment: {melted_df['Day'].min()} to {melted_df['Day'].max()}")
+    # print("Note: Day 0 corresponds to the first day in the behavioral data")
     
     return melted_df
 
@@ -100,21 +100,21 @@ def analyze_mouse_data(behavior_files, cohort_files):
         unique_mice['Sex'] = unique_mice['Sex'].astype(str).str.strip()
         sex_map = unique_mice.set_index('ID')['Sex'].to_dict()
         
-        print("\nSex mapping:")
-        for mouse_id, sex in sex_map.items():
-            print(f"Mouse {mouse_id}: Sex = {sex}")
+        # print("\nSex mapping:")
+        # for mouse_id, sex in sex_map.items():
+        #     print(f"Mouse {mouse_id}: Sex = {sex}")
         
         # Create markers based on sex ('s' for Male/M, 'o' for Female/F)
         markers = {}
-        print("\nCreating markers for each mouse:")
+        # print("\nCreating markers for each mouse:")
         for mouse_id, sex in sex_map.items():
-            print(f"Processing {mouse_id}: Original sex value = '{sex}'")
+            #print(f"Processing {mouse_id}: Original sex value = '{sex}'")
             sex_upper = sex.upper()
-            print(f"  Uppercase value = '{sex_upper}'")
+            #print(f"  Uppercase value = '{sex_upper}'")
             is_male = sex_upper.startswith('M')
-            print(f"  Starts with M? {is_male}")
+            #print(f"  Starts with M? {is_male}")
             markers[mouse_id] = 's' if is_male else 'o'
-            print(f"  Setting {mouse_id} as {'male' if is_male else 'female'} with marker {'square' if is_male else 'circle'}")
+            #print(f"  Setting {mouse_id} as {'male' if is_male else 'female'} with marker {'square' if is_male else 'circle'}")
     
     # Combine all cohort data
     if cohort_data:
@@ -126,13 +126,14 @@ def analyze_mouse_data(behavior_files, cohort_files):
     for idx, data_file in enumerate(behavior_files):
         # Read the combined data file
         df = pd.read_csv(data_file, index_col='timestamp')
-        
-        print(f"Reading data from: {data_file}")
-        
+
+        #print(f"Reading data from: {data_file}")
+
         # Initialize lists to store results
         dates = []
         reward_counts = []
         avg_speeds = []
+        lick_counts = []
         
         # Process each date's data
         for timestamp, row in df.iterrows():
@@ -145,6 +146,24 @@ def analyze_mouse_data(behavior_files, cohort_files):
                 # Calculate average speed (excluding NaN values)
                 avg_speed = treadmill_data['speed'].mean()
                 
+                # Read capacitive data and perform z-score normalization
+                capacitive_data = pd.read_csv(row['capacitive'])
+                capacitive_values = capacitive_data['capacitive_value']
+                
+                # Calculate z-score: z = (x - μ) / σ
+                z_scores = (capacitive_values - capacitive_values.mean()) / capacitive_values.std()
+                
+                # Binarize the data based on z-score threshold of 3
+                binary_data = (z_scores > 3).astype(int)
+                
+                # Count lick bouts (transitions from 0 to 1)
+                # Convert to numpy array for easier manipulation
+                binary_array = binary_data.values
+                # Find where values change (True where value changes, False where it stays the same)
+                transitions = np.diff(binary_array, prepend=0)
+                # Count only 0->1 transitions (positive changes)
+                lick_count = np.sum(transitions == 1)
+                
                 # Convert Unix timestamp to datetime
                 date = datetime.fromtimestamp(int(timestamp))
                 
@@ -155,6 +174,7 @@ def analyze_mouse_data(behavior_files, cohort_files):
                 dates.append(date)
                 reward_counts.append(reward_count)
                 avg_speeds.append(avg_speed)
+                lick_counts.append(lick_count)
                 
             except Exception as e:
                 print(f"Error processing date {timestamp}: {str(e)}")
@@ -167,23 +187,15 @@ def analyze_mouse_data(behavior_files, cohort_files):
         daily_df = pd.DataFrame({
             'day': range(len(dates)),
             'reward_count': reward_counts,
-            'avg_speed': avg_speeds
+            'avg_speed': avg_speeds,
+            'lick_count': lick_counts
         })
         
         # Get cohort data for this mouse if available
         cohort_metrics = None
         if combined_cohort_data is not None:
-            print(f"\nChecking cohort data alignment for mouse {mouse_name}:")
+            #print(f"\nChecking cohort data alignment for mouse {mouse_name}:")
             cohort_metrics = combined_cohort_data[combined_cohort_data['ID'] == mouse_name]
-            if len(cohort_metrics) > 0:
-                # Count only non-NaN weight measurements
-                valid_measurements = cohort_metrics['Value'].notna().sum()
-                print(f"Found matching cohort data: {valid_measurements} valid measurements")
-                valid_days = cohort_metrics[cohort_metrics['Value'].notna()]['Day']
-                if len(valid_days) > 0:
-                    print(f"Cohort data day range: {valid_days.min()} to {valid_days.max()}")
-            else:
-                print("WARNING: No matching cohort data found for this mouse!")
         
         # Store results for this mouse
         all_results.append({
@@ -235,6 +247,74 @@ def plot_correlation(valid_data, mouse, corr_coef, p_value):
             defaultextension=".svg",
             initialfile=f'correlation_weight_and_rewards_{mouse}.svg',
             title="Save Plot As",
+            filetypes=[("SVG files", "*.svg"), ("All files", "*.*")]
+        )
+        if save_path:
+            fig.savefig(save_path, format='svg', dpi=300, bbox_inches='tight')
+    
+    plt.close(fig)
+
+def create_lick_correlation_subplots(all_results, correlations_list):
+    """Create a single figure with lick count vs reward correlation subplots for all mice."""
+    # Set global font parameters
+    plt.rcParams['font.family'] = 'sans-serif'
+    plt.rcParams['font.sans-serif'] = ['Arial']
+    plt.rcParams['svg.fonttype'] = 'none'
+    
+    # Count mice with valid data for subplot layout
+    n_mice = len(all_results)
+    
+    if n_mice == 0:
+        return
+    
+    # Calculate optimal subplot layout
+    if n_mice <= 4:
+        n_cols = min(2, n_mice)
+    else:
+        n_cols = 3  # Use 3 columns for 5 or more mice
+    
+    n_rows = (n_mice + n_cols - 1) // n_cols
+    
+    # Create figure with subplots
+    fig = plt.figure(figsize=(8*n_cols, 6*n_rows))
+    plt.subplots_adjust(hspace=0.5, wspace=0.4)
+    
+    for idx, (result, corr_data) in enumerate(zip(all_results, correlations_list)):
+        mouse = result['mouse']
+        daily_metrics = result['daily_metrics']
+        
+        # Create subplot
+        ax = fig.add_subplot(n_rows, n_cols, idx + 1)
+        
+        # Plot scatter points
+        ax.scatter(daily_metrics['reward_count'], daily_metrics['lick_count'], alpha=0.6)
+        
+        # Add trend line
+        z = np.polyfit(daily_metrics['reward_count'], daily_metrics['lick_count'], 1)
+        p = np.poly1d(z)
+        ax.plot(daily_metrics['reward_count'], p(daily_metrics['reward_count']), "r--", alpha=0.8)
+        
+        # Add labels and title with adjusted font sizes
+        ax.set_xlabel('Number of Rewards', fontsize=10)
+        ax.set_ylabel('Number of Licks', fontsize=10)
+        ax.set_title(f'Mouse {mouse}\nr = {corr_data["reward_vs_lick_correlation"]:.3f}\np = {corr_data["reward_vs_lick_p_value"]:.3f}',
+                    fontsize=11, pad=10)
+        
+        # Adjust tick label sizes
+        ax.tick_params(axis='both', which='major', labelsize=9)
+        
+        # Add grid
+        ax.grid(True, linestyle='--', alpha=0.7)
+    
+    plt.show()
+    
+    # Ask user if they want to save the plot
+    save_plot = messagebox.askyesno("Save Plot", "Would you like to save the lick correlation plot?")
+    if save_plot:
+        save_path = filedialog.asksaveasfilename(
+            defaultextension=".svg",
+            initialfile='lick_correlation_plots_all_mice.svg',
+            title="Save Lick Correlation Plot As",
             filetypes=[("SVG files", "*.svg"), ("All files", "*.*")]
         )
         if save_path:
@@ -402,11 +482,11 @@ def calculate_correlations(all_results):
         cohort_metrics = result['cohort_metrics']
         
         if cohort_metrics is not None:
-            print(f"\nAnalyzing correlations for mouse {mouse}:")
+            # print(f"\nAnalyzing correlations for mouse {mouse}:")
             
-            print("\nDetailed data points before merging:")
-            print("Behavioral data days:", daily_metrics['day'].tolist())
-            print("Weight data days:", cohort_metrics['Day'].tolist())
+            # print("\nDetailed data points before merging:")
+            # print("Behavioral data days:", daily_metrics['day'].tolist())
+            # print("Weight data days:", cohort_metrics['Day'].tolist())
             
             # Match days between behavioral and cohort data
             merged_data = pd.merge(
@@ -417,12 +497,12 @@ def calculate_correlations(all_results):
                 how='inner'
             )
             
-            print(f"\nNumber of days with both behavioral and weight data: {len(merged_data)}")
-            print("Days that have both behavioral and weight data:", merged_data['day'].tolist())
+            # print(f"\nNumber of days with both behavioral and weight data: {len(merged_data)}")
+            # print("Days that have both behavioral and weight data:", merged_data['day'].tolist())
             
             if not merged_data.empty:
-                print("\nDetailed matched data:")
-                print(merged_data[['day', 'reward_count', 'Value']].to_string())
+                # print("\nDetailed matched data:")
+                # print(merged_data[['day', 'reward_count', 'Value']].to_string())
                 # Ensure numeric data types for correlation
                 reward_counts = merged_data['reward_count'].astype(float)
                 weight_loss = merged_data['Value'].astype(float)
@@ -433,8 +513,8 @@ def calculate_correlations(all_results):
                 if nan_rewards > 0 or nan_weights > 0:
                     print(f"WARNING: Found {nan_rewards} NaN values in rewards and {nan_weights} NaN values in weight loss")
                 
-                print("\nMatched data points:")
-                print(merged_data[['day', 'reward_count', 'Value']].to_string())
+                # print("\nMatched data points:")
+                # print(merged_data[['day', 'reward_count', 'Value']].to_string())
                 
                 # Remove rows with NaN values
                 valid_data = merged_data.dropna()
@@ -445,8 +525,10 @@ def calculate_correlations(all_results):
                     corr_rewards = stats.pearsonr(valid_data['reward_count'], valid_data['Value'])
                     # Calculate correlations between speed and rewards
                     corr_speed = stats.pearsonr(valid_data['reward_count'], valid_data['avg_speed'])
-                    print("\nCorrelation based on valid data points:")
-                    print(valid_data[['day', 'reward_count', 'Value', 'avg_speed']].to_string())
+                    # Calculate correlations between licks and rewards
+                    corr_licks = stats.pearsonr(valid_data['reward_count'], valid_data['lick_count'])
+                    # print("\nCorrelation based on valid data points:")
+                    # print(valid_data[['day', 'reward_count', 'Value', 'avg_speed', 'lick_count']].to_string())
                 else:
                     print("\nWARNING: Not enough valid data points for correlation")
                 
@@ -455,7 +537,9 @@ def calculate_correlations(all_results):
                     'reward_vs_weight_loss_correlation': corr_rewards[0],
                     'reward_vs_weight_loss_p_value': corr_rewards[1],
                     'reward_vs_speed_correlation': corr_speed[0],
-                    'reward_vs_speed_p_value': corr_speed[1]
+                    'reward_vs_speed_p_value': corr_speed[1],
+                    'reward_vs_lick_correlation': corr_licks[0],
+                    'reward_vs_lick_p_value': corr_licks[1]
                 })
     
     return pd.DataFrame(correlations)
@@ -497,28 +581,32 @@ def main():
         for result in all_results:
             mouse = result['mouse']
             dates = result['dates']
-            print(f"\nMouse: {mouse}")
-            print(f"Number of days: {len(dates)}")
-            print(f"Date range: {min(dates)} to {max(dates)}")
+            # print(f"\nMouse: {mouse}")
+            # print(f"Number of days: {len(dates)}")
+            # print(f"Date range: {min(dates)} to {max(dates)}")
             
-            # Print data summary
-            print("\nBehavioral data summary:")
-            print(f"Average daily rewards: {result['daily_metrics']['reward_count'].mean():.2f}")
-            print(f"Max daily rewards: {result['daily_metrics']['reward_count'].max()}")
-            print(f"Min daily rewards: {result['daily_metrics']['reward_count'].min()}")
-            print(f"\nTreadmill speed summary:")
-            print(f"Average speed: {result['daily_metrics']['avg_speed'].mean():.2f}")
-            print(f"Max speed: {result['daily_metrics']['avg_speed'].max():.2f}")
-            print(f"Min speed: {result['daily_metrics']['avg_speed'].min():.2f}")
+            # # Print data summary
+            # print("\nBehavioral data summary:")
+            # print(f"Average daily rewards: {result['daily_metrics']['reward_count'].mean():.2f}")
+            # print(f"Max daily rewards: {result['daily_metrics']['reward_count'].max()}")
+            # print(f"Min daily rewards: {result['daily_metrics']['reward_count'].min()}")
+            # print(f"\nTreadmill speed summary:")
+            # print(f"Average speed: {result['daily_metrics']['avg_speed'].mean():.2f}")
+            # print(f"Max speed: {result['daily_metrics']['avg_speed'].max():.2f}")
+            # print(f"Min speed: {result['daily_metrics']['avg_speed'].min():.2f}")
+            # print(f"\nLick count summary:")
+            # print(f"Average daily licks: {result['daily_metrics']['lick_count'].mean():.2f}")
+            # print(f"Max daily licks: {result['daily_metrics']['lick_count'].max()}")
+            # print(f"Min daily licks: {result['daily_metrics']['lick_count'].min()}")
             
             if result['cohort_metrics'] is not None:
                 # Get only valid weight measurements (non-NaN)
                 valid_weights = result['cohort_metrics']['Value'].dropna()
-                print("\nCohort data (percent weight loss) summary:")
-                print("Number of weight measurements:", len(valid_weights))
-                print(f"Average weight loss %: {valid_weights.mean():.2f}")
-                print(f"Max weight loss %: {valid_weights.max():.2f}")
-                print(f"Min weight loss %: {valid_weights.min():.2f}")
+                # print("\nCohort data (percent weight loss) summary:")
+                # print("Number of weight measurements:", len(valid_weights))
+                # print(f"Average weight loss %: {valid_weights.mean():.2f}")
+                # print(f"Max weight loss %: {valid_weights.max():.2f}")
+                # print(f"Min weight loss %: {valid_weights.min():.2f}")
         
         # Create summary dataframes
         summary_data = []
@@ -634,8 +722,8 @@ def main():
         
         # Print correlation results
         if len(correlations_df) > 0:
-            print("\nCorrelation Results:")
-            print(correlations_df.to_string(index=False))
+            # print("\nCorrelation Results:")
+            # print(correlations_df.to_string(index=False))
             
             # Create weight loss correlation subplots
             create_correlation_subplots(all_results, correlations_df.to_dict('records'))
@@ -643,11 +731,20 @@ def main():
             # Create speed correlation subplots
             create_speed_correlation_subplots(all_results, correlations_df.to_dict('records'))
             
-            # Print speed correlation results
-            print("\nSpeed vs Reward Correlation Results:")
-            print("Mouse\tCorrelation\tP-value")
-            for _, row in correlations_df.iterrows():
-                print(f"{row['mouse']}\t{row['reward_vs_speed_correlation']:.3f}\t{row['reward_vs_speed_p_value']:.3f}")
+            # Create lick count correlation subplots
+            create_lick_correlation_subplots(all_results, correlations_df.to_dict('records'))
+            
+            # # Print speed correlation results
+            # print("\nSpeed vs Reward Correlation Results:")
+            # print("Mouse\tCorrelation\tP-value")
+            # for _, row in correlations_df.iterrows():
+            #     print(f"{row['mouse']}\t{row['reward_vs_speed_correlation']:.3f}\t{row['reward_vs_speed_p_value']:.3f}")
+            
+            # # Print lick correlation results
+            # print("\nLick Count vs Reward Correlation Results:")
+            # print("Mouse\tCorrelation\tP-value")
+            # for _, row in correlations_df.iterrows():
+            #     print(f"{row['mouse']}\t{row['reward_vs_lick_correlation']:.3f}\t{row['reward_vs_lick_p_value']:.3f}")
     else:
         print("No behavior files selected. Exiting...")
 
