@@ -1083,6 +1083,9 @@ class TCPStreamClient(DirectObject.DirectObject):
         self.connection_thread = None
         self._shutdown_lock = threading.Lock()
         self._running = True
+        self.trial_df = self.base.trial_df
+        self.trial_df.to_csv = self.base.trial_df.to_csv 
+        self.trial_csv_path = self.base.trial_csv_path
         
         if self.port == 0:
             print("Warning: No TCP server port specified. TCP client disabled.")
@@ -1210,6 +1213,9 @@ class TCPStreamClient(DirectObject.DirectObject):
             old_config = self.base.cfg.copy()
             self.base.cfg.update(new_config)
             
+            # Regenerate distributions if they exist in the new config
+            self._update_distributions_from_config()
+            
             # Reload corridor with new configuration if needed
             self._reload_corridor_config()
             
@@ -1245,6 +1251,12 @@ class TCPStreamClient(DirectObject.DirectObject):
             corridor.right_wall_texture = self.base.cfg.get("right_wall_texture", corridor.right_wall_texture)
             corridor.floor_texture = self.base.cfg.get("floor_texture", corridor.floor_texture)
             corridor.ceiling_texture = self.base.cfg.get("ceiling_texture", corridor.ceiling_texture)
+            
+            # Update probe/neutral stimuli textures
+            corridor.neutral_stim_1 = self.base.cfg.get("neutral_stim_1", corridor.neutral_stim_1)
+            corridor.neutral_stim_2 = self.base.cfg.get("neutral_stim_2", corridor.neutral_stim_2)
+            corridor.neutral_stim_3 = self.base.cfg.get("neutral_stim_3", corridor.neutral_stim_3)
+            corridor.neutral_stim_4 = self.base.cfg.get("neutral_stim_4", corridor.neutral_stim_4)
 
             # Update MousePortal-level configuration settings (only attributes that exist on MousePortal)
             if hasattr(self.base, 'reward_time'):
@@ -1270,6 +1282,83 @@ class TCPStreamClient(DirectObject.DirectObject):
             
         except Exception as e:
             print(f"Error reloading corridor configuration: {e}")
+    
+    def _update_distributions_from_config(self):
+        """
+        Update hallway and zone distributions from the current config, overriding existing arrays.
+        Preserves logged history in the DataFrame CSV file.
+        """
+        try:
+            # Check if distribution parameters exist in config
+            has_base_hallway = "base_hallway_distribution" in self.base.cfg
+            has_stay_zone = "stay_zone_distribution" in self.base.cfg
+            has_go_zone = "go_zone_distribution" in self.base.cfg
+            
+            if not (has_base_hallway or has_stay_zone or has_go_zone):
+                return  # No distribution parameters to update
+            
+            # Initialize DataGenerator if not already present
+            if not hasattr(self.base, 'data_generator'):
+                self.base.data_generator = DataGenerator(self.base.cfg)
+            else:
+                # Update the config reference in existing data generator
+                self.base.data_generator.config = self.base.cfg
+            
+            # Generate new distributions (override, don't append)
+            if has_base_hallway:
+                self.base.rounded_base_hallway_data = self.base.data_generator.generate_gaussian_data(
+                    "base_hallway_distribution", 
+                    min_value=self.base.cfg.get("base_hallway_min_value")
+                )
+                # Update corridor's reference
+                self.base.corridor.rounded_base_hallway_data = self.base.rounded_base_hallway_data
+            
+            if has_stay_zone:
+                self.base.rounded_stay_data = self.base.data_generator.generate_gaussian_data(
+                    "stay_zone_distribution", 
+                    min_value=self.base.cfg.get("stay_zone_min_value")
+                )
+                # Update corridor's reference
+                self.base.corridor.rounded_stay_data = self.base.rounded_stay_data
+                #print(f"Updated stay_zone distribution. Length: {len(self.base.rounded_stay_data)}")
+            
+            if has_go_zone:
+                self.base.rounded_go_data = self.base.data_generator.generate_gaussian_data(
+                    "go_zone_distribution", 
+                    min_value=self.base.cfg.get("go_zone_min_value")
+                )
+                # Update corridor's reference
+                self.base.corridor.rounded_go_data = self.base.rounded_go_data
+                #print(f"Updated go_zone distribution. Length: {len(self.base.rounded_go_data)}")
+            
+            # Append the new distribution data to the existing data in the DataFrame
+            current_base_len = len(self.trial_df[pd.notna(self.trial_df['rounded_base_hallway_data'])])
+            current_stay_len = len(self.trial_df[pd.notna(self.trial_df['rounded_stay_data'])])
+            current_go_len = len(self.trial_df[pd.notna(self.trial_df['rounded_go_data'])])
+            
+            # For base hallway data
+            if has_base_hallway:
+                end_idx = current_base_len + len(self.base.rounded_base_hallway_data)
+                self.trial_df.loc[current_base_len:end_idx-1, 'rounded_base_hallway_data'] = self.base.rounded_base_hallway_data
+            
+            # For stay zone data
+            if has_stay_zone:
+                end_idx = current_stay_len + len(self.base.rounded_stay_data)
+                self.trial_df.loc[current_stay_len:end_idx-1, 'rounded_stay_data'] = self.base.rounded_stay_data
+            
+            # For go zone data
+            if has_go_zone:
+                end_idx = current_go_len + len(self.base.rounded_go_data)
+                self.trial_df.loc[current_go_len:end_idx-1, 'rounded_go_data'] = self.base.rounded_go_data
+            
+            # Save the updated dataframe with appended distributions
+            self.trial_df.to_csv(self.trial_csv_path, index=False)
+            
+            print("Distribution update from config completed successfully")
+            
+        except Exception as e:
+            print(f"Error updating distributions from config: {e}")
+    
     
     def close(self):
         """Close the TCP connection with proper thread cleanup."""
@@ -1342,6 +1431,10 @@ class MousePortal(ShowBase):
        # Initialize the DataGenerator
         data_generator = DataGenerator(self.cfg)
 
+        self.rounded_base_hallway_data = np.array([], dtype=int)
+        self.rounded_stay_data = np.array([], dtype=int)
+        self.rounded_go_data = np.array([], dtype=int)
+
         # Generate Gaussian data using min_value from the configuration
         self.rounded_base_hallway_data = data_generator.generate_gaussian_data(
             "base_hallway_distribution", 
@@ -1368,6 +1461,7 @@ class MousePortal(ShowBase):
         self.probe_time_history = np.array([], dtype=float)
         self.puff_history = np.array([], dtype=float)
         self.reward_history = np.array([], dtype=float)
+
         trial_df = pd.DataFrame({
             'rounded_base_hallway_data': np.full(max_trials, np.nan),
             'rounded_stay_data': np.full(max_trials, np.nan),
@@ -1384,6 +1478,23 @@ class MousePortal(ShowBase):
         })
         trial_df.to_csv(self.trial_csv_path, index=False)
         self.trial_df = trial_df
+
+        # Save initial distributions to the dataframe
+        # Extend arrays to match dataframe length if needed
+        base_data = np.full(len(self.trial_df), np.nan)
+        base_data[:len(self.rounded_base_hallway_data)] = self.rounded_base_hallway_data
+        self.trial_df['rounded_base_hallway_data'] = base_data
+        
+        stay_data = np.full(len(self.trial_df), np.nan)
+        stay_data[:len(self.rounded_stay_data)] = self.rounded_stay_data
+        self.trial_df['rounded_stay_data'] = stay_data
+        
+        go_data = np.full(len(self.trial_df), np.nan)
+        go_data[:len(self.rounded_go_data)] = self.rounded_go_data
+        self.trial_df['rounded_go_data'] = go_data
+        
+        # Save the updated dataframe with initial distributions
+        self.trial_df.to_csv(self.trial_csv_path, index=False)
 
         # Retrieve the reward_amount and batch_id from the configuration
         reward_amount = self.cfg.get("reward_amount", 0.0)
