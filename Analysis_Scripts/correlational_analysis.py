@@ -279,6 +279,21 @@ def create_lick_correlation_subplots(all_results, correlations_list):
     fig = plt.figure(figsize=(8*n_cols, 6*n_rows))
     plt.subplots_adjust(hspace=0.5, wspace=0.4)
     
+    # First determine global axis limits
+    all_rewards = []
+    all_licks = []
+    for result in all_results:
+        all_rewards.extend(result['daily_metrics']['reward_count'])
+        all_licks.extend(result['daily_metrics']['lick_count'])
+    
+    x_min, x_max = min(all_rewards), max(all_rewards)
+    y_min, y_max = min(all_licks), max(all_licks)
+    # Add 5% padding to the limits
+    x_pad = (x_max - x_min) * 0.05
+    y_pad = (y_max - y_min) * 0.05
+    x_limits = [x_min - x_pad, x_max + x_pad]
+    y_limits = [y_min - y_pad, y_max + y_pad]
+    
     for idx, (result, corr_data) in enumerate(zip(all_results, correlations_list)):
         mouse = result['mouse']
         daily_metrics = result['daily_metrics']
@@ -287,7 +302,18 @@ def create_lick_correlation_subplots(all_results, correlations_list):
         ax = fig.add_subplot(n_rows, n_cols, idx + 1)
         
         # Plot scatter points
-        ax.scatter(daily_metrics['reward_count'], daily_metrics['lick_count'], alpha=0.6)
+        scatter = ax.scatter(daily_metrics['reward_count'], daily_metrics['lick_count'], alpha=0.6)
+        
+        # Set consistent axis limits
+        ax.set_xlim(x_limits)
+        ax.set_ylim(y_limits)
+        
+        # Add day labels to each point
+        for i, txt in enumerate(daily_metrics['day']):
+            ax.annotate(f"d{txt + 1}", 
+                       (daily_metrics['reward_count'].iloc[i], daily_metrics['lick_count'].iloc[i]),
+                       xytext=(5, 5), textcoords='offset points', 
+                       fontsize=8, alpha=0.7)
         
         # Add trend line
         z = np.polyfit(daily_metrics['reward_count'], daily_metrics['lick_count'], 1)
@@ -347,6 +373,21 @@ def create_speed_correlation_subplots(all_results, correlations_list):
     fig = plt.figure(figsize=(8*n_cols, 6*n_rows))
     plt.subplots_adjust(hspace=0.5, wspace=0.4)
     
+    # First determine global axis limits
+    all_rewards = []
+    all_speeds = []
+    for result in all_results:
+        all_rewards.extend(result['daily_metrics']['reward_count'])
+        all_speeds.extend(result['daily_metrics']['avg_speed'])
+    
+    x_min, x_max = min(all_rewards), max(all_rewards)
+    y_min, y_max = min(all_speeds), max(all_speeds)
+    # Add 5% padding to the limits
+    x_pad = (x_max - x_min) * 0.05
+    y_pad = (y_max - y_min) * 0.05
+    x_limits = [x_min - x_pad, x_max + x_pad]
+    y_limits = [y_min - y_pad, y_max + y_pad]
+    
     for idx, (result, corr_data) in enumerate(zip(all_results, correlations_list)):
         mouse = result['mouse']
         daily_metrics = result['daily_metrics']
@@ -355,7 +396,18 @@ def create_speed_correlation_subplots(all_results, correlations_list):
         ax = fig.add_subplot(n_rows, n_cols, idx + 1)
         
         # Plot scatter points
-        ax.scatter(daily_metrics['reward_count'], daily_metrics['avg_speed'], alpha=0.6)
+        scatter = ax.scatter(daily_metrics['reward_count'], daily_metrics['avg_speed'], alpha=0.6)
+        
+        # Set consistent axis limits
+        ax.set_xlim(x_limits)
+        ax.set_ylim(y_limits)
+        
+        # Add day labels to each point
+        for i, txt in enumerate(daily_metrics['day']):
+            ax.annotate(f"d{txt + 1}", 
+                       (daily_metrics['reward_count'].iloc[i], daily_metrics['avg_speed'].iloc[i]),
+                       xytext=(5, 5), textcoords='offset points', 
+                       fontsize=8, alpha=0.7)
         
         # Add trend line
         z = np.polyfit(daily_metrics['reward_count'], daily_metrics['avg_speed'], 1)
@@ -419,6 +471,31 @@ def create_correlation_subplots(all_results, correlations_list):
     # Increase spacing between subplots
     plt.subplots_adjust(hspace=0.5, wspace=0.4)
     
+    # First determine global axis limits
+    all_rewards = []
+    all_weights = []
+    for result in valid_mice:
+        merged_data = pd.merge(
+            result['daily_metrics'],
+            result['cohort_metrics'],
+            left_on='day',
+            right_on='Day',
+            how='inner'
+        )
+        valid_data = merged_data.dropna()
+        if len(valid_data) >= 2:
+            all_rewards.extend(valid_data['reward_count'])
+            all_weights.extend(valid_data['Value'])
+    
+    if all_rewards and all_weights:  # Only if we have valid data
+        x_min, x_max = min(all_rewards), max(all_rewards)
+        y_min, y_max = min(all_weights), max(all_weights)
+        # Add 5% padding to the limits
+        x_pad = (x_max - x_min) * 0.05
+        y_pad = (y_max - y_min) * 0.05
+        x_limits = [x_min - x_pad, x_max + x_pad]
+        y_limits = [y_min - y_pad, y_max + y_pad]
+    
     for idx, (result, corr_data) in enumerate(zip(valid_mice, correlations_list)):
         mouse = result['mouse']
         # Get correlation data
@@ -436,7 +513,19 @@ def create_correlation_subplots(all_results, correlations_list):
             ax = fig.add_subplot(n_rows, n_cols, idx + 1)
             
             # Plot scatter points
-            ax.scatter(valid_data['reward_count'], valid_data['Value'], alpha=0.6)
+            scatter = ax.scatter(valid_data['reward_count'], valid_data['Value'], alpha=0.6)
+            
+            # Set consistent axis limits if we have valid data
+            if all_rewards and all_weights:
+                ax.set_xlim(x_limits)
+                ax.set_ylim(y_limits)
+            
+            # Add day labels to each point
+            for i, txt in enumerate(valid_data['day']):
+                ax.annotate(f"d{txt + 1}", 
+                           (valid_data['reward_count'].iloc[i], valid_data['Value'].iloc[i]),
+                           xytext=(5, 5), textcoords='offset points', 
+                           fontsize=8, alpha=0.7)
             
             # Add trend line
             z = np.polyfit(valid_data['reward_count'], valid_data['Value'], 1)
@@ -445,7 +534,7 @@ def create_correlation_subplots(all_results, correlations_list):
             
             # Add labels and title with adjusted font sizes
             ax.set_xlabel('Number of Rewards', fontsize=10)
-            ax.set_ylabel('Weight Loss (%)', fontsize=10)
+            ax.set_ylabel('Body Weight Change (%)', fontsize=10)
             ax.set_title(f'Mouse {mouse}\nr = {corr_data["reward_vs_weight_loss_correlation"]:.3f}\np = {corr_data["reward_vs_weight_loss_p_value"]:.3f}',
                         fontsize=11, pad=10)  # Add padding to title
             
