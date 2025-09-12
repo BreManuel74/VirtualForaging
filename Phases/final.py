@@ -31,6 +31,10 @@ import serial
 import random
 import subprocess
 import sys
+import socket
+import threading
+import signal
+import atexit
 import numpy as np
 from typing import Any, Dict
 from dataclasses import dataclass
@@ -39,6 +43,7 @@ from datetime import datetime
 from direct.showbase.ShowBase import ShowBase
 from direct.task import Task
 from panda3d.core import CardMaker, NodePath, Texture, WindowProperties, Fog, GraphicsPipe
+from panda3d.core import StreamReader, ConnectionManager, NetAddress
 from direct.showbase import DirectObject
 from direct.fsm.FSM import FSM
 import pandas as pd
@@ -287,7 +292,8 @@ class Corridor:
         self.probe_duration = config["probe_duration"]
         self.probe_probability = config.get("probe_probability", 1.0)  # Default to 100% if not specified
         self.stop_texture_probability = config.get("stop_texture_probability", 0.5)  # Default to 50% if not specified
-        
+        self.probe = config.get("probe", False)  # Default to False if not specified
+
         # Create a parent node for all corridor segments.
         self.parent: NodePath = base.render.attachNewNode("corridor")
         
@@ -563,9 +569,9 @@ class Corridor:
             self.apply_texture(left_node, self.left_wall_texture)
         for right_node in self.right_segments:
             self.apply_texture(right_node, self.right_wall_texture)
-        
-        #Conditional to make probe optional
-        if self.base.cfg.get("probe", True):
+
+        # Conditional to make probe optional
+        if self.probe:
             # Configurable chance of calling the probe function
             if random.random() < self.probe_probability:
                 # Schedule a task to change the wall textures temporarily after reverting
@@ -1053,6 +1059,350 @@ class RewardCalculator:
             print(f"Error calculating x for y={y}, slope={slope}, intercept={intercept}: {e}")
             return None
 
+class TCPStreamClient(DirectObject.DirectObject):
+    """
+    TCP client to receive data from run_me.py TCP server.
+    Handles dynamic level changing and other commands.
+    Thread-safe with proper cleanup mechanisms.
+    """
+    def __init__(self, base: ShowBase, host='localhost', port=None):
+        """
+        Initialize the TCP client.
+        
+        Args:
+            base: The Panda3D ShowBase instance
+            host: Server hostname (default: localhost)
+            port: Server port (read from TCP_SERVER_PORT environment variable if not provided)
+        """
+        self.base = base
+        self.host = host
+        self.port = port or int(os.environ.get("TCP_SERVER_PORT", "0"))
+        self.socket = None
+        self.connected = False
+        self.receive_buffer = ""
+        self.connection_thread = None
+        self._shutdown_lock = threading.Lock()
+        self._running = True
+        self.trial_df = self.base.trial_df
+        self.trial_df.to_csv = self.base.trial_df.to_csv 
+        self.trial_csv_path = self.base.trial_csv_path
+        
+        if self.port == 0:
+            print("Warning: No TCP server port specified. TCP client disabled.")
+            return
+            
+        # Start connection in a separate thread to avoid blocking
+        self.connection_thread = threading.Thread(
+            target=self._connect_to_server, 
+            daemon=True, 
+            name="TCPClient"
+        )
+        self.connection_thread.start()
+        
+        # Add task to check for incoming data
+        self.base.taskMgr.add(self._check_for_data, "TCPClientDataCheck")
+    
+    def _connect_to_server(self):
+        """Connect to the TCP server in a separate thread with proper error handling."""
+        try:
+            if not self._running:
+                return
+                
+            print(f"Attempting to connect to TCP server at {self.host}:{self.port}...")
+            
+            # Create socket and connect
+            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.socket.settimeout(10.0)  # 10 second timeout for connection
+            self.socket.connect((self.host, self.port))
+            
+            # Set to non-blocking for continuous reading
+            self.socket.setblocking(False)
+            
+            with self._shutdown_lock:
+                if self._running:
+                    self.connected = True
+                    print(f"Connected to TCP server at {self.host}:{self.port}")
+                else:
+                    # Shutdown was called while connecting
+                    self.socket.close()
+                    
+        except Exception as e:
+            print(f"Failed to connect to TCP server: {e}")
+            with self._shutdown_lock:
+                self.connected = False
+    
+    def _check_for_data(self, task):
+        """Task to continuously check for incoming data with proper error handling."""
+        if not self._running or not self.connected or not self.socket:
+            return Task.cont
+            
+        try:
+            # Try to receive data (non-blocking)
+            data = self.socket.recv(1024).decode('utf-8')
+            if data:
+                self.receive_buffer += data
+                # Process complete lines
+                while '\n' in self.receive_buffer:
+                    line, self.receive_buffer = self.receive_buffer.split('\n', 1)
+                    if line.strip():
+                        self._process_command(line.strip())
+            elif not data:  # Empty data means connection closed
+                print("TCP server closed connection")
+                self.connected = False
+                        
+        except socket.error as e:
+            # No data available or connection error
+            import errno
+            if hasattr(errno, 'EAGAIN') and hasattr(errno, 'EWOULDBLOCK'):
+                if e.errno not in (errno.EAGAIN, errno.EWOULDBLOCK):
+                    print(f"Socket error: {e}")
+                    self.connected = False
+            else:
+                # Fallback for systems without errno constants
+                error_msg = str(e).lower()
+                if 'would block' not in error_msg and 'try again' not in error_msg:
+                    print(f"Socket error: {e}")
+                    self.connected = False
+        except Exception as e:
+            print(f"Error reading TCP data: {e}")
+            self.connected = False
+            
+        return Task.cont
+    
+    def _process_command(self, command):
+        """Process incoming commands from the TCP server."""
+        try:
+            print(f"Received TCP command: {command}")
+            
+            if command.startswith("CHANGE_LEVEL:"):
+                # Extract level filename
+                level_file = command[13:]  # Remove "CHANGE_LEVEL:" prefix
+                self._change_level(level_file)
+            elif command == "reward":
+                # Trigger reward event
+                self.base.messenger.send('reward-event')
+            elif command == "puff":
+                # Trigger puff event
+                self.base.messenger.send('puff-event')
+            elif command == "neutral":
+                # Trigger neutral event
+                self.base.messenger.send('neutral-event')
+            else:
+                print(f"Unknown command: {command}")
+                
+        except Exception as e:
+            print(f"Error processing command '{command}': {e}")
+    
+    def _change_level(self, level_file):
+        """Dynamically change the game level."""
+        try:
+            print(f"Changing level to: {level_file}")
+            
+            # Construct full path to level file
+            level_path = os.path.join("Levels", level_file)
+            
+            if not os.path.exists(level_path):
+                print(f"Level file not found: {level_path}")
+                return
+            
+            # Load new configuration
+            with open(level_path, 'r') as f:
+                new_config = json.load(f)
+            
+            # Update the base configuration
+            old_config = self.base.cfg.copy()
+            self.base.cfg.update(new_config)
+            
+            # Regenerate distributions if they exist in the new config
+            self._update_distributions_from_config()
+            
+            # Reload corridor with new configuration if needed
+            self._reload_corridor_config()
+            
+            print(f"Successfully changed level to: {level_file}")
+            
+        except Exception as e:
+            print(f"Error changing level to '{level_file}': {e}")
+    
+    def _reload_corridor_config(self):
+        """Reload corridor configuration with new settings."""
+        try:
+            # Update corridor configuration
+            corridor = self.base.corridor
+            
+            # Update corridor texture settings
+            if hasattr(corridor, 'go_texture'):
+                corridor.go_texture = self.base.cfg.get("go_texture", corridor.go_texture)
+            if hasattr(corridor, 'stop_texture'):
+                corridor.stop_texture = self.base.cfg.get("stop_texture", corridor.stop_texture)
+            if hasattr(corridor, 'probe_onset'):
+                corridor.probe_onset = self.base.cfg.get("probe_onset", corridor.probe_onset)
+            if hasattr(corridor, 'probe_duration'):
+                corridor.probe_duration = self.base.cfg.get("probe_duration", corridor.probe_duration)
+            if hasattr(corridor, 'probe_probability'):
+                corridor.probe_probability = self.base.cfg.get("probe_probability", corridor.probe_probability)
+            if hasattr(corridor, 'stop_texture_probability'):
+                corridor.stop_texture_probability = self.base.cfg.get("stop_texture_probability", corridor.stop_texture_probability)
+            if hasattr(corridor, 'probe'):
+                corridor.probe = self.base.cfg.get("probe", corridor.probe)
+
+            # Update wall and surface textures
+            corridor.left_wall_texture = self.base.cfg.get("left_wall_texture", corridor.left_wall_texture)
+            corridor.right_wall_texture = self.base.cfg.get("right_wall_texture", corridor.right_wall_texture)
+            corridor.floor_texture = self.base.cfg.get("floor_texture", corridor.floor_texture)
+            corridor.ceiling_texture = self.base.cfg.get("ceiling_texture", corridor.ceiling_texture)
+            
+            # Update probe/neutral stimuli textures
+            corridor.neutral_stim_1 = self.base.cfg.get("neutral_stim_1", corridor.neutral_stim_1)
+            corridor.neutral_stim_2 = self.base.cfg.get("neutral_stim_2", corridor.neutral_stim_2)
+            corridor.neutral_stim_3 = self.base.cfg.get("neutral_stim_3", corridor.neutral_stim_3)
+            corridor.neutral_stim_4 = self.base.cfg.get("neutral_stim_4", corridor.neutral_stim_4)
+
+            # Update MousePortal-level configuration settings (only attributes that exist on MousePortal)
+            if hasattr(self.base, 'reward_time'):
+                self.base.reward_time = self.base.cfg.get("reward_time", self.base.reward_time)
+            if hasattr(self.base, 'puff_time'):
+                self.base.puff_time = self.base.cfg.get("puff_time", self.base.puff_time)
+            if hasattr(self.base, 'fog_color'):
+                self.base.fog_color = self.base.cfg.get("fog_color", self.base.fog_color)
+            if hasattr(self.base, 'time_spent_at_zero_speed'):
+                self.base.time_spent_at_zero_speed = self.base.cfg.get("time_spent_at_zero_speed", self.base.time_spent_at_zero_speed)
+            if hasattr(self.base, 'puff_duration'):
+                self.base.puff_duration = self.base.cfg.get("puff_duration", self.base.puff_duration)
+            if hasattr(self.base, 'reward_duration'):
+                self.base.reward_duration = self.base.cfg.get("reward_duration", self.base.reward_duration)
+
+            # Update RewardOrPuff FSM if it exists
+            if hasattr(self.base, 'fsm') and self.base.fsm:
+                self.base.fsm.reward_duration = self.base.cfg.get("reward_duration", getattr(self.base.fsm, 'reward_duration', None))
+                self.base.fsm.puff_duration = self.base.cfg.get("puff_duration", getattr(self.base.fsm, 'puff_duration', None))
+                self.base.fsm.puff_to_neutral_time = self.base.cfg.get("puff_to_neutral_time", getattr(self.base.fsm, 'puff_to_neutral_time', None))
+
+            print("Configuration reloaded successfully")
+            
+        except Exception as e:
+            print(f"Error reloading corridor configuration: {e}")
+    
+    def _update_distributions_from_config(self):
+        """
+        Update hallway and zone distributions from the current config, overriding existing arrays.
+        Preserves logged history in the DataFrame CSV file.
+        """
+        try:
+            # Check if distribution parameters exist in config
+            has_base_hallway = "base_hallway_distribution" in self.base.cfg
+            has_stay_zone = "stay_zone_distribution" in self.base.cfg
+            has_go_zone = "go_zone_distribution" in self.base.cfg
+            
+            if not (has_base_hallway or has_stay_zone or has_go_zone):
+                return  # No distribution parameters to update
+            
+            # Initialize DataGenerator if not already present
+            if not hasattr(self.base, 'data_generator'):
+                self.base.data_generator = DataGenerator(self.base.cfg)
+            else:
+                # Update the config reference in existing data generator
+                self.base.data_generator.config = self.base.cfg
+            
+            # Generate new distributions (override, don't append)
+            if has_base_hallway:
+                self.base.rounded_base_hallway_data = self.base.data_generator.generate_gaussian_data(
+                    "base_hallway_distribution", 
+                    min_value=self.base.cfg.get("base_hallway_min_value")
+                )
+                # Update corridor's reference
+                self.base.corridor.rounded_base_hallway_data = self.base.rounded_base_hallway_data
+            
+            if has_stay_zone:
+                self.base.rounded_stay_data = self.base.data_generator.generate_gaussian_data(
+                    "stay_zone_distribution", 
+                    min_value=self.base.cfg.get("stay_zone_min_value")
+                )
+                # Update corridor's reference
+                self.base.corridor.rounded_stay_data = self.base.rounded_stay_data
+                #print(f"Updated stay_zone distribution. Length: {len(self.base.rounded_stay_data)}")
+            
+            if has_go_zone:
+                self.base.rounded_go_data = self.base.data_generator.generate_gaussian_data(
+                    "go_zone_distribution", 
+                    min_value=self.base.cfg.get("go_zone_min_value")
+                )
+                # Update corridor's reference
+                self.base.corridor.rounded_go_data = self.base.rounded_go_data
+                #print(f"Updated go_zone distribution. Length: {len(self.base.rounded_go_data)}")
+            
+            # Append the new distribution data to the existing data in the DataFrame
+            current_base_len = len(self.trial_df[pd.notna(self.trial_df['rounded_base_hallway_data'])])
+            current_stay_len = len(self.trial_df[pd.notna(self.trial_df['rounded_stay_data'])])
+            current_go_len = len(self.trial_df[pd.notna(self.trial_df['rounded_go_data'])])
+            
+            # For base hallway data
+            if has_base_hallway:
+                end_idx = current_base_len + len(self.base.rounded_base_hallway_data)
+                self.trial_df.loc[current_base_len:end_idx-1, 'rounded_base_hallway_data'] = self.base.rounded_base_hallway_data
+            
+            # For stay zone data
+            if has_stay_zone:
+                end_idx = current_stay_len + len(self.base.rounded_stay_data)
+                self.trial_df.loc[current_stay_len:end_idx-1, 'rounded_stay_data'] = self.base.rounded_stay_data
+            
+            # For go zone data
+            if has_go_zone:
+                end_idx = current_go_len + len(self.base.rounded_go_data)
+                self.trial_df.loc[current_go_len:end_idx-1, 'rounded_go_data'] = self.base.rounded_go_data
+            
+            # Save the updated dataframe with appended distributions
+            self.trial_df.to_csv(self.trial_csv_path, index=False)
+            
+            print("Distribution update from config completed successfully")
+            
+        except Exception as e:
+            print(f"Error updating distributions from config: {e}")
+    
+    
+    def close(self):
+        """Close the TCP connection with proper thread cleanup."""
+        with self._shutdown_lock:
+            if not self._running:
+                return  # Already closing
+                
+            print("Closing TCP client...")
+            self._running = False
+            self.connected = False
+            
+            # Close socket
+            if self.socket:
+                try:
+                    self.socket.shutdown(socket.SHUT_RDWR)
+                    self.socket.close()
+                except:
+                    pass
+                self.socket = None
+            
+            # Remove the data checking task
+            try:
+                self.base.taskMgr.remove("TCPClientDataCheck")
+            except:
+                pass  # Task might not exist
+            
+            # Wait for connection thread to finish
+            if self.connection_thread and self.connection_thread.is_alive():
+                print("Waiting for TCP client thread to finish...")
+                self.connection_thread.join(timeout=3)
+                if self.connection_thread.is_alive():
+                    print("Warning: TCP client thread did not stop cleanly")
+                else:
+                    print("TCP client thread stopped successfully")
+            
+            print("TCP client connection closed")
+    
+    def __del__(self):
+        """Destructor to ensure cleanup."""
+        try:
+            self.close()
+        except:
+            pass
+
 class MousePortal(ShowBase):
     """
     Main application class for the infinite corridor simulation.
@@ -1064,6 +1414,13 @@ class MousePortal(ShowBase):
         """
         ShowBase.__init__(self)
         
+        # Set up signal handlers for graceful shutdown
+        signal.signal(signal.SIGINT, self._signal_handler)
+        signal.signal(signal.SIGTERM, self._signal_handler)
+        
+        # Register cleanup on exit
+        atexit.register(self._cleanup)
+        
         # Load configuration from JSON
         with open(config_file, 'r') as f:
             self.cfg: Dict[str, Any] = load_config(config_file)
@@ -1073,6 +1430,10 @@ class MousePortal(ShowBase):
 
        # Initialize the DataGenerator
         data_generator = DataGenerator(self.cfg)
+
+        self.rounded_base_hallway_data = np.array([], dtype=int)
+        self.rounded_stay_data = np.array([], dtype=int)
+        self.rounded_go_data = np.array([], dtype=int)
 
         # Generate Gaussian data using min_value from the configuration
         self.rounded_base_hallway_data = data_generator.generate_gaussian_data(
@@ -1089,8 +1450,8 @@ class MousePortal(ShowBase):
         )
 
         self.trial_csv_path = os.path.join(os.environ.get("OUTPUT_DIR"), f"{int(time.time())}trial_log.csv")
-        
-        max_trials = 1000  
+
+        max_trials = 1000
         self.segments_to_wait_history = np.array([], dtype=int)
         self.texture_history = np.array([], dtype=str)
         self.texture_time_history = np.array([], dtype=float)
@@ -1100,22 +1461,40 @@ class MousePortal(ShowBase):
         self.probe_time_history = np.array([], dtype=float)
         self.puff_history = np.array([], dtype=float)
         self.reward_history = np.array([], dtype=float)
+
         trial_df = pd.DataFrame({
-            'rounded_base_hallway_data': np.full(max_trials, np.nan, dtype=float),
-            'rounded_stay_data': np.full(max_trials, np.nan, dtype=float),
-            'rounded_go_data': np.full(max_trials, np.nan, dtype=float),
-            'segments_to_wait': np.full(max_trials, np.nan, dtype=float),
+            'rounded_base_hallway_data': np.full(max_trials, np.nan),
+            'rounded_stay_data': np.full(max_trials, np.nan),
+            'rounded_go_data': np.full(max_trials, np.nan),
+            'segments_to_wait': np.full(max_trials, np.nan),
             'texture_history': np.full(max_trials, np.nan, dtype=object),
-            'texture_change_time': np.full(max_trials, np.nan, dtype=float),
-            'segments_until_revert': np.full(max_trials, np.nan, dtype=float),
-            'texture_revert': np.full(max_trials, np.nan, dtype=float),
+            'texture_change_time': np.full(max_trials, np.nan),
+            'segments_until_revert': np.full(max_trials, np.nan),
+            'texture_revert': np.full(max_trials, np.nan),
             'probe_texture_history': np.full(max_trials, np.nan, dtype=object),
-            'probe_time': np.full(max_trials, np.nan, dtype=float),
+            'probe_time': np.full(max_trials, np.nan),
             'puff_event': np.full(max_trials, np.nan, dtype=object),
             'reward_event': np.full(max_trials, np.nan, dtype=object),
-            })
+        })
         trial_df.to_csv(self.trial_csv_path, index=False)
         self.trial_df = trial_df
+
+        # Save initial distributions to the dataframe
+        # Extend arrays to match dataframe length if needed
+        base_data = np.full(len(self.trial_df), np.nan)
+        base_data[:len(self.rounded_base_hallway_data)] = self.rounded_base_hallway_data
+        self.trial_df['rounded_base_hallway_data'] = base_data
+        
+        stay_data = np.full(len(self.trial_df), np.nan)
+        stay_data[:len(self.rounded_stay_data)] = self.rounded_stay_data
+        self.trial_df['rounded_stay_data'] = stay_data
+        
+        go_data = np.full(len(self.trial_df), np.nan)
+        go_data[:len(self.rounded_go_data)] = self.rounded_go_data
+        self.trial_df['rounded_go_data'] = go_data
+        
+        # Save the updated dataframe with initial distributions
+        self.trial_df.to_csv(self.trial_csv_path, index=False)
 
         # Retrieve the reward_amount and batch_id from the configuration
         reward_amount = self.cfg.get("reward_amount", 0.0)
@@ -1229,13 +1608,13 @@ class MousePortal(ShowBase):
 
         # Add the update task
         self.taskMgr.add(self.update, "updateTask")
-        
+
+        self.fog_color = tuple(self.cfg["fog_color"])
         # Initialize fog effect
         self.fog_effect = FogEffect(
             self,
             density=self.cfg["fog_density"],
-            fog_color=(0.5, 0.5, 0.5)
-        )
+            fog_color=self.fog_color)
         
         # Set up task chain for serial input
         self.taskMgr.setupTaskChain(
@@ -1270,7 +1649,19 @@ class MousePortal(ShowBase):
         self.enter_go_time = 0.0
         self.enter_stay_time = 0.0
         self.speed_zero_start_time = None
+
+        # Initialize TCP client for dynamic level changing
+        self.tcp_client = TCPStreamClient(self)
         self.time_spent_at_zero_speed = self.cfg["time_spent_at_zero_speed"]
+
+    def _signal_handler(self, signum, frame):
+        """Handle system signals for graceful shutdown."""
+        print(f"\nReceived signal {signum}, shutting down gracefully...")
+        try:
+            self._cleanup()
+        except:
+            pass
+        sys.exit(0)
 
     def doMethodLaterStopwatch(base, delay, func, name):
         target_time = global_stopwatch.get_elapsed_time() + delay
@@ -1416,6 +1807,9 @@ class MousePortal(ShowBase):
         # Remove serial reading tasks before closing ports
         self.taskMgr.remove("readTeensySerial")
         self.taskMgr.remove("readArduinoSerial")
+        # Close TCP client connection
+        if hasattr(self, 'tcp_client') and self.tcp_client:
+            self.tcp_client.close()
         if self.arduino_serial and self.arduino_serial.is_open:
             self.arduino_serial.close()
         if self.treadmill:
