@@ -13,11 +13,14 @@
     "recorder_script_path": "thorcam.py",
     "fog_density": 0.06,
     "fog_color": [0.5, 0.5, 0.5],
-    "arduino_port": "COM7",
+    "arduino_port": "COM5",
     "arduino_baudrate": 115200,
     "teensy_baudrate": 57600,
     "go_texture": "assets/punish_mean100.jpg", 
     "neutral_stim_1": "assets/grating_mean100.jpg",
+    "neutral_stim_2": "assets/probe_2.jpg",
+    "neutral_stim_3": "assets/probe_3.png",
+    "neutral_stim_4": "assets/probe_4.png",
     "stop_texture": "assets/reward_mean100.jpg",
     "stop_texture_probability": 0.65,
     "test_mode": false,
@@ -26,6 +29,7 @@
     "probe_duration": 1.0,
     "probe_probability": 0.50,
     "reward_time": 0.38,
+    "time_spent_at_zero_speed": 1.0,
     "puff_time": 0.9,
     "puff_duration": 800,
     "base_hallway_distribution": {
@@ -45,5 +49,5 @@
     "go_zone_min_value": 2,
     "puff_to_neutral_time": 2.0,
     "reward_amount": 3,
-    "reward_file": "C:\\Users\\Sipe_Lab\\MousePortal\\Solenoid_Calibration\\solenoid_calibration_results.csv"
+    "reward_file": "C:\\Users\\Sipe_Lab\\Desktop\\MousePortal\\Solenoid_Calibration\\solenoid_calibration_results.csv"
 }
