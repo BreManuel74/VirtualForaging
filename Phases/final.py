@@ -1759,13 +1759,16 @@ class MousePortal(ShowBase):
 
         if selected_texture == self.corridor.stop_texture:
             #print(self.zone_length)
-            # Check if speed has been 0 for exactly 1 second
-            speed_zero_for_one_second = (self.speed_zero_start_time is not None and 
+            # Check if speed has been 0 for set time
+            speed_zero_duration = (self.speed_zero_start_time is not None and 
                                        current_time >= self.speed_zero_start_time + self.time_spent_at_zero_speed)
-
+            
+            # Check if enough time has been spent in the zone
+            meets_time_requirement = current_time >= self.enter_stay_time + (self.reward_time * self.zone_length)
+            
             if (self.segments_with_stay_texture <= self.zone_length and 
                 self.fsm.state != 'Reward' and 
-                speed_zero_for_one_second):
+                (speed_zero_duration or meets_time_requirement)):  # Either condition can trigger reward
                 #print("Requesting Reward state")
                 self.fsm.request('Reward')
         elif selected_texture == self.corridor.go_texture:
