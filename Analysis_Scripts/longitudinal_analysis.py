@@ -26,6 +26,7 @@ def analyze_mouse_data(data_files, markers):
     sensitivity_fig = plt.figure(figsize=(12, 6))
     lick_fig = plt.figure(figsize=(12, 6))
     reward_fig = plt.figure(figsize=(12, 6))
+    avg_reward_fig = plt.figure(figsize=(12, 6))  # New figure for average rewards
     colors = generate_colors(len(data_files))  # Generate colors based on number of mice
     
     all_results = []
@@ -239,7 +240,46 @@ def analyze_mouse_data(data_files, markers):
     ax.xaxis.set_major_locator(plt.MultipleLocator(5))
     ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
     
-    return speed_fig, sensitivity_fig, lick_fig, reward_fig, all_results
+    # Calculate average rewards and SEM across mice
+    # First, find the maximum number of days
+    max_days = max(len(result['hits']) for result in all_results)
+    
+    # Initialize arrays for rewards
+    all_rewards = np.zeros((len(data_files), max_days))
+    all_rewards[:] = np.nan  # Fill with NaN initially
+    
+    # Fill in the rewards data
+    for i, result in enumerate(all_results):
+        rewards = result['hits']
+        all_rewards[i, :len(rewards)] = rewards
+    
+    # Calculate mean and SEM across mice for each day
+    mean_rewards = np.nanmean(all_rewards, axis=0)
+    sem_rewards = np.nanstd(all_rewards, axis=0) / np.sqrt(np.sum(~np.isnan(all_rewards), axis=0))
+    
+    # Plot average rewards with SEM
+    plt.figure(avg_reward_fig.number)
+    day_numbers = np.arange(1, max_days + 1)
+    plt.plot(day_numbers, mean_rewards, '-', color='black', linewidth=2, label='Mean')
+    plt.fill_between(day_numbers, mean_rewards - sem_rewards, mean_rewards + sem_rewards, 
+                     color='gray', alpha=0.3, label='SEM')
+    
+    # Configure average rewards plot
+    plt.title('Average Rewards Across Mice')
+    plt.xlabel('Day')
+    plt.ylabel('Number of Rewards (Mean ± SEM)')
+    plt.grid(True)
+    ax = plt.gca()
+    ax.tick_params(axis='both', direction='in')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.set_ylim(bottom=0)
+    ax.set_xlim(left=0)
+    ax.xaxis.set_major_locator(plt.MultipleLocator(5))
+    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+    plt.legend()
+
+    return speed_fig, sensitivity_fig, lick_fig, reward_fig, avg_reward_fig, all_results
 
 def main():
     # Create and hide the root window
@@ -267,10 +307,10 @@ def main():
                     print("Invalid choice. Please enter 's' for square or 'o' for circle.")
             
         # Analyze data and plot results
-        speed_fig, sensitivity_fig, lick_fig, reward_fig, all_results = analyze_mouse_data(file_paths, markers)
+        speed_fig, sensitivity_fig, lick_fig, reward_fig, avg_reward_fig, all_results = analyze_mouse_data(file_paths, markers)
 
         # Configure all figures
-        for fig in [speed_fig, sensitivity_fig, lick_fig, reward_fig]:
+        for fig in [speed_fig, sensitivity_fig, lick_fig, reward_fig, avg_reward_fig]:
             plt.figure(fig.number)
             if len(file_paths) > 10:
                 plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
@@ -280,7 +320,7 @@ def main():
             plt.tight_layout()
 
         # Display all plots
-        for fig in [speed_fig, sensitivity_fig, lick_fig, reward_fig]:
+        for fig in [speed_fig, sensitivity_fig, lick_fig, reward_fig, avg_reward_fig]:
             fig.show()
         plt.show()
 
@@ -297,7 +337,8 @@ def main():
                 (speed_fig, 'speed', 'Speed plot'),
                 (sensitivity_fig, 'sensitivity', 'Sensitivity plot'),
                 (lick_fig, 'lick_count', 'Lick count plot'),
-                (reward_fig, 'reward_count', 'Reward count plot')
+                (reward_fig, 'reward_count', 'Reward count plot'),
+                (avg_reward_fig, 'avg_reward', 'Average rewards plot')
             ]
 
             # Save all plots
