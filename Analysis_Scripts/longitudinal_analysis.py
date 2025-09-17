@@ -18,6 +18,76 @@ def generate_colors(n):
         colors.append(rgb)
     return colors
 
+def analyze_levels(data_files):
+    """Analyze rewards/min for each level across all mice."""
+    level_data = {}  # Dictionary to store rewards/min for each level
+    
+    for data_file in data_files:
+        # Read the data file
+        df = pd.read_csv(data_file)
+        
+        # Group by level and calculate rewards/min for each group
+        for level in df['level'].unique():
+            if level not in level_data:
+                level_data[level] = []
+                
+            level_group = df[df['level'] == level]
+            for _, row in level_group.iterrows():
+                try:
+                    # Read trial log data
+                    trial_log = pd.read_csv(row['trial_log'])
+                    # Count rewards (non-null reward events)
+                    hits = len(trial_log['reward_event'].dropna())
+                    # Calculate session length in minutes
+                    capacitive_data = pd.read_csv(row['capacitive'])
+                    session_length = capacitive_data['elapsed_time'].max() / 60.0
+                    # Calculate rewards per minute
+                    rewards_per_min = hits / session_length if session_length > 0 else 0
+                    level_data[level].append(rewards_per_min)
+                except Exception as e:
+                    print(f"Error processing file for level {level}: {str(e)}")
+    
+    # Calculate statistics for each level
+    level_stats = {}
+    for level, rewards in level_data.items():
+        if rewards:  # Only process if we have data
+            level_stats[level] = {
+                'mean': np.mean(rewards),
+                'sem': np.std(rewards) / np.sqrt(len(rewards)),
+                'n': len(rewards)
+            }
+    
+    # Create bar plot
+    level_fig = plt.figure(figsize=(15, 8))  # Larger figure size
+    levels = list(level_stats.keys())
+    means = [level_stats[level]['mean'] for level in levels]
+    sems = [level_stats[level]['sem'] for level in levels]
+    
+    # Plot bars
+    bars = plt.bar(range(len(levels)), means, yerr=sems, capsize=5, label='Mean rewards per minute')
+    plt.xticks(range(len(levels)), levels, rotation=45, ha='right')
+    
+    # Configure plot
+    plt.title('Average Rewards Per Minute by Level')
+    plt.xlabel('Level')
+    plt.ylabel('Rewards per Minute (Mean ± SEM)')
+    plt.grid(True, axis='y')
+    ax = plt.gca()
+    ax.tick_params(axis='both', direction='in')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    
+    # Adjust layout to prevent label cutoff
+    plt.subplots_adjust(bottom=0.2)
+    
+    # Add sample size annotations
+    for i, level in enumerate(levels):
+        n = level_stats[level]['n']
+        plt.text(i, means[i], f'n={n}', ha='center', va='bottom')
+    
+    plt.tight_layout()
+    return level_fig
+
 def analyze_mouse_data(data_files, markers, starting_conditions):
     # Create dictionaries to map mouse names to markers and starting conditions
     markers = {os.path.basename(file).split("_")[0]: marker for file, marker in zip(data_files, markers)}
@@ -413,7 +483,10 @@ def analyze_mouse_data(data_files, markers, starting_conditions):
     ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
     plt.legend()
 
-    return speed_fig, sensitivity_fig, lick_fig, reward_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, all_results
+    # Create the level-based analysis plot
+    level_fig = analyze_levels(data_files)
+
+    return speed_fig, sensitivity_fig, lick_fig, reward_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, level_fig, all_results
 
 def main():
     # Create and hide the root window
@@ -446,10 +519,10 @@ def main():
             starting_conditions.append(condition)
             
         # Analyze data and plot results
-        speed_fig, sensitivity_fig, lick_fig, reward_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, all_results = analyze_mouse_data(file_paths, markers, starting_conditions)
+        speed_fig, sensitivity_fig, lick_fig, reward_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, level_fig, all_results = analyze_mouse_data(file_paths, markers, starting_conditions)
 
         # Configure all figures
-        for fig in [speed_fig, sensitivity_fig, lick_fig, reward_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig]:
+        for fig in [speed_fig, sensitivity_fig, lick_fig, reward_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, level_fig]:
             plt.figure(fig.number)
             if len(file_paths) > 10:
                 plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
@@ -479,7 +552,8 @@ def main():
                 (reward_fig, 'reward_count', 'Reward count plot'),
                 (avg_reward_fig, 'avg_reward', 'Average rewards plot'),
                 (sex_reward_fig, 'sex_reward', 'Sex-specific average rewards plot'),
-                (condition_reward_fig, 'condition_reward', 'Condition-based average rewards plot')
+                (condition_reward_fig, 'condition_reward', 'Condition-based average rewards plot'),
+                (level_fig, 'level_reward', 'Level-based average rewards plot')
             ]
 
             # Save all plots
