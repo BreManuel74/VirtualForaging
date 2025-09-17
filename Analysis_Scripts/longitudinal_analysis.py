@@ -44,6 +44,7 @@ def analyze_mouse_data(data_files, markers):
         misses_list = []  # List for misses (texture changes minus hits)
         sensitivities = []  # List for sensitivity values
         lick_counts = []  # List for daily lick counts
+        session_lengths = []  # List for session lengths in minutes
         
         # Process each date's data
         for timestamp, row in df.iterrows():
@@ -57,6 +58,9 @@ def analyze_mouse_data(data_files, markers):
                 # Read capacitive data and perform z-score normalization
                 capacitive_data = pd.read_csv(row['capacitive'])
                 capacitive_values = capacitive_data['capacitive_value']
+                
+                # Calculate session length in minutes from the elapsed_time column
+                session_length_minutes = capacitive_data['elapsed_time'].max() / 60.0
                 
                 # Calculate z-score: z = (x - μ) / σ
                 z_scores = (capacitive_values - capacitive_values.mean()) / capacitive_values.std()
@@ -116,8 +120,9 @@ def analyze_mouse_data(data_files, markers):
                 misses_list.append(misses)
                 sensitivities.append(sensitivity)
                 lick_counts.append(lick_count)
+                session_lengths.append(session_length_minutes)
                 
-                #print(f"Processed date {date.strftime('%Y-%m-%d')}: Average speed = {avg_speed:.2f}, Hits = {reward_count}, Misses = {misses}")
+                #print(f"Processed date {date.strftime('%Y-%m-%d')}: Average speed = {avg_speed:.2f}, Hits = {reward_count}, Misses = {misses}, Session Length = {session_length_minutes:.1f} min")
                 
             except Exception as e:
                 print(f"Error processing date {timestamp}: {str(e)}")
@@ -132,7 +137,8 @@ def analyze_mouse_data(data_files, markers):
             'hits': hits,
             'misses': misses_list,
             'sensitivity': sensitivities,
-            'lick_count': lick_counts
+            'lick_count': lick_counts,
+            'session_length': session_lengths
         })
         
         # Sort and remove duplicates
@@ -153,6 +159,7 @@ def analyze_mouse_data(data_files, markers):
             'dates': dates,
             'speeds': speeds,
             'hits': hits,
+            'session_lengths': session_lengths,
             'df': results_df
         })
         
@@ -240,34 +247,37 @@ def analyze_mouse_data(data_files, markers):
     ax.xaxis.set_major_locator(plt.MultipleLocator(5))
     ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
     
-    # Calculate average rewards and SEM across mice
+    # Calculate average rewards/minute and SEM across mice
     # First, find the maximum number of days
     max_days = max(len(result['hits']) for result in all_results)
     
-    # Initialize arrays for rewards
-    all_rewards = np.zeros((len(data_files), max_days))
-    all_rewards[:] = np.nan  # Fill with NaN initially
+    # Initialize arrays for rewards per minute
+    all_rewards_per_min = np.zeros((len(data_files), max_days))
+    all_rewards_per_min[:] = np.nan  # Fill with NaN initially
     
-    # Fill in the rewards data
+    # Fill in the rewards per minute data
     for i, result in enumerate(all_results):
-        rewards = result['hits']
-        all_rewards[i, :len(rewards)] = rewards
+        rewards = np.array(result['hits'])
+        session_lengths = np.array(result['session_lengths'])
+        # Calculate rewards per minute
+        rewards_per_min = rewards / session_lengths
+        all_rewards_per_min[i, :len(rewards_per_min)] = rewards_per_min
     
     # Calculate mean and SEM across mice for each day
-    mean_rewards = np.nanmean(all_rewards, axis=0)
-    sem_rewards = np.nanstd(all_rewards, axis=0) / np.sqrt(np.sum(~np.isnan(all_rewards), axis=0))
+    mean_rewards_per_min = np.nanmean(all_rewards_per_min, axis=0)
+    sem_rewards_per_min = np.nanstd(all_rewards_per_min, axis=0) / np.sqrt(np.sum(~np.isnan(all_rewards_per_min), axis=0))
     
-    # Plot average rewards with SEM
+    # Plot average rewards/minute with SEM
     plt.figure(avg_reward_fig.number)
     day_numbers = np.arange(1, max_days + 1)
-    plt.plot(day_numbers, mean_rewards, '-', color='black', linewidth=2, label='Mean')
-    plt.fill_between(day_numbers, mean_rewards - sem_rewards, mean_rewards + sem_rewards, 
+    plt.plot(day_numbers, mean_rewards_per_min, '-', color='black', linewidth=2, label='Mean')
+    plt.fill_between(day_numbers, mean_rewards_per_min - sem_rewards_per_min, mean_rewards_per_min + sem_rewards_per_min, 
                      color='gray', alpha=0.3, label='SEM')
     
     # Configure average rewards plot
-    plt.title('Average Rewards Across Mice')
+    plt.title('Average Rewards Per Minute Across Mice')
     plt.xlabel('Day')
-    plt.ylabel('Number of Rewards (Mean ± SEM)')
+    plt.ylabel('Rewards per Minute (Mean ± SEM)')
     plt.grid(True)
     ax = plt.gca()
     ax.tick_params(axis='both', direction='in')
