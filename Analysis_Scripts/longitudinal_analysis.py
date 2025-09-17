@@ -18,9 +18,10 @@ def generate_colors(n):
         colors.append(rgb)
     return colors
 
-def analyze_mouse_data(data_files, markers):
-    # Create a dictionary to map mouse names to markers
+def analyze_mouse_data(data_files, markers, starting_conditions):
+    # Create dictionaries to map mouse names to markers and starting conditions
     markers = {os.path.basename(file).split("_")[0]: marker for file, marker in zip(data_files, markers)}
+    conditions = {os.path.basename(file).split("_")[0]: condition for file, condition in zip(data_files, starting_conditions)}
     
     speed_fig = plt.figure(figsize=(12, 6))
     sensitivity_fig = plt.figure(figsize=(12, 6))
@@ -161,6 +162,7 @@ def analyze_mouse_data(data_files, markers):
             'speeds': speeds,
             'hits': hits,
             'session_lengths': session_lengths,
+            'starting_condition': conditions[mouse_name],
             'df': results_df
         })
         
@@ -358,7 +360,60 @@ def analyze_mouse_data(data_files, markers):
     ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
     plt.legend()
 
-    return speed_fig, sensitivity_fig, lick_fig, reward_fig, avg_reward_fig, sex_reward_fig, all_results
+    # Create a new figure for condition-based analysis
+    condition_reward_fig = plt.figure(figsize=(12, 6))
+    
+    # Group mice by starting condition
+    condition_groups = {}
+    for result in all_results:
+        condition = result['starting_condition']
+        if condition not in condition_groups:
+            condition_groups[condition] = []
+        rewards = np.array(result['hits'])
+        session_lengths = np.array(result['session_lengths'])
+        rewards_per_min = rewards / session_lengths
+        condition_groups[condition].append(rewards_per_min)
+    
+    # Generate colors for different conditions
+    condition_colors = generate_colors(len(condition_groups))
+    
+    # Plot each condition's data
+    for (condition, rewards_list), color in zip(condition_groups.items(), condition_colors):
+        # Pad arrays to make them equal length
+        max_len = max(len(r) for r in rewards_list)
+        padded_rewards = np.array([np.pad(r, (0, max_len - len(r)), 
+                                        constant_values=np.nan) for r in rewards_list])
+        
+        # Calculate mean and SEM
+        mean_rewards = np.nanmean(padded_rewards, axis=0)
+        n_mice = np.sum(~np.isnan(padded_rewards), axis=0)
+        sem_rewards = np.where(n_mice > 1,
+                             np.nanstd(padded_rewards, axis=0) / np.sqrt(n_mice),
+                             0)
+        
+        # Plot the data
+        day_numbers = np.arange(1, max_len + 1)
+        plt.plot(day_numbers, mean_rewards, '-', color=color, linewidth=2, 
+                label=f'{condition} (n={len(rewards_list)})')
+        plt.fill_between(day_numbers, mean_rewards - sem_rewards, mean_rewards + sem_rewards,
+                        color=color, alpha=0.2)
+    
+    # Configure condition-based rewards plot
+    plt.title('Average Rewards Per Minute by Starting Condition')
+    plt.xlabel('Day')
+    plt.ylabel('Rewards per Minute (Mean ± SEM)')
+    plt.grid(True)
+    ax = plt.gca()
+    ax.tick_params(axis='both', direction='in')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.set_ylim(bottom=0)
+    ax.set_xlim(left=0)
+    ax.xaxis.set_major_locator(plt.MultipleLocator(5))
+    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+    plt.legend()
+
+    return speed_fig, sensitivity_fig, lick_fig, reward_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, all_results
 
 def main():
     # Create and hide the root window
@@ -373,8 +428,9 @@ def main():
     )
     
     if file_paths:
-        # Ask user for marker type for each mouse
+        # Ask user for marker type and starting condition for each mouse
         markers = []
+        starting_conditions = []
         for file_path in file_paths:
             mouse_name = os.path.basename(file_path).split("_")[0]
             while True:
@@ -385,11 +441,15 @@ def main():
                 else:
                     print("Invalid choice. Please enter 's' for square or 'o' for circle.")
             
+            # Get starting condition
+            condition = input(f"Enter starting condition for {mouse_name}: ").strip()
+            starting_conditions.append(condition)
+            
         # Analyze data and plot results
-        speed_fig, sensitivity_fig, lick_fig, reward_fig, avg_reward_fig, sex_reward_fig, all_results = analyze_mouse_data(file_paths, markers)
+        speed_fig, sensitivity_fig, lick_fig, reward_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, all_results = analyze_mouse_data(file_paths, markers, starting_conditions)
 
         # Configure all figures
-        for fig in [speed_fig, sensitivity_fig, lick_fig, reward_fig, avg_reward_fig, sex_reward_fig]:
+        for fig in [speed_fig, sensitivity_fig, lick_fig, reward_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig]:
             plt.figure(fig.number)
             if len(file_paths) > 10:
                 plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
@@ -399,7 +459,7 @@ def main():
             plt.tight_layout()
 
         # Display all plots
-        for fig in [speed_fig, sensitivity_fig, lick_fig, reward_fig, avg_reward_fig]:
+        for fig in [speed_fig, sensitivity_fig, lick_fig, reward_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig]:
             fig.show()
         plt.show()
 
@@ -418,7 +478,8 @@ def main():
                 (lick_fig, 'lick_count', 'Lick count plot'),
                 (reward_fig, 'reward_count', 'Reward count plot'),
                 (avg_reward_fig, 'avg_reward', 'Average rewards plot'),
-                (sex_reward_fig, 'sex_reward', 'Sex-specific average rewards plot')
+                (sex_reward_fig, 'sex_reward', 'Sex-specific average rewards plot'),
+                (condition_reward_fig, 'condition_reward', 'Condition-based average rewards plot')
             ]
 
             # Save all plots
