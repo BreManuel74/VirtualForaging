@@ -26,7 +26,8 @@ def analyze_mouse_data(data_files, markers):
     sensitivity_fig = plt.figure(figsize=(12, 6))
     lick_fig = plt.figure(figsize=(12, 6))
     reward_fig = plt.figure(figsize=(12, 6))
-    avg_reward_fig = plt.figure(figsize=(12, 6))  # New figure for average rewards
+    avg_reward_fig = plt.figure(figsize=(12, 6))  # Average rewards figure
+    sex_reward_fig = plt.figure(figsize=(12, 6))  # Sex-specific average rewards figure
     colors = generate_colors(len(data_files))  # Generate colors based on number of mice
     
     all_results = []
@@ -251,9 +252,13 @@ def analyze_mouse_data(data_files, markers):
     # First, find the maximum number of days
     max_days = max(len(result['hits']) for result in all_results)
     
-    # Initialize arrays for rewards per minute
+    # Initialize arrays for rewards per minute (all mice)
     all_rewards_per_min = np.zeros((len(data_files), max_days))
     all_rewards_per_min[:] = np.nan  # Fill with NaN initially
+    
+    # Initialize arrays for sex-specific rewards per minute
+    male_rewards_per_min = []
+    female_rewards_per_min = []
     
     # Fill in the rewards per minute data
     for i, result in enumerate(all_results):
@@ -262,6 +267,21 @@ def analyze_mouse_data(data_files, markers):
         # Calculate rewards per minute
         rewards_per_min = rewards / session_lengths
         all_rewards_per_min[i, :len(rewards_per_min)] = rewards_per_min
+        
+        # Separate data by sex based on marker type
+        mouse_name = result['mouse']
+        if markers[mouse_name] == 's':  # Male
+            male_rewards_per_min.append(rewards_per_min)
+        else:  # Female (marker 'o')
+            female_rewards_per_min.append(rewards_per_min)
+    
+    # Convert lists to arrays and pad with NaN to make them rectangular
+    if male_rewards_per_min:
+        male_rewards_per_min = np.array([np.pad(x, (0, max_days - len(x)), 
+                                               constant_values=np.nan) for x in male_rewards_per_min])
+    if female_rewards_per_min:
+        female_rewards_per_min = np.array([np.pad(x, (0, max_days - len(x)), 
+                                                constant_values=np.nan) for x in female_rewards_per_min])
     
     # Calculate mean and SEM across mice for each day
     mean_rewards_per_min = np.nanmean(all_rewards_per_min, axis=0)
@@ -288,8 +308,57 @@ def analyze_mouse_data(data_files, markers):
     ax.xaxis.set_major_locator(plt.MultipleLocator(5))
     ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
     plt.legend()
+    
+    # Plot sex-specific average rewards/minute with SEM
+    plt.figure(sex_reward_fig.number)
+    day_numbers = np.arange(1, max_days + 1)
+    
+    # Plot male data if available
+    if len(male_rewards_per_min) > 0:
+        # Check if we have any non-NaN values
+        valid_male_data = np.any(~np.isnan(male_rewards_per_min))
+        if valid_male_data:
+            mean_male = np.nanmean(male_rewards_per_min, axis=0)
+            # Only calculate SEM where we have more than one value
+            n_male = np.sum(~np.isnan(male_rewards_per_min), axis=0)
+            sem_male = np.where(n_male > 1, 
+                              np.nanstd(male_rewards_per_min, axis=0) / np.sqrt(n_male),
+                              0)
+            plt.plot(day_numbers, mean_male, '-', color='green', linewidth=2, label=f'Male (n={len(male_rewards_per_min)})')
+            plt.fill_between(day_numbers, mean_male - sem_male, mean_male + sem_male, 
+                           color='green', alpha=0.2)
 
-    return speed_fig, sensitivity_fig, lick_fig, reward_fig, avg_reward_fig, all_results
+    # Plot female data if available
+    if len(female_rewards_per_min) > 0:
+        # Check if we have any non-NaN values
+        valid_female_data = np.any(~np.isnan(female_rewards_per_min))
+        if valid_female_data:
+            mean_female = np.nanmean(female_rewards_per_min, axis=0)
+            # Only calculate SEM where we have more than one value
+            n_female = np.sum(~np.isnan(female_rewards_per_min), axis=0)
+            sem_female = np.where(n_female > 1,
+                                np.nanstd(female_rewards_per_min, axis=0) / np.sqrt(n_female),
+                                0)
+            plt.plot(day_numbers, mean_female, '-', color='purple', linewidth=2, label=f'Female (n={len(female_rewards_per_min)})')
+            plt.fill_between(day_numbers, mean_female - sem_female, mean_female + sem_female, 
+                           color='purple', alpha=0.2)
+
+    # Configure sex-specific rewards plot
+    plt.title('Sex-Specific Average Rewards Per Minute')
+    plt.xlabel('Day')
+    plt.ylabel('Rewards per Minute (Mean ± SEM)')
+    plt.grid(True)
+    ax = plt.gca()
+    ax.tick_params(axis='both', direction='in')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.set_ylim(bottom=0)
+    ax.set_xlim(left=0)
+    ax.xaxis.set_major_locator(plt.MultipleLocator(5))
+    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+    plt.legend()
+
+    return speed_fig, sensitivity_fig, lick_fig, reward_fig, avg_reward_fig, sex_reward_fig, all_results
 
 def main():
     # Create and hide the root window
@@ -317,10 +386,10 @@ def main():
                     print("Invalid choice. Please enter 's' for square or 'o' for circle.")
             
         # Analyze data and plot results
-        speed_fig, sensitivity_fig, lick_fig, reward_fig, avg_reward_fig, all_results = analyze_mouse_data(file_paths, markers)
+        speed_fig, sensitivity_fig, lick_fig, reward_fig, avg_reward_fig, sex_reward_fig, all_results = analyze_mouse_data(file_paths, markers)
 
         # Configure all figures
-        for fig in [speed_fig, sensitivity_fig, lick_fig, reward_fig, avg_reward_fig]:
+        for fig in [speed_fig, sensitivity_fig, lick_fig, reward_fig, avg_reward_fig, sex_reward_fig]:
             plt.figure(fig.number)
             if len(file_paths) > 10:
                 plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
@@ -348,7 +417,8 @@ def main():
                 (sensitivity_fig, 'sensitivity', 'Sensitivity plot'),
                 (lick_fig, 'lick_count', 'Lick count plot'),
                 (reward_fig, 'reward_count', 'Reward count plot'),
-                (avg_reward_fig, 'avg_reward', 'Average rewards plot')
+                (avg_reward_fig, 'avg_reward', 'Average rewards plot'),
+                (sex_reward_fig, 'sex_reward', 'Sex-specific average rewards plot')
             ]
 
             # Save all plots
