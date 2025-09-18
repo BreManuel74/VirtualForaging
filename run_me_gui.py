@@ -218,11 +218,66 @@ class TCPDataServer:
 class MousePortalGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Mouse Portal Control")
+        self.root.title("Game Control")
         self.root.geometry("800x600")
         
+        # Set dark theme
+        self.root.configure(bg='black')
+        style = ttk.Style()
+        style.configure(".", background='black', foreground='white')
+        style.configure("TFrame", background='black')
+        
+        # Configure custom styles for better visibility
+        style.configure("Custom.TLabelframe", background='black')
+        style.configure("Custom.TLabelframe.Label", background='black', foreground='white')
+        style.configure("Custom.TLabel", background='black', foreground='white')
+        
+        # Default styles
+        style.configure("TLabelframe", background='black')
+        style.configure("TLabelframe.Label", background='black', foreground='white')
+        style.configure("TLabel", background='black', foreground='white')
+        
+        # Configure button style with proper contrast
+        style.configure("TButton", 
+            background='gray30', 
+            foreground='black',
+            bordercolor='gray40',
+            lightcolor='gray40',
+            darkcolor='gray20'
+        )
+        style.map("TButton",
+            background=[('active', 'gray40'), ('pressed', 'gray20')],
+            foreground=[('active', 'black'), ('pressed', 'black')]
+        )
+        
+        # Configure entry and combobox styles
+        style.configure("TEntry", 
+            fieldbackground='gray20', 
+            foreground='black',
+            insertcolor='black'
+        )
+        style.map("TEntry",
+            fieldbackground=[('readonly', 'gray20')],
+            foreground=[('readonly', 'black')]
+        )
+        style.configure("TCombobox", 
+            fieldbackground='gray20', 
+            background='gray30',
+            foreground='black',
+            arrowcolor='black',
+            selectbackground='gray40',
+            selectforeground='black'
+        )
+        style.map('TCombobox',
+            fieldbackground=[('readonly', 'gray20')],
+            selectbackground=[('readonly', 'gray40')],
+            background=[('readonly', 'gray30'), ('active', 'gray40')],
+            foreground=[('readonly', 'black')],
+            arrowcolor=[('readonly', 'black')]
+        )
+        
         # Create main frame with padding
-        main_frame = ttk.Frame(root, padding="10")
+        main_frame = ttk.Frame(root, padding="10", style="TFrame")
         main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         
         # Setup variables
@@ -250,30 +305,30 @@ class MousePortalGUI:
         
     def create_setup_frame(self, parent):
         # Setup Frame
-        setup_frame = ttk.LabelFrame(parent, text="Setup", padding="5")
+        setup_frame = ttk.LabelFrame(parent, text="Setup", padding="5", style="Custom.TLabelframe")
         setup_frame.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
         
         # Animal Name
-        ttk.Label(setup_frame, text="Animal Name:").grid(row=0, column=0, sticky=tk.W)
-        ttk.Entry(setup_frame, textvariable=self.animal_name).grid(row=0, column=1, sticky=(tk.W, tk.E))
+        ttk.Label(setup_frame, text="Animal Name:", style="Custom.TLabel").grid(row=0, column=0, sticky=tk.W)
+        ttk.Entry(setup_frame, textvariable=self.animal_name, style="TEntry").grid(row=0, column=1, sticky=(tk.W, tk.E))
         
         # Batch ID
-        ttk.Label(setup_frame, text="Batch ID:").grid(row=1, column=0, sticky=tk.W)
-        ttk.Entry(setup_frame, textvariable=self.batch_id).grid(row=1, column=1, sticky=(tk.W, tk.E))
+        ttk.Label(setup_frame, text="Batch ID:", style="Custom.TLabel").grid(row=1, column=0, sticky=tk.W)
+        ttk.Entry(setup_frame, textvariable=self.batch_id, style="TEntry").grid(row=1, column=1, sticky=(tk.W, tk.E))
         
         # Teensy Port
-        ttk.Label(setup_frame, text="Teensy Port:").grid(row=2, column=0, sticky=tk.W)
-        ttk.Entry(setup_frame, textvariable=self.teensy_port).grid(row=2, column=1, sticky=(tk.W, tk.E))
+        ttk.Label(setup_frame, text="Teensy Port:", style="Custom.TLabel").grid(row=2, column=0, sticky=tk.W)
+        ttk.Entry(setup_frame, textvariable=self.teensy_port, style="TEntry").grid(row=2, column=1, sticky=(tk.W, tk.E))
         
         # Output Directory
-        ttk.Label(setup_frame, text="Output Directory:").grid(row=3, column=0, sticky=tk.W)
+        ttk.Label(setup_frame, text="Output Directory:", style="Custom.TLabel").grid(row=3, column=0, sticky=tk.W)
         dir_frame = ttk.Frame(setup_frame)
         dir_frame.grid(row=3, column=1, sticky=(tk.W, tk.E))
-        ttk.Entry(dir_frame, textvariable=self.output_dir).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Entry(dir_frame, textvariable=self.output_dir, style="TEntry").pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(dir_frame, text="Browse", command=self.browse_output_dir).pack(side=tk.RIGHT)
         
         # Level Selection
-        ttk.Label(setup_frame, text="Starting Level:").grid(row=4, column=0, sticky=tk.W)
+        ttk.Label(setup_frame, text="Starting Level:", style="Custom.TLabel").grid(row=4, column=0, sticky=tk.W)
         self.level_combobox = ttk.Combobox(setup_frame, state="readonly")
         self.level_combobox.grid(row=4, column=1, sticky=(tk.W, tk.E))
         self.update_level_list()
@@ -286,15 +341,15 @@ class MousePortalGUI:
         
     def create_level_control_frame(self, parent):
         # Level Control Frame
-        control_frame = ttk.LabelFrame(parent, text="Level Control", padding="5")
+        control_frame = ttk.LabelFrame(parent, text="Level Control", padding="5", style="Custom.TLabelframe")
         control_frame.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
         
         # Current Level Display
-        ttk.Label(control_frame, text="Current Level:").grid(row=0, column=0, sticky=tk.W)
-        ttk.Label(control_frame, textvariable=self.current_level).grid(row=0, column=1, sticky=tk.W)
+        ttk.Label(control_frame, text="Current Level:", style="Custom.TLabel").grid(row=0, column=0, sticky=tk.W)
+        ttk.Label(control_frame, textvariable=self.current_level, style="Custom.TLabel").grid(row=0, column=1, sticky=tk.W)
         
         # Level Control Buttons
-        button_frame = ttk.Frame(control_frame)
+        button_frame = ttk.Frame(control_frame, style="TFrame")
         button_frame.grid(row=1, column=0, columnspan=2, pady=5)
         ttk.Button(button_frame, text="Next Level", command=self.change_to_next_level).pack(side=tk.LEFT, padx=5)
         ttk.Button(button_frame, text="List Levels", command=self.show_level_list).pack(side=tk.LEFT, padx=5)
@@ -302,17 +357,17 @@ class MousePortalGUI:
         
     def create_console_frame(self, parent):
         # Console Frame
-        console_frame = ttk.LabelFrame(parent, text="Console Output", padding="5")
+        console_frame = ttk.LabelFrame(parent, text="Console Output", padding="5", style="Custom.TLabelframe")
         console_frame.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
         
-        # Console Output
-        self.console = ScrolledText(console_frame, height=10, width=70)
+        # Console Output with dark theme
+        self.console = ScrolledText(console_frame, height=10, width=70, bg='black', fg='black', insertbackground='white')
         self.console.pack(fill=tk.BOTH, expand=True)
         
         # Command Entry
-        cmd_frame = ttk.Frame(console_frame)
+        cmd_frame = ttk.Frame(console_frame, style="TFrame")
         cmd_frame.pack(fill=tk.X, pady=(5, 0))
-        ttk.Label(cmd_frame, text="Command:").pack(side=tk.LEFT)
+        ttk.Label(cmd_frame, text="Command:", style="Custom.TLabel").pack(side=tk.LEFT)
         self.cmd_entry = ttk.Entry(cmd_frame)
         self.cmd_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
         ttk.Button(cmd_frame, text="Send", command=self.send_command).pack(side=tk.LEFT)
