@@ -59,24 +59,47 @@ class TCPDataServer:
         self.available_levels = self._get_available_levels()
         self._shutdown_lock = threading.Lock()
         self._cleanup_registered = False
+        self.current_level_index = 0  # Track the current level index
         
     def _get_available_levels(self):
-        """Get list of available level files."""
+        """Get list of available level files sorted by their numeric order."""
         try:
             levels_path = os.path.join(os.getcwd(), self.levels_folder)
-            return [f for f in os.listdir(levels_path) if f.endswith('.json')]
+            # Get all JSON files
+            level_files = [f for f in os.listdir(levels_path) if f.endswith('.json')]
+            
+            # Sort levels based on their numeric value
+            def extract_number(filename):
+                # Extract number from level_X.json format
+                try:
+                    return int(''.join(filter(str.isdigit, filename)))
+                except:
+                    return float('inf')  # Put non-numeric levels at the end
+            
+            # Sort levels by their numeric value
+            level_files.sort(key=extract_number)
+            
+            # Store the ordered levels as a class attribute for later use
+            self.ordered_levels = level_files
+            
+            return level_files
         except:
+            self.ordered_levels = []
             return []
     
     def list_available_levels(self):
-        """Return formatted list of available levels."""
+        """Return formatted list of available levels in sequential order."""
         if not self.available_levels:
             return "No level files found."
         
-        level_list = "Available levels:\n"
-        for idx, level in enumerate(self.available_levels, 1):
+        level_list = "Available levels (in sequential order):\n"
+        for idx, level in enumerate(self.ordered_levels, 1):
             level_list += f"{idx}: {level}\n"
         return level_list.strip()
+            
+    def get_ordered_levels(self):
+        """Get the list of levels in their sequential numeric order."""
+        return self.ordered_levels.copy()
         
     def start_server(self):
         """Start the TCP server in a separate thread."""
@@ -167,7 +190,22 @@ class TCPDataServer:
     def send_level_change(self, level_file):
         """Send level change command to the game."""
         command = f"CHANGE_LEVEL:{level_file}"
-        return self.send_data(command)
+        # Update current_level_index if the level change is successful
+        if self.send_data(command):
+            try:
+                self.current_level_index = self.ordered_levels.index(level_file)
+                return True
+            except ValueError:
+                print(f"Warning: Level {level_file} not found in ordered levels")
+                return True
+        return False
+        
+    def get_next_level(self):
+        """Get the next level in the sequence."""
+        if not self.ordered_levels:
+            return None
+        next_index = (self.current_level_index + 1) % len(self.ordered_levels)
+        return self.ordered_levels[next_index]
     
     def stop_server(self):
         """Stop the TCP server with proper thread cleanup."""
@@ -228,20 +266,20 @@ def _interactive_command_interface(tcp_server):
                 elif command == 'list_levels':
                     print(tcp_server.list_available_levels())
                 elif command == 'change_level':
-                    print(tcp_server.list_available_levels())
-                    try:
-                        choice = int(input("Select level number: ")) - 1
-                        if 0 <= choice < len(tcp_server.available_levels):
-                            selected_level = tcp_server.available_levels[choice]
-                            success = tcp_server.send_level_change(selected_level)
-                            if success:
-                                print(f"Sent level change to: {selected_level}")
-                            else:
-                                print(f"Failed to send level change command")
+                    # Get the next level in sequence
+                    next_level = tcp_server.get_next_level()
+                    if next_level:
+                        success = tcp_server.send_level_change(next_level)
+                        if success:
+                            print(f"Advanced to next level: {next_level}")
+                            # Show current position in level sequence
+                            current_idx = tcp_server.current_level_index + 1
+                            total_levels = len(tcp_server.ordered_levels)
+                            print(f"Current progress: Level {current_idx} of {total_levels}")
                         else:
-                            print("Invalid selection")
-                    except (ValueError, IndexError):
-                        print("Invalid input. Please enter a number.")
+                            print("Failed to send level change command")
+                    else:
+                        print("No levels available")
                 elif command:
                     success = tcp_server.send_data(command)
                     if success:
@@ -392,7 +430,7 @@ if __name__ == "__main__":
     
     animal_name = input("Enter animal name: ")
     level_file = select_file('Levels', '.json')
-    phase_file = select_file('Phases', '.py')
+    phase_file = os.path.join(os.getcwd(), 'Phases', 'final.py')  # Automatically select final.py
     output_dir = select_dir(os.getcwd())
     batch_id = input("Enter batch ID number: ")
     teensy_port = input("Enter Teensy port (e.g., COM3): ")

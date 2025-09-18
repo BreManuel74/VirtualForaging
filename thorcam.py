@@ -3,7 +3,7 @@ import cv2
 import numpy as np
 import pymmcore_plus
 import time
-from Phases.user import Stopwatch
+from Phases.final import Stopwatch
 
 def main():
     global_stopwatch = Stopwatch()
@@ -16,10 +16,10 @@ def main():
 
     # Initialize the Micro-Manager core
     mmc = pymmcore_plus.CMMCorePlus()
-    mmc.loadSystemConfiguration(r'C:\Program Files\Micro-Manager-2.0\ThorCam.cfg')
+    mmc.loadSystemConfiguration(r"C:\Users\Sipe_Lab\Downloads\MMConfig_thorcam.cfg")
     mmc.setCameraDevice(camera_device)
     # Set camera exposure lower to make the image dimmer
-    mmc.setProperty(camera_device, "Exposure", 2)  # Set to your desired value in ms (e.g., 1 for minimum)
+    mmc.setProperty(camera_device, "Exposure", 4)  # Set to your desired value in ms (e.g., 1 for minimum)
 
     #print(mmc.getDevicePropertyNames(camera_device))
 
