@@ -221,6 +221,12 @@ class MousePortalGUI:
         self.root.title("Game Control")
         self.root.geometry("800x600")
         
+        # For trial log monitoring
+        self.trial_log_path = None
+        self.trial_log_data = None
+        self.monitor_thread = None
+        self.should_monitor = False
+        
         # Set dark theme
         self.root.configure(bg='black')
         style = ttk.Style()
@@ -286,6 +292,7 @@ class MousePortalGUI:
         self.teensy_port = tk.StringVar(value="COM3")
         self.current_level = tk.StringVar()
         self.output_dir = tk.StringVar(value=os.getcwd())
+        self.reward_count = tk.StringVar(value="0")
         
         # Setup GUI elements
         self.create_setup_frame(main_frame)
@@ -343,10 +350,17 @@ class MousePortalGUI:
         # Level Control Frame
         control_frame = ttk.LabelFrame(parent, text="Level Control", padding="5", style="Custom.TLabelframe")
         control_frame.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
+        control_frame.columnconfigure(2, weight=1)  # Make reward counter stick to right
         
         # Current Level Display
         ttk.Label(control_frame, text="Current Level:", style="Custom.TLabel").grid(row=0, column=0, sticky=tk.W)
         ttk.Label(control_frame, textvariable=self.current_level, style="Custom.TLabel").grid(row=0, column=1, sticky=tk.W)
+        
+        # Reward Counter Display
+        reward_frame = ttk.Frame(control_frame)
+        reward_frame.grid(row=0, column=2, padx=20, sticky=tk.E)
+        ttk.Label(reward_frame, text="Rewards:", style="Custom.TLabel").pack(side=tk.LEFT)
+        ttk.Label(reward_frame, textvariable=self.reward_count, style="Custom.TLabel").pack(side=tk.LEFT, padx=(5, 0))
         
         # Level Control Buttons
         button_frame = ttk.Frame(control_frame, style="TFrame")
@@ -361,7 +375,7 @@ class MousePortalGUI:
         console_frame.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
         
         # Console Output with dark theme
-        self.console = ScrolledText(console_frame, height=10, width=70, bg='black', fg='black', insertbackground='white')
+        self.console = ScrolledText(console_frame, height=10, width=70, bg='black', fg='white', insertbackground='white')
         self.console.pack(fill=tk.BOTH, expand=True)
         
         # Command Entry
@@ -453,6 +467,9 @@ class MousePortalGUI:
             self.log_to_console(f"Error logging run: {str(e)}")
     
     def cleanup_resources(self):
+        # First stop trial monitoring to ensure no new file access attempts
+        self.stop_trial_monitoring()
+        
         if self.tcp_server:
             self.tcp_server.stop_server()
             self.tcp_server = None
@@ -501,45 +518,93 @@ class MousePortalGUI:
         if messagebox.askyesno("Confirm Stop", "Are you sure you want to stop the current session?"):
             self.log_to_console("\nShutting down...")
             
+            # Stop trial log monitoring first
+            self.log_to_console("Stopping trial monitoring...")
+            self.stop_trial_monitoring()
+            
             try:
-                # First create the stop file for thorcam
-                stop_file = os.path.join(self.output_dir.get(), "stop_recording.flag")
+                # Signal thorcam to stop - create flag in the same directory as run_me.py
+                stop_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stop_recording.flag")
+                
+                # Check for any existing stop file and remove it first
+                if os.path.exists(stop_file):
+                    try:
+                        os.remove(stop_file)
+                    except:
+                        pass
+                
+                # Create fresh stop file to signal thorcam
                 with open(stop_file, 'w') as f:
                     f.write('stop')
                 self.log_to_console("Signaling thorcam to stop...")
                 
-                # Give thorcam a moment to detect the flag and cleanup
-                time.sleep(2)
+                # Wait for thorcam to detect flag and stop recording (increased timeout)
+                max_wait = 15  # Maximum seconds to wait
+                start_time = time.time()
                 
-                # Cleanup resources in the correct order
-                if self.tcp_server:
-                    # First stop the TCP server
-                    self.tcp_server.stop_server()
-                    self.tcp_server = None
-                
-                if self.process:
+                # Wait for evidence of thorcam stopping
+                thorcam_stopped = False
+                while time.time() - start_time < max_wait:
+                    # Check for recently created video or log files
                     try:
-                        # Gracefully terminate the Panda3D process
-                        self.process.terminate()
-                        # Wait for process to end
-                        try:
-                            self.process.wait(timeout=5)
-                        except subprocess.TimeoutExpired:
-                            # Force kill if process doesn't terminate
-                            self.process.kill()
-                            self.process.wait()
-                    except Exception as e:
-                        self.log_to_console(f"Error stopping process: {str(e)}")
-                    finally:
-                        self.process = None
+                        output_dir = self.output_dir.get()
+                        # Check for recently created video or log files
+                        recent_files = [f for f in os.listdir(output_dir) 
+                                      if (f.endswith('pupil_cam.avi') or f.endswith('_frame_log.txt'))
+                                      and os.path.getmtime(os.path.join(output_dir, f)) > start_time]
+                        if recent_files:
+                            thorcam_stopped = True
+                            self.log_to_console("Thorcam stopped successfully - output files detected")
+                            break
+                    except:
+                        pass
+                    time.sleep(0.5)
+                        
+                if not thorcam_stopped:
+                    self.log_to_console("Warning: Thorcam may still be running - no confirmation of shutdown")
                 
-                # Remove the stop file
+                # Always clean up the stop file regardless of detection status
                 try:
                     if os.path.exists(stop_file):
                         os.remove(stop_file)
+                        self.log_to_console("Removed stop recording flag")
                 except Exception as e:
-                    self.log_to_console(f"Warning: Could not remove stop file: {str(e)}")
+                    self.log_to_console(f"Warning: Could not remove stop recording flag: {str(e)}")
                 
+                # Cleanup resources in the correct order
+                # 1. Stop TCP server first to prevent new commands
+                if self.tcp_server:
+                    self.log_to_console("Stopping TCP server...")
+                    self.tcp_server.stop_server()
+                    self.tcp_server = None
+                    self.log_to_console("TCP server stopped")
+                
+                # 2. Stop the Panda3D process
+                if self.process:
+                    try:
+                        self.log_to_console("Stopping Panda3D process...")
+                        # Get the return code if process already finished
+                        if self.process.poll() is not None:
+                            exit_code = self.process.returncode
+                            self.log_to_console(f"Panda3D process had already exited with code {exit_code}")
+                        else:
+                            # Gracefully terminate first
+                            self.process.terminate()
+                            try:
+                                exit_code = self.process.wait(timeout=3)  # Give it 3 seconds to terminate gracefully
+                                self.log_to_console(f"Panda3D process stopped gracefully (exit code: {exit_code})")
+                            except subprocess.TimeoutExpired:
+                                self.log_to_console("Forcing Panda3D process to stop...")
+                                # Force kill if it doesn't terminate
+                                self.process.kill()
+                                exit_code = self.process.wait(timeout=2)
+                                self.log_to_console(f"Panda3D process force-stopped (exit code: {exit_code})")
+                    except Exception as e:
+                        self.log_to_console(f"Error stopping Panda3D process: {str(e)}")
+                    finally:
+                        self.process = None
+                
+                # Let thorcam handle the stop file cleanup
                 self.log_to_console("Session stopped successfully")
                 
                 # Clear current level display
@@ -549,6 +614,103 @@ class MousePortalGUI:
                 self.log_to_console(f"Error during shutdown: {str(e)}")
                 # Still try to cleanup even if there was an error
                 self.cleanup_resources()
+    
+    def update_reward_count(self):
+        """Update the reward count display based on trial log data."""
+        if self.trial_log_data is not None and 'reward_event' in self.trial_log_data.columns:
+            # Count how many non-null and non-empty values are in the reward_event column
+            # as each timestamp represents a reward event
+            count = self.trial_log_data['reward_event'].notna().sum()
+            self.reward_count.set(f"{count}")
+            # Debug output for monitoring
+            if count > 0:
+                self.log_to_console(f"Rewards updated: {count} total rewards")
+        else:
+            self.reward_count.set("0")
+            self.log_to_console("No reward events found in trial log")
+    
+    def monitor_trial_log(self):
+        """Monitor for and read updates from the trial log CSV file."""
+        import glob
+        import pandas as pd
+        
+        while self.should_monitor:
+            try:
+                # Look for trial log file in the behavioral data directory structure
+                base_dir = self.output_dir.get()
+                # Search recursively through directories for trial logs
+                search_pattern = os.path.join(base_dir, "**", "*trial_log*.csv")
+                trial_logs = glob.glob(search_pattern, recursive=True)
+                
+                # Debug output for file search
+                if not trial_logs and (not hasattr(self, '_last_debug_time') or time.time() - self._last_debug_time > 5):
+                    self.log_to_console(f"Searching for trial logs in: {search_pattern}")
+                    self._last_debug_time = time.time()
+                    
+                    # List all files in the directory for debugging
+                    try:
+                        # Walk through directories to find CSV files
+                        csv_files = []
+                        for root, _, files in os.walk(base_dir):
+                            for file in files:
+                                if file.endswith('.csv'):
+                                    csv_files.append(os.path.join(root, file))
+                        if csv_files:
+                            self.log_to_console(f"Found CSV files: {', '.join(os.path.basename(f) for f in csv_files)}")
+                    except Exception as e:
+                        self.log_to_console(f"Error listing directory: {str(e)}")
+                
+                if trial_logs:
+                    newest_log = max(trial_logs, key=os.path.getmtime)
+                    
+                    # If we found a new log file
+                    if newest_log != self.trial_log_path:
+                        self.trial_log_path = newest_log
+                        self.log_to_console(f"Found trial log: {os.path.basename(newest_log)}")
+                    
+                    # Read the CSV file if it exists
+                    if os.path.exists(newest_log):
+                        try:
+                            new_data = pd.read_csv(newest_log)
+                            self.trial_log_data = new_data
+                            # Update the reward count in the main thread
+                            self.root.after(0, self.update_reward_count)  # Update in main thread
+                        except pd.errors.EmptyDataError:
+                            # File exists but is empty
+                            pass
+                        except Exception as e:
+                            self.log_to_console(f"Error reading trial log: {str(e)}")
+                
+                time.sleep(1)  # Check every second
+                
+            except Exception as e:
+                self.log_to_console(f"Error monitoring trial log: {str(e)}")
+                time.sleep(1)
+    
+    def start_trial_monitoring(self):
+        """Start the trial log monitoring thread."""
+        self.should_monitor = True
+        self.monitor_thread = threading.Thread(target=self.monitor_trial_log, daemon=True)
+        self.monitor_thread.start()
+    
+    def stop_trial_monitoring(self):
+        """Stop the trial log monitoring thread."""
+        if self.monitor_thread and self.monitor_thread.is_alive():
+            self.should_monitor = False
+            try:
+                self.monitor_thread.join(timeout=2)
+                if self.monitor_thread.is_alive():
+                    self.log_to_console("Warning: Trial monitoring thread did not stop cleanly")
+            except Exception as e:
+                self.log_to_console(f"Error stopping trial monitoring: {str(e)}")
+            finally:
+                self.monitor_thread = None
+                self.trial_log_path = None
+                self.trial_log_data = None
+    
+    def get_trial_data(self):
+        """Get the current trial log data."""
+        return self.trial_log_data
     
     def start_session(self):
         # Validate inputs
@@ -584,6 +746,9 @@ class MousePortalGUI:
             
             # Set initial current level
             self.current_level.set(self.level_combobox.get())
+            
+            # Start monitoring for trial log
+            self.start_trial_monitoring()
             
             # Log success
             self.log_to_console(f"Started session with:")
