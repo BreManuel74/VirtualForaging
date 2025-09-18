@@ -11,7 +11,7 @@ def main():
 
     camera_device = "ThorCam"
     video_dir = os.environ.get("OUTPUT_DIR")
-    fps = 30
+    fps = 20
     stop_file = "stop_recording.flag"
 
     # Initialize the Micro-Manager core
@@ -19,7 +19,7 @@ def main():
     mmc.loadSystemConfiguration(r'C:\Program Files\Micro-Manager-2.0\ThorCam.cfg')
     mmc.setCameraDevice(camera_device)
     # Set camera exposure lower to make the image dimmer
-    mmc.setProperty(camera_device, "Exposure", 6)  # Set to your desired value in ms (e.g., 1 for minimum)
+    mmc.setProperty(camera_device, "Exposure", 2)  # Set to your desired value in ms (e.g., 1 for minimum)
 
     #print(mmc.getDevicePropertyNames(camera_device))
 
@@ -42,35 +42,70 @@ def main():
     try:
         mmc.startSequenceAcquisition(num_frames, 0, True)
         print(f"Recording started on {camera_device}.")
+        
+        # Initialize timing variables
+        frame_interval = 1.0 / fps  # Time between frames at desired FPS
+        next_frame_time = time.time()  # When to capture next frame
+        saved_frames = 0
 
-        # Retrieve and save frames to the video
         while True:
             if os.path.exists(stop_file):
                 print("Stop file detected. Terminating recording.")
                 break
-            if mmc.getRemainingImageCount() > 0:
-                image = mmc.popNextImage()  # Retrieve the next image
-                frame = np.reshape(image, (frame_height, frame_width))  # Reshape to 2D array
 
-                # --- Live view window (no quit feature) ---
-                cv2.imshow("Live View", frame.astype(np.uint8))
-                cv2.waitKey(1)
-                # ------------------------------------------
-
-                video_writer.write(frame.astype(np.uint8))  # Write frame to video
-                num_frames += 1
-                # Write time and frame number to text file
-                log_file.write(f"{global_stopwatch.get_elapsed_time():.2f}\t{num_frames}\n")
-                log_file.flush()
-            else:
-                time.sleep(0.01)  # Prevent busy-waiting
+            current_time = time.time()
+            
+            # Check if it's time for the next frame
+            if current_time >= next_frame_time:
+                # Clear the buffer to get the most recent frame
+                while mmc.getRemainingImageCount() > 1:
+                    mmc.popNextImage()
+                
+                if mmc.getRemainingImageCount() > 0:
+                    image = mmc.popNextImage()  # Retrieve the next image
+                    frame = np.reshape(image, (frame_height, frame_width))  # Reshape to 2D array
+                    
+                    # Always show live view
+                    cv2.imshow("Live View", frame.astype(np.uint8))
+                    cv2.waitKey(1)
+                    
+                    # Save frame
+                    video_writer.write(frame.astype(np.uint8))
+                    saved_frames += 1
+                    
+                    # Write time and frame number to text file
+                    log_file.write(f"{global_stopwatch.get_elapsed_time():.2f}\t{saved_frames}\n")
+                    log_file.flush()
+                    
+                    # Calculate next frame time - add frame_interval to the original next_frame_time
+                    # This prevents drift that could occur if we used current_time + frame_interval
+                    next_frame_time += frame_interval
+                    
+                    # If we've fallen way behind (e.g., due to system lag), reset timing
+                    if next_frame_time < current_time - frame_interval:
+                        next_frame_time = current_time + frame_interval
+                        print("Warning: Video timing reset due to system lag")
+            
+            # Small sleep to prevent busy-waiting, but short enough to not miss frame times
+            time.sleep(0.0005)
     finally:
+        # Process any remaining frames in the buffer before stopping
+        print("Processing remaining frames in buffer...")
+        while mmc.getRemainingImageCount() > 0:
+            image = mmc.popNextImage()  # Retrieve the next image
+            frame = np.reshape(image, (frame_height, frame_width))  # Reshape to 2D array
+            video_writer.write(frame.astype(np.uint8))  # Write frame to video
+            num_frames += 1
+            log_file.write(f"{global_stopwatch.get_elapsed_time():.2f}\t{num_frames}\n")
+            log_file.flush()
+
         mmc.stopSequenceAcquisition()
         video_writer.release()  # Release the video writer
         log_file.close()
         cv2.destroyAllWindows()  # Close the live view window
         print(f"Recording stopped on {camera_device}. Video saved at {out_filename}.")
         print(f"Frame log saved at {log_path}")
+        #print(f"Total frames recorded: {num_frames}")
 
 if __name__ == "__main__":
     main()
