@@ -28,14 +28,16 @@ class TCPDataServer:
         self.available_levels = self._get_available_levels()
         self._shutdown_lock = threading.Lock()
         self._cleanup_registered = False
-        self.current_level_index = 0  # Track the current level index
-        
+        self.current_level_index = None
+    
     def _get_available_levels(self):
         """Get list of available level files sorted by their numeric order."""
         try:
             levels_path = os.path.join(os.getcwd(), self.levels_folder)
             # Get all JSON files
             level_files = [f for f in os.listdir(levels_path) if f.endswith('.json')]
+            
+            print(f"Found level files: {level_files}")  # Debug print
             
             # Sort levels based on their numeric value
             def extract_number(filename):
@@ -48,11 +50,14 @@ class TCPDataServer:
             # Sort levels by their numeric value
             level_files.sort(key=extract_number)
             
+            print(f"Sorted level files: {level_files}")  # Debug print
+            
             # Store the ordered levels as a class attribute for later use
             self.ordered_levels = level_files
             
             return level_files
-        except:
+        except Exception as e:
+            print(f"Error loading levels: {e}")  # Debug print
             self.ordered_levels = []
             return []
     
@@ -159,10 +164,13 @@ class TCPDataServer:
     def send_level_change(self, level_file):
         """Send level change command to the game."""
         command = f"CHANGE_LEVEL:{level_file}"
-        # Update current_level_index if the level change is successful
         if self.send_data(command):
             try:
-                self.current_level_index = self.ordered_levels.index(level_file)
+                # Set the current index based on the actual level file
+                if level_file in self.ordered_levels:
+                    self.current_level_index = self.ordered_levels.index(level_file)
+                    print(f"Set current level index to {self.current_level_index} for {level_file}")
+                    print(f"Available levels: {self.ordered_levels}")  # Debug print
                 return True
             except ValueError:
                 print(f"Warning: Level {level_file} not found in ordered levels")
@@ -171,11 +179,19 @@ class TCPDataServer:
         
     def get_next_level(self):
         """Get the next level in the sequence."""
-        if not self.ordered_levels:
+        if not self.ordered_levels or self.current_level_index is None:
+            print(f"Debug - ordered_levels: {self.ordered_levels}")  # Debug print
+            print(f"Debug - current_level_index: {self.current_level_index}")  # Debug print
             return None
-        next_index = (self.current_level_index + 1) % len(self.ordered_levels)
+            
+        next_index = self.current_level_index + 1
+        print(f"Debug - next_index: {next_index}, max index: {len(self.ordered_levels)-1}")  # Debug print
+        
+        if next_index >= len(self.ordered_levels):
+            return None
+            
         return self.ordered_levels[next_index]
-    
+
     def stop_server(self):
         """Stop the TCP server with proper thread cleanup."""
         with self._shutdown_lock:
@@ -215,6 +231,14 @@ class TCPDataServer:
         """Destructor to ensure cleanup."""
         self.stop_server()
 
+    def set_initial_level(self, level_file):
+        """Set the initial level index when starting a session."""
+        if level_file in self.ordered_levels:
+            self.current_level_index = self.ordered_levels.index(level_file)
+            print(f"Set initial level index to {self.current_level_index} for {level_file}")
+            return True
+        return False
+
 class MousePortalGUI:
     def __init__(self, root):
         self.root = root
@@ -226,6 +250,8 @@ class MousePortalGUI:
         self.trial_log_data = None
         self.monitor_thread = None
         self.should_monitor = False
+        self.last_reward_time = None  # Track the timestamp of last counted reward
+        self.level_just_changed = False  # Flag to track level changes
         
         # Set dark theme
         self.root.configure(bg='black')
@@ -434,12 +460,19 @@ class MousePortalGUI:
             if next_level:
                 success = self.tcp_server.send_level_change(next_level)
                 if success:
+                    # Reset reward counter to 0 for new level
+                    self.reward_count.set("0")
+                    self.last_reward_time = None
+                    self.level_just_changed = True
+                    
                     self.current_level.set(next_level)
                     current_idx = self.tcp_server.current_level_index + 1
                     total_levels = len(self.tcp_server.ordered_levels)
                     self.log_to_console(f"Advanced to: {next_level} (Level {current_idx} of {total_levels})")
                 else:
                     self.log_to_console("Failed to change level")
+            else:
+                self.log_to_console("No more levels available")
     
     def show_level_list(self):
         if self.tcp_server:
@@ -617,17 +650,38 @@ class MousePortalGUI:
     
     def update_reward_count(self):
         """Update the reward count display based on trial log data."""
+        import pandas as pd
+        
         if self.trial_log_data is not None and 'reward_event' in self.trial_log_data.columns:
-            # Count how many non-null and non-empty values are in the reward_event column
-            # as each timestamp represents a reward event
-            count = self.trial_log_data['reward_event'].notna().sum()
-            self.reward_count.set(f"{count}")
-            # Debug output for monitoring
-            if count > 0:
-                self.log_to_console(f"Rewards updated: {count} total rewards")
+            # Get all rewards and clean them up
+            rewards = self.trial_log_data['reward_event'].dropna()
+            rewards = pd.to_numeric(rewards, errors='coerce').dropna()
+            
+            if not rewards.empty:
+                # Get the most recent reward time
+                latest_reward = rewards.max()
+                
+                if self.last_reward_time is None:
+                    # This is a new level or first time - initialize counter at 0
+                    self.last_reward_time = latest_reward
+                    self.reward_count.set("0")
+                    return  # Important: return here to wait for new rewards
+                
+                # Find rewards newer than our last seen reward
+                new_rewards = rewards[rewards > self.last_reward_time]
+                if not new_rewards.empty:
+                    # Get current count and add new rewards
+                    current_count = int(self.reward_count.get() or "0")
+                    current_count += len(new_rewards)
+                    # Update last reward time and display
+                    self.last_reward_time = new_rewards.max()
+                    self.reward_count.set(str(current_count))
+            else:
+                # No rewards yet
+                self.reward_count.set("0")
         else:
+            # No trial log data yet
             self.reward_count.set("0")
-            self.log_to_console("No reward events found in trial log")
     
     def monitor_trial_log(self):
         """Monitor for and read updates from the trial log CSV file."""
@@ -641,24 +695,6 @@ class MousePortalGUI:
                 # Search recursively through directories for trial logs
                 search_pattern = os.path.join(base_dir, "**", "*trial_log*.csv")
                 trial_logs = glob.glob(search_pattern, recursive=True)
-                
-                # Debug output for file search
-                if not trial_logs and (not hasattr(self, '_last_debug_time') or time.time() - self._last_debug_time > 5):
-                    self.log_to_console(f"Searching for trial logs in: {search_pattern}")
-                    self._last_debug_time = time.time()
-                    
-                    # List all files in the directory for debugging
-                    try:
-                        # Walk through directories to find CSV files
-                        csv_files = []
-                        for root, _, files in os.walk(base_dir):
-                            for file in files:
-                                if file.endswith('.csv'):
-                                    csv_files.append(os.path.join(root, file))
-                        if csv_files:
-                            self.log_to_console(f"Found CSV files: {', '.join(os.path.basename(f) for f in csv_files)}")
-                    except Exception as e:
-                        self.log_to_console(f"Error listing directory: {str(e)}")
                 
                 if trial_logs:
                     newest_log = max(trial_logs, key=os.path.getmtime)
@@ -733,6 +769,11 @@ class MousePortalGUI:
             self.tcp_server = TCPDataServer()
             server_port = self.tcp_server.start_server()
             
+            # Set the initial level index
+            initial_level = self.level_combobox.get()
+            if not self.tcp_server.set_initial_level(initial_level):
+                raise Exception(f"Invalid starting level: {initial_level}")
+            
             # Set up environment variables
             env = os.environ.copy()
             env["LEVEL_CONFIG_PATH"] = level_file_path
@@ -746,6 +787,11 @@ class MousePortalGUI:
             
             # Set initial current level
             self.current_level.set(self.level_combobox.get())
+            
+            # Initialize reward counting for the first level at 0
+            self.reward_count.set("0")
+            self.last_reward_time = None  # Will be set when first reward comes in
+            self.level_just_changed = True  # Treat initial level like a level change
             
             # Start monitoring for trial log
             self.start_trial_monitoring()
