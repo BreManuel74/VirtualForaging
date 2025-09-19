@@ -29,6 +29,10 @@ class TCPDataServer:
         self._shutdown_lock = threading.Lock()
         self._cleanup_registered = False
         self.current_level_index = None
+        # Add reward tracking
+        self.reward_count = 0
+        self.reward_callback = None
+        self._reward_lock = threading.Lock()
     
     def _get_available_levels(self):
         """Get list of available level files sorted by their numeric order."""
@@ -119,10 +123,22 @@ class TCPDataServer:
                     # Keep connection alive while running
                     while self.running and self.client_socket:
                         try:
-                            # Check if connection is still alive
+                            # Check for incoming data
                             self.client_socket.settimeout(1.0)
-                            time.sleep(0.1)
-                        except:
+                            data = self.client_socket.recv(1024).decode('utf-8')
+                            if data:
+                                # Handle each line separately
+                                for line in data.splitlines():
+                                    if line:
+                                        self._handle_received_data(line)
+                            else:
+                                # Empty data means connection closed
+                                break
+                        except socket.timeout:
+                            # Timeout is normal, continue listening
+                            continue
+                        except Exception as e:
+                            print(f"Error receiving data: {e}")
                             break
                     break
                 except socket.timeout:
@@ -160,12 +176,38 @@ class TCPDataServer:
             else:
                 print("No client connected")
                 return False
+                
+    def _handle_received_data(self, data):
+        """Handle data received from the game client."""
+        try:
+            data = data.strip()
+            if data.startswith("REWARD:"):
+                with self._reward_lock:
+                    self.reward_count += 1
+                    if self.reward_callback:
+                        self.reward_callback(self.reward_count)
+        except Exception as e:
+            print(f"Error handling received data: {e}")
+            
+    def set_reward_callback(self, callback):
+        """Set a callback function to be called when a reward is received."""
+        self.reward_callback = callback
+        
+    def reset_reward_count(self):
+        """Reset the reward counter to zero."""
+        with self._reward_lock:
+            self.reward_count = 0
+            if self.reward_callback:
+                self.reward_callback(self.reward_count)
     
     def send_level_change(self, level_file):
         """Send level change command to the game."""
         command = f"CHANGE_LEVEL:{level_file}"
         if self.send_data(command):
             try:
+                # Reset reward count for new level
+                self.reset_reward_count()
+                
                 # Set the current index based on the actual level file
                 if level_file in self.ordered_levels:
                     self.current_level_index = self.ordered_levels.index(level_file)
@@ -245,13 +287,8 @@ class MousePortalGUI:
         self.root.title("Game Control")
         self.root.geometry("800x600")
         
-        # For trial log monitoring
-        self.trial_log_path = None
-        self.trial_log_data = None
-        self.monitor_thread = None
-        self.should_monitor = False
-        self.last_reward_time = None  # Track the timestamp of last counted reward
-        self.level_just_changed = False  # Flag to track level changes
+        # For reward tracking
+        self._last_reward_count = 0  # For internal tracking
         
         # Set dark theme
         self.root.configure(bg='black')
@@ -460,11 +497,6 @@ class MousePortalGUI:
             if next_level:
                 success = self.tcp_server.send_level_change(next_level)
                 if success:
-                    # Reset reward counter to 0 for new level
-                    self.reward_count.set("0")
-                    self.last_reward_time = None
-                    self.level_just_changed = True
-                    
                     self.current_level.set(next_level)
                     current_idx = self.tcp_server.current_level_index + 1
                     total_levels = len(self.tcp_server.ordered_levels)
@@ -500,9 +532,6 @@ class MousePortalGUI:
             self.log_to_console(f"Error logging run: {str(e)}")
     
     def cleanup_resources(self):
-        # First stop trial monitoring to ensure no new file access attempts
-        self.stop_trial_monitoring()
-        
         if self.tcp_server:
             self.tcp_server.stop_server()
             self.tcp_server = None
@@ -550,10 +579,6 @@ class MousePortalGUI:
     def stop_session(self):
         if messagebox.askyesno("Confirm Stop", "Are you sure you want to stop the current session?"):
             self.log_to_console("\nShutting down...")
-            
-            # Stop trial log monitoring first
-            self.log_to_console("Stopping trial monitoring...")
-            self.stop_trial_monitoring()
             
             try:
                 # Signal thorcam to stop - create flag in the same directory as run_me.py
@@ -648,105 +673,9 @@ class MousePortalGUI:
                 # Still try to cleanup even if there was an error
                 self.cleanup_resources()
     
-    def update_reward_count(self):
-        """Update the reward count display based on trial log data."""
-        import pandas as pd
-        
-        if self.trial_log_data is not None and 'reward_event' in self.trial_log_data.columns:
-            # Get all rewards and clean them up
-            rewards = self.trial_log_data['reward_event'].dropna()
-            rewards = pd.to_numeric(rewards, errors='coerce').dropna()
-            
-            if not rewards.empty:
-                # Get the most recent reward time
-                latest_reward = rewards.max()
-                
-                if self.last_reward_time is None:
-                    # This is a new level or first time - initialize counter at 0
-                    self.last_reward_time = latest_reward
-                    self.reward_count.set("0")
-                    return  # Important: return here to wait for new rewards
-                
-                # Find rewards newer than our last seen reward
-                new_rewards = rewards[rewards > self.last_reward_time]
-                if not new_rewards.empty:
-                    # Get current count and add new rewards
-                    current_count = int(self.reward_count.get() or "0")
-                    current_count += len(new_rewards)
-                    # Update last reward time and display
-                    self.last_reward_time = new_rewards.max()
-                    self.reward_count.set(str(current_count))
-            else:
-                # No rewards yet
-                self.reward_count.set("0")
-        else:
-            # No trial log data yet
-            self.reward_count.set("0")
-    
-    def monitor_trial_log(self):
-        """Monitor for and read updates from the trial log CSV file."""
-        import glob
-        import pandas as pd
-        
-        while self.should_monitor:
-            try:
-                # Look for trial log file in the behavioral data directory structure
-                base_dir = self.output_dir.get()
-                # Search recursively through directories for trial logs
-                search_pattern = os.path.join(base_dir, "**", "*trial_log*.csv")
-                trial_logs = glob.glob(search_pattern, recursive=True)
-                
-                if trial_logs:
-                    newest_log = max(trial_logs, key=os.path.getmtime)
-                    
-                    # If we found a new log file
-                    if newest_log != self.trial_log_path:
-                        self.trial_log_path = newest_log
-                        self.log_to_console(f"Found trial log: {os.path.basename(newest_log)}")
-                    
-                    # Read the CSV file if it exists
-                    if os.path.exists(newest_log):
-                        try:
-                            new_data = pd.read_csv(newest_log)
-                            self.trial_log_data = new_data
-                            # Update the reward count in the main thread
-                            self.root.after(0, self.update_reward_count)  # Update in main thread
-                        except pd.errors.EmptyDataError:
-                            # File exists but is empty
-                            pass
-                        except Exception as e:
-                            self.log_to_console(f"Error reading trial log: {str(e)}")
-                
-                time.sleep(1)  # Check every second
-                
-            except Exception as e:
-                self.log_to_console(f"Error monitoring trial log: {str(e)}")
-                time.sleep(1)
-    
-    def start_trial_monitoring(self):
-        """Start the trial log monitoring thread."""
-        self.should_monitor = True
-        self.monitor_thread = threading.Thread(target=self.monitor_trial_log, daemon=True)
-        self.monitor_thread.start()
-    
-    def stop_trial_monitoring(self):
-        """Stop the trial log monitoring thread."""
-        if self.monitor_thread and self.monitor_thread.is_alive():
-            self.should_monitor = False
-            try:
-                self.monitor_thread.join(timeout=2)
-                if self.monitor_thread.is_alive():
-                    self.log_to_console("Warning: Trial monitoring thread did not stop cleanly")
-            except Exception as e:
-                self.log_to_console(f"Error stopping trial monitoring: {str(e)}")
-            finally:
-                self.monitor_thread = None
-                self.trial_log_path = None
-                self.trial_log_data = None
-    
-    def get_trial_data(self):
-        """Get the current trial log data."""
-        return self.trial_log_data
+    def _update_reward_display(self, count):
+        """Callback function to update the reward display when new rewards are received."""
+        self.reward_count.set(str(count))
     
     def start_session(self):
         # Validate inputs
@@ -769,6 +698,9 @@ class MousePortalGUI:
             self.tcp_server = TCPDataServer()
             server_port = self.tcp_server.start_server()
             
+            # Set up reward counting callback
+            self.tcp_server.set_reward_callback(self._update_reward_display)
+            
             # Set the initial level index
             initial_level = self.level_combobox.get()
             if not self.tcp_server.set_initial_level(initial_level):
@@ -789,12 +721,7 @@ class MousePortalGUI:
             self.current_level.set(self.level_combobox.get())
             
             # Initialize reward counting for the first level at 0
-            self.reward_count.set("0")
-            self.last_reward_time = None  # Will be set when first reward comes in
-            self.level_just_changed = True  # Treat initial level like a level change
-            
-            # Start monitoring for trial log
-            self.start_trial_monitoring()
+            self.tcp_server.reset_reward_count()
             
             # Log success
             self.log_to_console(f"Started session with:")

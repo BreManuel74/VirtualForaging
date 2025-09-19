@@ -933,6 +933,10 @@ class RewardOrPuff(FSM):
         self.trial_df['reward_event'] = reward_times
         self.trial_df.to_csv(self.trial_csv_path, index=False)
 
+        # Send reward message through TCP client if connected
+        if hasattr(self.base, 'tcp_client') and self.base.tcp_client:
+            self.base.tcp_client.send_data("REWARD:")
+
         signal = int(f"2{self.reward_duration}")
         #print(signal)
         self.base.serial_output.send_signal(signal)
@@ -1086,6 +1090,7 @@ class TCPStreamClient(DirectObject.DirectObject):
         self.trial_df = self.base.trial_df
         self.trial_df.to_csv = self.base.trial_df.to_csv 
         self.trial_csv_path = self.base.trial_csv_path
+        self._send_lock = threading.Lock()
         
         if self.port == 0:
             print("Warning: No TCP server port specified. TCP client disabled.")
@@ -1359,6 +1364,27 @@ class TCPStreamClient(DirectObject.DirectObject):
         except Exception as e:
             print(f"Error updating distributions from config: {e}")
     
+    def send_data(self, data: str) -> bool:
+        """
+        Send data to the server in a thread-safe way.
+        
+        Args:
+            data: The string data to send
+            
+        Returns:
+            bool: True if data was sent successfully, False otherwise
+        """
+        if not self.connected or not self.socket:
+            return False
+            
+        with self._send_lock:
+            try:
+                message = f"{data}\n"
+                self.socket.send(message.encode('utf-8'))
+                return True
+            except Exception as e:
+                print(f"Error sending data: {e}")
+                return False
     
     def close(self):
         """Close the TCP connection with proper thread cleanup."""
