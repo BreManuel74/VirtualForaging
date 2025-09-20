@@ -414,6 +414,10 @@ class MousePortalGUI:
         self.current_level = tk.StringVar()
         self.output_dir = tk.StringVar(value=os.getcwd())
         self.reward_count = tk.StringVar(value="0")
+        self.session_active = False  # Track if a session is active
+        
+        # Initialize list for session-sensitive widgets before creating frames
+        self.session_sensitive_widgets = []
         
         # Setup GUI elements
         self.create_setup_frame(main_frame)
@@ -438,31 +442,43 @@ class MousePortalGUI:
         
         # Animal Name
         ttk.Label(setup_frame, text="Animal Name:", style="Custom.TLabel").grid(row=0, column=0, sticky=tk.W)
-        ttk.Entry(setup_frame, textvariable=self.animal_name, style="TEntry").grid(row=0, column=1, sticky=(tk.W, tk.E))
+        animal_entry = ttk.Entry(setup_frame, textvariable=self.animal_name, style="TEntry")
+        animal_entry.grid(row=0, column=1, sticky=(tk.W, tk.E))
+        self.session_sensitive_widgets.append(animal_entry)
         
         # Batch ID
         ttk.Label(setup_frame, text="Batch ID:", style="Custom.TLabel").grid(row=1, column=0, sticky=tk.W)
-        ttk.Entry(setup_frame, textvariable=self.batch_id, style="TEntry").grid(row=1, column=1, sticky=(tk.W, tk.E))
+        batch_entry = ttk.Entry(setup_frame, textvariable=self.batch_id, style="TEntry")
+        batch_entry.grid(row=1, column=1, sticky=(tk.W, tk.E))
+        self.session_sensitive_widgets.append(batch_entry)
         
         # Teensy Port
         ttk.Label(setup_frame, text="Teensy Port:", style="Custom.TLabel").grid(row=2, column=0, sticky=tk.W)
-        ttk.Entry(setup_frame, textvariable=self.teensy_port, style="TEntry").grid(row=2, column=1, sticky=(tk.W, tk.E))
+        teensy_entry = ttk.Entry(setup_frame, textvariable=self.teensy_port, style="TEntry")
+        teensy_entry.grid(row=2, column=1, sticky=(tk.W, tk.E))
+        self.session_sensitive_widgets.append(teensy_entry)
         
         # Output Directory
         ttk.Label(setup_frame, text="Output Directory:", style="Custom.TLabel").grid(row=3, column=0, sticky=tk.W)
         dir_frame = ttk.Frame(setup_frame)
         dir_frame.grid(row=3, column=1, sticky=(tk.W, tk.E))
-        ttk.Entry(dir_frame, textvariable=self.output_dir, style="TEntry").pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(dir_frame, text="Browse", command=self.browse_output_dir).pack(side=tk.RIGHT)
+        output_entry = ttk.Entry(dir_frame, textvariable=self.output_dir, style="TEntry")
+        output_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        browse_btn = ttk.Button(dir_frame, text="Browse", command=self.browse_output_dir)
+        browse_btn.pack(side=tk.RIGHT)
+        self.session_sensitive_widgets.extend([output_entry, browse_btn])
         
         # Level Selection
         ttk.Label(setup_frame, text="Starting Level:", style="Custom.TLabel").grid(row=4, column=0, sticky=tk.W)
         self.level_combobox = ttk.Combobox(setup_frame, state="readonly")
         self.level_combobox.grid(row=4, column=1, sticky=(tk.W, tk.E))
         self.update_level_list()
+        self.session_sensitive_widgets.append(self.level_combobox)
         
         # Start Button
-        ttk.Button(setup_frame, text="Start Session", command=self.start_session).grid(row=5, column=0, columnspan=2, pady=10)
+        self.start_button = ttk.Button(setup_frame, text="Start Session", command=self.start_session)
+        self.start_button.grid(row=5, column=0, columnspan=2, pady=10)
+        self.session_sensitive_widgets.append(self.start_button)
         
         # Configure grid
         setup_frame.columnconfigure(1, weight=1)
@@ -486,9 +502,21 @@ class MousePortalGUI:
         # Level Control Buttons
         button_frame = ttk.Frame(control_frame, style="TFrame")
         button_frame.grid(row=1, column=0, columnspan=2, pady=5)
-        ttk.Button(button_frame, text="Next Level", command=self.change_to_next_level).pack(side=tk.LEFT, padx=5)
-        ttk.Button(button_frame, text="List Levels", command=self.show_level_list).pack(side=tk.LEFT, padx=5)
-        ttk.Button(button_frame, text="Stop Session", command=self.stop_session).pack(side=tk.LEFT, padx=5)
+        
+        # Create buttons and store references for state management
+        next_level_btn = ttk.Button(button_frame, text="Next Level", command=self.change_to_next_level)
+        next_level_btn.pack(side=tk.LEFT, padx=5)
+        list_levels_btn = ttk.Button(button_frame, text="List Levels", command=self.show_level_list)
+        list_levels_btn.pack(side=tk.LEFT, padx=5)
+        stop_session_btn = ttk.Button(button_frame, text="Stop Session", command=self.stop_session)
+        stop_session_btn.pack(side=tk.LEFT, padx=5)
+        
+        # Add the level control buttons to session sensitive widgets with opposite behavior
+        # These buttons should be enabled during a session and disabled when no session is active
+        next_level_btn.is_session_control = True
+        list_levels_btn.is_session_control = True
+        stop_session_btn.is_session_control = True
+        self.session_sensitive_widgets.extend([next_level_btn, list_levels_btn, stop_session_btn])
         
     def create_console_frame(self, parent):
         # Console Frame
@@ -589,6 +617,29 @@ class MousePortalGUI:
         except Exception as e:
             self.log_to_console(f"Error logging run: {str(e)}")
     
+    def _set_session_state(self, active: bool):
+        """Enable or disable widgets based on session state."""
+        self.session_active = active
+        
+        for widget in self.session_sensitive_widgets:
+            try:
+                # Get the widget's desired state based on whether it's a session control
+                is_control = getattr(widget, 'is_session_control', False)
+                if is_control:
+                    # Session controls are enabled during session, disabled otherwise
+                    state = "normal" if active else "disabled"
+                else:
+                    # Setup controls are disabled during session, enabled otherwise
+                    state = "disabled" if active else "normal"
+                
+                # Apply the appropriate state based on widget type
+                if isinstance(widget, ttk.Combobox):
+                    widget.configure(state="disabled" if state == "disabled" else "readonly")
+                else:
+                    widget.configure(state=state)
+            except tk.TclError as e:
+                print(f"Warning: Could not configure widget {widget}: {e}")
+
     def cleanup_resources(self):
         if self.tcp_server:
             self.tcp_server.stop_server()
@@ -603,6 +654,8 @@ class MousePortalGUI:
                 except:
                     pass
             self.process = None
+        # Re-enable all widgets after cleanup
+        self._set_session_state(False)
     
     def kill_process_tree(self, pid):
         """Kill a process and all its children."""
@@ -736,6 +789,11 @@ class MousePortalGUI:
         self.reward_count.set(str(count))
     
     def start_session(self):
+        # Prevent starting multiple sessions
+        if self.session_active:
+            messagebox.showerror("Error", "A session is already running")
+            return
+            
         # Validate inputs
         if not all([self.animal_name.get(), self.batch_id.get(), self.teensy_port.get()]):
             messagebox.showerror("Error", "Please fill in all required fields")
@@ -789,9 +847,12 @@ class MousePortalGUI:
             self.log_to_console(f"Teensy Port: {self.teensy_port.get()}")
             self.log_to_console(f"TCP server started on port {server_port}")
             
+            # Disable setup controls while session is running
+            self._set_session_state(True)
+            
         except Exception as e:
             messagebox.showerror("Error", f"Failed to start session: {str(e)}")
-            self.cleanup_resources()
+            self.cleanup_resources()  # This will also re-enable controls
 
 def main():
     root = tk.Tk()
