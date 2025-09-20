@@ -27,12 +27,16 @@ class TCPDataServer:
         self.server_thread = None
         self.available_levels = self._get_available_levels()
         self._shutdown_lock = threading.Lock()
+        self._client_lock = threading.Lock()  # Lock for client socket access
+        self._running_lock = threading.Lock() # Lock for running flag access
         self._cleanup_registered = False
         self.current_level_index = None
         # Add reward tracking
         self.reward_count = 0
         self.reward_callback = None
         self._reward_lock = threading.Lock()
+        # Add socket timeout
+        self._socket_timeout = 1.0
     
     def _get_available_levels(self):
         """Get list of available level files sorted by their numeric order."""
@@ -108,74 +112,120 @@ class TCPDataServer:
     def _server_loop(self):
         """Main server loop to accept connections with proper error handling."""
         try:
+            if not self.server_socket:
+                return
+                
             self.server_socket.listen(1)
             print("Waiting for Panda3D game to connect...")
             
-            while self.running:
+            while True:
+                # Check running state with proper locking
+                with self._running_lock:
+                    if not self.running:
+                        break
+                    
                 if not self.server_socket:
                     break
                     
-                self.server_socket.settimeout(1.0)  # Non-blocking accept
                 try:
-                    self.client_socket, client_address = self.server_socket.accept()
-                    print(f"Game connected from {client_address}")
+                    self.server_socket.settimeout(self._socket_timeout)
+                    client_socket, client_address = self.server_socket.accept()
                     
-                    # Keep connection alive while running
-                    while self.running and self.client_socket:
-                        try:
-                            # Check for incoming data
-                            self.client_socket.settimeout(1.0)
-                            data = self.client_socket.recv(1024).decode('utf-8')
-                            if data:
-                                # Handle each line separately
-                                for line in data.splitlines():
-                                    if line:
-                                        self._handle_received_data(line)
-                            else:
-                                # Empty data means connection closed
+                    # Set client socket with proper locking
+                    with self._client_lock:
+                        self.client_socket = client_socket
+                        print(f"Game connected from {client_address}")
+                    
+                    # Process data while connection is active
+                    while True:
+                        # Check running state again
+                        with self._running_lock:
+                            if not self.running:
                                 break
-                        except socket.timeout:
-                            # Timeout is normal, continue listening
-                            continue
-                        except Exception as e:
-                            print(f"Error receiving data: {e}")
-                            break
-                    break
+                                
+                        # Verify client socket still exists
+                        with self._client_lock:
+                            if not self.client_socket:
+                                break
+                            
+                            try:
+                                self.client_socket.settimeout(self._socket_timeout)
+                                data = self.client_socket.recv(1024).decode('utf-8')
+                                
+                                if data:
+                                    # Handle each line separately with reward lock protection
+                                    for line in data.splitlines():
+                                        if line:
+                                            self._handle_received_data(line)
+                                else:
+                                    # Empty data means connection closed
+                                    break
+                            except socket.timeout:
+                                # Timeout is normal, continue listening
+                                continue
+                            except Exception as e:
+                                print(f"Error receiving data: {e}")
+                                break
+                    
+                    # Clean up client socket after loop ends
+                    self._close_client_socket()
+                    
                 except socket.timeout:
                     continue
                 except Exception as e:
-                    if self.running:
-                        print(f"Socket accept error: {e}")
+                    with self._running_lock:
+                        if self.running:
+                            print(f"Socket accept error: {e}")
                     break
+                    
         except Exception as e:
-            if self.running:
-                print(f"Server loop error: {e}")
+            with self._running_lock:
+                if self.running:
+                    print(f"Server loop error: {e}")
         finally:
             print("Server loop ended")
+            # Ensure client socket is closed
+            self._close_client_socket()
     
     def send_data(self, data):
         """Send data to the connected game client with thread safety."""
-        with self._shutdown_lock:
+        # First check running state
+        with self._running_lock:
             if not self.running:
                 return False
-                
+
+        # Then handle client socket access
+        with self._client_lock:
             if self.client_socket:
                 try:
                     message = f"{data}\n"
-                    self.client_socket.send(message.encode('utf-8'))
-                    return True
+                    with self._shutdown_lock:  # Prevent socket closure during send
+                        if not self.client_socket:  # Double-check after acquiring lock
+                            return False
+                        self.client_socket.settimeout(self._socket_timeout)
+                        self.client_socket.send(message.encode('utf-8'))
+                        return True
                 except Exception as e:
                     print(f"Error sending data: {e}")
-                    # Close broken connection
-                    try:
-                        self.client_socket.close()
-                    except:
-                        pass
-                    self.client_socket = None
+                    self._close_client_socket()
                     return False
             else:
                 print("No client connected")
                 return False
+                
+    def _close_client_socket(self):
+        """Helper method to safely close client socket with proper locking."""
+        with self._client_lock:
+            if self.client_socket:
+                try:
+                    self.client_socket.shutdown(socket.SHUT_RDWR)
+                except:
+                    pass
+                try:
+                    self.client_socket.close()
+                except:
+                    pass
+                self.client_socket = None
                 
     def _handle_received_data(self, data):
         """Handle data received from the game client."""
@@ -236,39 +286,47 @@ class TCPDataServer:
 
     def stop_server(self):
         """Stop the TCP server with proper thread cleanup."""
-        with self._shutdown_lock:
+        print("Stopping TCP server...")
+        
+        # First set running to false with proper locking
+        with self._running_lock:
             if not self.running:
                 return
-                
-            print("Stopping TCP server...")
             self.running = False
-            
-            # Close client connection
-            if self.client_socket:
-                try:
-                    self.client_socket.shutdown(socket.SHUT_RDWR)
-                    self.client_socket.close()
-                except:
-                    pass
-                self.client_socket = None
+        
+        # Then acquire shutdown lock for the entire cleanup sequence
+        with self._shutdown_lock:
+            # Close client connection with proper locking
+            self._close_client_socket()
             
             # Close server socket
             if self.server_socket:
+                try:
+                    self.server_socket.shutdown(socket.SHUT_RDWR)
+                except:
+                    pass
                 try:
                     self.server_socket.close()
                 except:
                     pass
                 self.server_socket = None
             
-            # Wait for server thread to finish
+            # Wait for server thread to finish with timeout
             if self.server_thread and self.server_thread.is_alive():
                 print("Waiting for server thread to finish...")
-                self.server_thread.join(timeout=3)
-                if self.server_thread.is_alive():
-                    print("Warning: Server thread did not stop cleanly")
-                else:
-                    print("Server thread stopped successfully")
-    
+                try:
+                    self.server_thread.join(timeout=5)  # Increased timeout
+                    if self.server_thread.is_alive():
+                        print("Warning: Server thread did not stop cleanly")
+                    else:
+                        print("Server thread stopped successfully")
+                except Exception as e:
+                    print(f"Error during thread cleanup: {e}")
+            
+            # Clear thread reference
+            self.server_thread = None
+            
+            print("TCP server stopped")
     def __del__(self):
         """Destructor to ensure cleanup."""
         self.stop_server()
