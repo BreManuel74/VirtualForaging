@@ -211,6 +211,12 @@ def analyze_mouse_data(behavior_files, cohort_files):
     
     return all_results
 
+def identify_outliers(data):
+    """Identify outliers using the z-score method (threshold = ±3 standard deviations)."""
+    z_scores = (data - data.mean()) / data.std()
+    outlier_mask = (z_scores < -3) | (z_scores > 3)
+    return outlier_mask
+
 def plot_correlation(valid_data, mouse, corr_coef, p_value):
     """Create a scatter plot of weight loss vs rewards with correlation info."""
     # Set global font parameters
@@ -261,6 +267,9 @@ def create_lick_correlation_subplots(all_results, correlations_list):
     plt.rcParams['font.sans-serif'] = ['Arial']
     plt.rcParams['svg.fonttype'] = 'none'
     
+    # Create a list to store outlier information
+    outlier_info = []
+    
     # Count mice with valid data for subplot layout
     n_mice = len(all_results)
     
@@ -301,8 +310,36 @@ def create_lick_correlation_subplots(all_results, correlations_list):
         # Create subplot
         ax = fig.add_subplot(n_rows, n_cols, idx + 1)
         
+        # Identify outliers
+        reward_outliers = identify_outliers(daily_metrics['reward_count'])
+        lick_outliers = identify_outliers(daily_metrics['lick_count'])
+        combined_outliers = reward_outliers | lick_outliers
+        
+        # Store outlier information
+        outlier_days = daily_metrics.loc[combined_outliers, 'day'].tolist()
+        outlier_rewards = daily_metrics.loc[combined_outliers, 'reward_count'].tolist()
+        outlier_licks = daily_metrics.loc[combined_outliers, 'lick_count'].tolist()
+        
+        if any(combined_outliers):
+            outlier_info.append({
+                'mouse': mouse,
+                'data_type': 'licks',
+                'outlier_days': outlier_days,
+                'outlier_rewards': outlier_rewards,
+                'outlier_licks': outlier_licks
+            })
+        
         # Plot scatter points
-        scatter = ax.scatter(daily_metrics['reward_count'], daily_metrics['lick_count'], alpha=0.6)
+        scatter = ax.scatter(daily_metrics.loc[~combined_outliers, 'reward_count'], 
+                            daily_metrics.loc[~combined_outliers, 'lick_count'], 
+                            alpha=0.6, label='Normal data')
+        
+        # Plot outliers in red
+        if any(combined_outliers):
+            ax.scatter(daily_metrics.loc[combined_outliers, 'reward_count'],
+                      daily_metrics.loc[combined_outliers, 'lick_count'],
+                      color='red', alpha=0.6, label='Outliers')
+            ax.legend()
         
         # Set consistent axis limits
         ax.set_xlim(x_limits)
@@ -315,15 +352,20 @@ def create_lick_correlation_subplots(all_results, correlations_list):
                        xytext=(5, 5), textcoords='offset points', 
                        fontsize=8, alpha=0.7)
         
-        # Add trend line
-        z = np.polyfit(daily_metrics['reward_count'], daily_metrics['lick_count'], 1)
+        # Calculate correlation and regression line using non-outlier data only
+        non_outlier_rewards = daily_metrics.loc[~combined_outliers, 'reward_count']
+        non_outlier_licks = daily_metrics.loc[~combined_outliers, 'lick_count']
+        corr_coef, p_val = stats.pearsonr(non_outlier_rewards, non_outlier_licks)
+        
+        # Add trend line using non-outlier data
+        z = np.polyfit(non_outlier_rewards, non_outlier_licks, 1)
         p = np.poly1d(z)
         ax.plot(daily_metrics['reward_count'], p(daily_metrics['reward_count']), "r--", alpha=0.8)
         
         # Add labels and title with adjusted font sizes
         ax.set_xlabel('Number of Rewards', fontsize=10)
         ax.set_ylabel('Number of Licks', fontsize=10)
-        ax.set_title(f'Mouse {mouse}\nr = {corr_data["reward_vs_lick_correlation"]:.3f}\np = {corr_data["reward_vs_lick_p_value"]:.3f}',
+        ax.set_title(f'Mouse {mouse}\nr = {corr_coef:.3f}\np = {p_val:.3f}\n(outliers excluded)',
                     fontsize=11, pad=10)
         
         # Adjust tick label sizes
@@ -354,6 +396,9 @@ def create_speed_correlation_subplots(all_results, correlations_list):
     plt.rcParams['font.family'] = 'sans-serif'
     plt.rcParams['font.sans-serif'] = ['Arial']
     plt.rcParams['svg.fonttype'] = 'none'
+    
+    # Create a list to store outlier information
+    outlier_info = []
     
     # Count mice with valid data for subplot layout
     n_mice = len(all_results)
@@ -395,8 +440,36 @@ def create_speed_correlation_subplots(all_results, correlations_list):
         # Create subplot
         ax = fig.add_subplot(n_rows, n_cols, idx + 1)
         
+        # Identify outliers
+        reward_outliers = identify_outliers(daily_metrics['reward_count'])
+        speed_outliers = identify_outliers(daily_metrics['avg_speed'])
+        combined_outliers = reward_outliers | speed_outliers
+        
+        # Store outlier information
+        outlier_days = daily_metrics.loc[combined_outliers, 'day'].tolist()
+        outlier_rewards = daily_metrics.loc[combined_outliers, 'reward_count'].tolist()
+        outlier_speeds = daily_metrics.loc[combined_outliers, 'avg_speed'].tolist()
+        
+        if any(combined_outliers):
+            outlier_info.append({
+                'mouse': mouse,
+                'data_type': 'speed',
+                'outlier_days': outlier_days,
+                'outlier_rewards': outlier_rewards,
+                'outlier_speeds': outlier_speeds
+            })
+        
         # Plot scatter points
-        scatter = ax.scatter(daily_metrics['reward_count'], daily_metrics['avg_speed'], alpha=0.6)
+        scatter = ax.scatter(daily_metrics.loc[~combined_outliers, 'reward_count'], 
+                            daily_metrics.loc[~combined_outliers, 'avg_speed'], 
+                            alpha=0.6, label='Normal data')
+        
+        # Plot outliers in red
+        if any(combined_outliers):
+            ax.scatter(daily_metrics.loc[combined_outliers, 'reward_count'],
+                      daily_metrics.loc[combined_outliers, 'avg_speed'],
+                      color='red', alpha=0.6, label='Outliers')
+            ax.legend()
         
         # Set consistent axis limits
         ax.set_xlim(x_limits)
@@ -409,15 +482,20 @@ def create_speed_correlation_subplots(all_results, correlations_list):
                        xytext=(5, 5), textcoords='offset points', 
                        fontsize=8, alpha=0.7)
         
-        # Add trend line
-        z = np.polyfit(daily_metrics['reward_count'], daily_metrics['avg_speed'], 1)
+        # Calculate correlation and regression line using non-outlier data only
+        non_outlier_rewards = daily_metrics.loc[~combined_outliers, 'reward_count']
+        non_outlier_speeds = daily_metrics.loc[~combined_outliers, 'avg_speed']
+        corr_coef, p_val = stats.pearsonr(non_outlier_rewards, non_outlier_speeds)
+        
+        # Add trend line using non-outlier data
+        z = np.polyfit(non_outlier_rewards, non_outlier_speeds, 1)
         p = np.poly1d(z)
         ax.plot(daily_metrics['reward_count'], p(daily_metrics['reward_count']), "r--", alpha=0.8)
         
         # Add labels and title with adjusted font sizes
         ax.set_xlabel('Number of Rewards', fontsize=10)
         ax.set_ylabel('Average Speed', fontsize=10)
-        ax.set_title(f'Mouse {mouse}\nr = {corr_data["reward_vs_speed_correlation"]:.3f}\np = {corr_data["reward_vs_speed_p_value"]:.3f}',
+        ax.set_title(f'Mouse {mouse}\nr = {corr_coef:.3f}\np = {p_val:.3f}\n(outliers excluded)',
                     fontsize=11, pad=10)
         
         # Adjust tick label sizes
@@ -448,6 +526,9 @@ def create_correlation_subplots(all_results, correlations_list):
     plt.rcParams['font.family'] = 'sans-serif'
     plt.rcParams['font.sans-serif'] = ['Arial']
     plt.rcParams['svg.fonttype'] = 'none'
+    
+    # Create a list to store outlier information
+    outlier_info = []
     
     # Count mice with valid data for subplot layout
     valid_mice = [result for result in all_results 
@@ -512,8 +593,36 @@ def create_correlation_subplots(all_results, correlations_list):
             # Create subplot
             ax = fig.add_subplot(n_rows, n_cols, idx + 1)
             
+            # Identify outliers
+            reward_outliers = identify_outliers(valid_data['reward_count'])
+            weight_outliers = identify_outliers(valid_data['Value'])
+            combined_outliers = reward_outliers | weight_outliers
+            
+            # Store outlier information
+            outlier_days = valid_data.loc[combined_outliers, 'day'].tolist()
+            outlier_rewards = valid_data.loc[combined_outliers, 'reward_count'].tolist()
+            outlier_weights = valid_data.loc[combined_outliers, 'Value'].tolist()
+            
+            if any(combined_outliers):
+                outlier_info.append({
+                    'mouse': mouse,
+                    'data_type': 'weight',
+                    'outlier_days': outlier_days,
+                    'outlier_rewards': outlier_rewards,
+                    'outlier_weights': outlier_weights
+                })
+            
             # Plot scatter points
-            scatter = ax.scatter(valid_data['reward_count'], valid_data['Value'], alpha=0.6)
+            scatter = ax.scatter(valid_data.loc[~combined_outliers, 'reward_count'], 
+                                valid_data.loc[~combined_outliers, 'Value'], 
+                                alpha=0.6, label='Normal data')
+            
+            # Plot outliers in red
+            if any(combined_outliers):
+                ax.scatter(valid_data.loc[combined_outliers, 'reward_count'],
+                          valid_data.loc[combined_outliers, 'Value'],
+                          color='red', alpha=0.6, label='Outliers')
+                ax.legend()
             
             # Set consistent axis limits if we have valid data
             if all_rewards and all_weights:
@@ -527,15 +636,20 @@ def create_correlation_subplots(all_results, correlations_list):
                            xytext=(5, 5), textcoords='offset points', 
                            fontsize=8, alpha=0.7)
             
-            # Add trend line
-            z = np.polyfit(valid_data['reward_count'], valid_data['Value'], 1)
+            # Calculate correlation and regression line using non-outlier data only
+            non_outlier_rewards = valid_data.loc[~combined_outliers, 'reward_count']
+            non_outlier_weights = valid_data.loc[~combined_outliers, 'Value']
+            corr_coef, p_val = stats.pearsonr(non_outlier_rewards, non_outlier_weights)
+            
+            # Add trend line using non-outlier data
+            z = np.polyfit(non_outlier_rewards, non_outlier_weights, 1)
             p = np.poly1d(z)
             ax.plot(valid_data['reward_count'], p(valid_data['reward_count']), "r--", alpha=0.8)
             
             # Add labels and title with adjusted font sizes
             ax.set_xlabel('Number of Rewards', fontsize=10)
             ax.set_ylabel('Body Weight Change (%)', fontsize=10)
-            ax.set_title(f'Mouse {mouse}\nr = {corr_data["reward_vs_weight_loss_correlation"]:.3f}\np = {corr_data["reward_vs_weight_loss_p_value"]:.3f}',
+            ax.set_title(f'Mouse {mouse}\nr = {corr_coef:.3f}\np = {p_val:.3f}\n(outliers excluded)',
                         fontsize=11, pad=10)  # Add padding to title
             
             # Adjust tick label sizes
