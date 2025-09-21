@@ -45,7 +45,7 @@ class TCPDataServer:
             # Get all JSON files
             level_files = [f for f in os.listdir(levels_path) if f.endswith('.json')]
             
-            print(f"Found level files: {level_files}")  # Debug print
+            #print(f"Found level files: {level_files}")  # Debug print
             
             # Sort levels based on their numeric value
             def extract_number(filename):
@@ -58,7 +58,7 @@ class TCPDataServer:
             # Sort levels by their numeric value
             level_files.sort(key=extract_number)
             
-            print(f"Sorted level files: {level_files}")  # Debug print
+            #print(f"Sorted level files: {level_files}")  # Debug print
             
             # Store the ordered levels as a class attribute for later use
             self.ordered_levels = level_files
@@ -261,8 +261,8 @@ class TCPDataServer:
                 # Set the current index based on the actual level file
                 if level_file in self.ordered_levels:
                     self.current_level_index = self.ordered_levels.index(level_file)
-                    print(f"Set current level index to {self.current_level_index} for {level_file}")
-                    print(f"Available levels: {self.ordered_levels}")  # Debug print
+                    #print(f"Set current level index to {self.current_level_index} for {level_file}")
+                    #print(f"Available levels: {self.ordered_levels}")  # Debug print
                 return True
             except ValueError:
                 print(f"Warning: Level {level_file} not found in ordered levels")
@@ -577,6 +577,20 @@ class MousePortalGUI:
                 self.log_to_console("Failed to send command")
         self.cmd_entry.delete(0, tk.END)
     
+    def log_level_change(self, level_file):
+        """Log a level change to the progress report CSV."""
+        try:
+            now = datetime.now()
+            date_str = now.strftime("%Y-%m-%d")
+            time_str = now.strftime("%H:%M:%S")
+            
+            if hasattr(self, 'log_file'):
+                with open(self.log_file, mode="a", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerow([date_str, time_str, level_file, self.batch_id.get()])
+        except Exception as e:
+            self.log_to_console(f"Error logging level change: {str(e)}")
+
     def change_to_next_level(self):
         if self.tcp_server:
             next_level = self.tcp_server.get_next_level()
@@ -587,6 +601,7 @@ class MousePortalGUI:
                     current_idx = self.tcp_server.current_level_index + 1
                     total_levels = len(self.tcp_server.ordered_levels)
                     self.log_to_console(f"Advanced to: {next_level} (Level {current_idx} of {total_levels})")
+                    self.log_level_change(next_level)
                 else:
                     self.log_to_console("Failed to change level")
             else:
@@ -596,24 +611,23 @@ class MousePortalGUI:
         if self.tcp_server:
             self.log_to_console("\n" + self.tcp_server.list_available_levels())
     
-    def log_run(self, animal_name, level_file, phase_file, batch_id):
+    def log_run(self, animal_name, level_file, batch_id):
         try:
             log_dir = "Progress_Reports"
             os.makedirs(log_dir, exist_ok=True)
-            log_file = os.path.join(log_dir, f"{animal_name}_log.csv")
+            self.log_file = os.path.join(log_dir, f"{animal_name}_log.csv")
             now = datetime.now()
             date_str = now.strftime("%Y-%m-%d")
             time_str = now.strftime("%H:%M:%S")
             
             level_file_name = os.path.basename(level_file)
-            phase_file_name = os.path.basename(phase_file)
             
-            write_header = not os.path.exists(log_file)
-            with open(log_file, mode="a", newline="") as f:
+            write_header = not os.path.exists(self.log_file)
+            with open(self.log_file, mode="a", newline="") as f:
                 writer = csv.writer(f)
                 if write_header:
-                    writer.writerow(["Date", "Time", "Level File", "Phase File", "Batch ID"])
-                writer.writerow([date_str, time_str, level_file_name, phase_file_name, batch_id])
+                    writer.writerow(["Date", "Time", "Level", "Batch ID"])
+                writer.writerow([date_str, time_str, level_file_name, batch_id])
         except Exception as e:
             self.log_to_console(f"Error logging run: {str(e)}")
     
@@ -804,7 +818,7 @@ class MousePortalGUI:
         phase_file = os.path.join(os.getcwd(), 'Phases', 'final.py')
         
         # Log the run
-        self.log_run(self.animal_name.get(), level_file, phase_file, self.batch_id.get())
+        self.log_run(self.animal_name.get(), level_file, self.batch_id.get())
         
         # Convert level file path to relative with forward slashes
         level_file_path = level_file.replace(os.getcwd() + os.sep, '').replace('\\', '/')
