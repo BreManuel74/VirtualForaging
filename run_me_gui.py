@@ -37,7 +37,24 @@ class TCPDataServer:
         self._reward_lock = threading.Lock()
         # Add socket timeout
         self._socket_timeout = 1.0
-    
+
+    def _get_level_reward_threshold(self, level_file):
+        """Read the reward threshold from a level file."""
+        try:
+            import json
+            level_path = os.path.join(os.getcwd(), 'Levels', level_file)
+            with open(level_path, 'r') as f:
+                level_data = json.load(f)
+                threshold = level_data.get('reward_threshold', float('inf'))
+                print(f"Read reward threshold {threshold} from {level_file}")
+                if not isinstance(threshold, (int, float)) or threshold <= 0:
+                    print(f"Invalid threshold value {threshold}, using infinity")
+                    return float('inf')
+                return threshold
+        except Exception as e:
+            print(f"Error reading reward threshold from {level_file}: {e}")
+            return float('inf')
+        
     def _get_available_levels(self):
         """Get list of available level files sorted by their numeric order."""
         try:
@@ -235,7 +252,14 @@ class TCPDataServer:
                 with self._reward_lock:
                     self.reward_count += 1
                     if self.reward_callback:
-                        self.reward_callback(self.reward_count)
+                        # Check if threshold is reached
+                        threshold_reached = False
+                        if hasattr(self, 'current_reward_threshold'):
+                            threshold_reached = self.reward_count >= self.current_reward_threshold
+                            print(f"Reward check: count={self.reward_count}, threshold={self.current_reward_threshold}, reached={threshold_reached}")
+                        else:
+                            print("No reward threshold set!")
+                        self.reward_callback(self.reward_count, threshold_reached)
         except Exception as e:
             print(f"Error handling received data: {e}")
             
@@ -261,9 +285,17 @@ class TCPDataServer:
                 # Set the current index based on the actual level file
                 if level_file in self.ordered_levels:
                     self.current_level_index = self.ordered_levels.index(level_file)
-                    #print(f"Set current level index to {self.current_level_index} for {level_file}")
-                    #print(f"Available levels: {self.ordered_levels}")  # Debug print
-                return True
+                    print(f"Set current level index to {self.current_level_index} for {level_file}")
+                    
+                    # Get and store the reward threshold for the new level
+                    try:
+                        self.current_reward_threshold = self._get_level_reward_threshold(level_file)
+                        print(f"Successfully loaded reward threshold: {self.current_reward_threshold}")
+                    except Exception as e:
+                        print(f"Error loading reward threshold: {e}")
+                        self.current_reward_threshold = float('inf')
+                    
+                    return True
             except ValueError:
                 print(f"Warning: Level {level_file} not found in ordered levels")
                 return True
@@ -336,6 +368,15 @@ class TCPDataServer:
         if level_file in self.ordered_levels:
             self.current_level_index = self.ordered_levels.index(level_file)
             print(f"Set initial level index to {self.current_level_index} for {level_file}")
+            
+            # Set initial reward threshold
+            try:
+                self.current_reward_threshold = self._get_level_reward_threshold(level_file)
+                print(f"Initial reward threshold set to: {self.current_reward_threshold}")
+            except Exception as e:
+                print(f"Error setting initial reward threshold: {e}")
+                self.current_reward_threshold = float('inf')
+            
             return True
         return False
 
@@ -798,9 +839,18 @@ class MousePortalGUI:
                 # Still try to cleanup even if there was an error
                 self.cleanup_resources()
     
-    def _update_reward_display(self, count):
+    def _update_reward_display(self, count, threshold_reached=False):
         """Callback function to update the reward display when new rewards are received."""
         self.reward_count.set(str(count))
+        
+        # Print debug info
+        self.log_to_console(f"Reward update: count={count}, threshold_reached={threshold_reached}")
+        
+        # If threshold reached, automatically advance to next level
+        if threshold_reached:
+            self.log_to_console("Reward threshold reached - advancing to next level")
+            # Schedule the level change on the main thread
+            self.root.after_idle(lambda: self.change_to_next_level())
     
     def start_session(self):
         # Prevent starting multiple sessions
@@ -831,10 +881,18 @@ class MousePortalGUI:
             # Set up reward counting callback
             self.tcp_server.set_reward_callback(self._update_reward_display)
             
-            # Set the initial level index
+            # Set the initial level index and threshold
             initial_level = self.level_combobox.get()
             if not self.tcp_server.set_initial_level(initial_level):
                 raise Exception(f"Invalid starting level: {initial_level}")
+            
+            # Set initial reward threshold
+            try:
+                self.tcp_server.current_reward_threshold = self.tcp_server._get_level_reward_threshold(initial_level)
+                self.log_to_console(f"Initial reward threshold set to: {self.tcp_server.current_reward_threshold}")
+            except Exception as e:
+                self.log_to_console(f"Error setting initial reward threshold: {e}")
+                raise
             
             # Set up environment variables
             env = os.environ.copy()
