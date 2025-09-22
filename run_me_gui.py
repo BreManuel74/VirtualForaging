@@ -46,7 +46,7 @@ class TCPDataServer:
             with open(level_path, 'r') as f:
                 level_data = json.load(f)
                 threshold = level_data.get('reward_threshold', float('inf'))
-                print(f"Read reward threshold {threshold} from {level_file}")
+                #print(f"Read reward threshold {threshold} from {level_file}")
                 if not isinstance(threshold, (int, float)) or threshold <= 0:
                     print(f"Invalid threshold value {threshold}, using infinity")
                     return float('inf')
@@ -285,12 +285,12 @@ class TCPDataServer:
                 # Set the current index based on the actual level file
                 if level_file in self.ordered_levels:
                     self.current_level_index = self.ordered_levels.index(level_file)
-                    print(f"Set current level index to {self.current_level_index} for {level_file}")
+                    #print(f"Set current level index to {self.current_level_index} for {level_file}")
                     
                     # Get and store the reward threshold for the new level
                     try:
                         self.current_reward_threshold = self._get_level_reward_threshold(level_file)
-                        print(f"Successfully loaded reward threshold: {self.current_reward_threshold}")
+                        #print(f"Successfully loaded reward threshold: {self.current_reward_threshold}")
                     except Exception as e:
                         print(f"Error loading reward threshold: {e}")
                         self.current_reward_threshold = float('inf')
@@ -304,17 +304,29 @@ class TCPDataServer:
     def get_next_level(self):
         """Get the next level in the sequence."""
         if not self.ordered_levels or self.current_level_index is None:
-            print(f"Debug - ordered_levels: {self.ordered_levels}")  # Debug print
-            print(f"Debug - current_level_index: {self.current_level_index}")  # Debug print
+            #print(f"Debug - ordered_levels: {self.ordered_levels}")  # Debug print
+            #print(f"Debug - current_level_index: {self.current_level_index}")  # Debug print
             return None
             
         next_index = self.current_level_index + 1
-        print(f"Debug - next_index: {next_index}, max index: {len(self.ordered_levels)-1}")  # Debug print
+        #print(f"Debug - next_index: {next_index}, max index: {len(self.ordered_levels)-1}")  # Debug print
         
         if next_index >= len(self.ordered_levels):
             return None
             
         return self.ordered_levels[next_index]
+        
+    def get_previous_level(self):
+        """Get the previous level in the sequence."""
+        if not self.ordered_levels or self.current_level_index is None:
+            return None
+            
+        prev_index = self.current_level_index - 1
+        
+        if prev_index < 0:
+            return None
+            
+        return self.ordered_levels[prev_index]
 
     def stop_server(self):
         """Stop the TCP server with proper thread cleanup."""
@@ -367,12 +379,12 @@ class TCPDataServer:
         """Set the initial level index when starting a session."""
         if level_file in self.ordered_levels:
             self.current_level_index = self.ordered_levels.index(level_file)
-            print(f"Set initial level index to {self.current_level_index} for {level_file}")
+            #print(f"Set initial level index to {self.current_level_index} for {level_file}")
             
             # Set initial reward threshold
             try:
                 self.current_reward_threshold = self._get_level_reward_threshold(level_file)
-                print(f"Initial reward threshold set to: {self.current_reward_threshold}")
+                #print(f"Initial reward threshold set to: {self.current_reward_threshold}")
             except Exception as e:
                 print(f"Error setting initial reward threshold: {e}")
                 self.current_reward_threshold = float('inf')
@@ -545,12 +557,17 @@ class MousePortalGUI:
         button_frame.grid(row=1, column=0, columnspan=2, pady=5)
         
         # Create buttons and store references for state management
+        prev_level_btn = ttk.Button(button_frame, text="Previous Level", command=self.change_to_previous_level)
+        prev_level_btn.pack(side=tk.LEFT, padx=5)
         next_level_btn = ttk.Button(button_frame, text="Next Level", command=self.change_to_next_level)
         next_level_btn.pack(side=tk.LEFT, padx=5)
         list_levels_btn = ttk.Button(button_frame, text="List Levels", command=self.show_level_list)
         list_levels_btn.pack(side=tk.LEFT, padx=5)
         stop_session_btn = ttk.Button(button_frame, text="Stop Session", command=self.stop_session)
         stop_session_btn.pack(side=tk.LEFT, padx=5)
+        
+        # Add the previous level button to session sensitive widgets
+        prev_level_btn.is_session_control = True
         
         # Add the level control buttons to session sensitive widgets with opposite behavior
         # These buttons should be enabled during a session and disabled when no session is active
@@ -648,6 +665,23 @@ class MousePortalGUI:
             else:
                 self.log_to_console("No more levels available")
     
+    def change_to_previous_level(self):
+        """Change to the previous level in the sequence."""
+        if self.tcp_server:
+            prev_level = self.tcp_server.get_previous_level()
+            if prev_level:
+                success = self.tcp_server.send_level_change(prev_level)
+                if success:
+                    self.current_level.set(prev_level)
+                    current_idx = self.tcp_server.current_level_index + 1
+                    total_levels = len(self.tcp_server.ordered_levels)
+                    self.log_to_console(f"Changed to previous level: {prev_level} (Level {current_idx} of {total_levels})")
+                    self.log_level_change(prev_level)
+                else:
+                    self.log_to_console("Failed to change level")
+            else:
+                self.log_to_console("Already at first level")
+
     def show_level_list(self):
         if self.tcp_server:
             self.log_to_console("\n" + self.tcp_server.list_available_levels())
