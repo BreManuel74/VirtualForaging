@@ -464,20 +464,6 @@ class Corridor:
         self.trial_df['texture_history'] = textures
         self.trial_df.to_csv(self.trial_csv_path, index=False)
         
-        # Apply the selected texture to the walls
-        for left_node in self.left_segments:
-            self.apply_texture(left_node, selected_texture)
-        for right_node in self.right_segments:
-            self.apply_texture(right_node, selected_texture)
-        
-        # Print the elapsed time since the corridor was initialized
-        elapsed_time = global_stopwatch.get_elapsed_time()
-        self.texture_time_history = np.append(self.texture_time_history, round(elapsed_time, 2))
-        times = np.full(len(self.trial_df), np.nan)
-        times[:len(self.texture_time_history)] = self.texture_time_history
-        self.trial_df['texture_change_time'] = times
-        self.trial_df.to_csv(self.trial_csv_path, index=False)
-        
         # Determine the stay_or_go_data based on the selected texture
         if selected_texture == self.go_texture:
             stay_or_go_data = self.rounded_go_data
@@ -494,9 +480,42 @@ class Corridor:
         length[:len(self.segments_until_revert_history)] = self.segments_until_revert_history
         self.trial_df['segments_until_revert'] = length
         self.trial_df.to_csv(self.trial_csv_path, index=False)
+
+        # Apply the selected texture to the walls
+        if selected_texture == self.stop_texture:
+            forward_segments = self.get_forward_segments(self.segments_until_revert)
+            print(f"Changing textures for {self.segments_until_revert} segments ahead")
+            print(f"Segments to change: {len(forward_segments)}")
+            for left_node in forward_segments:
+                self.apply_texture(left_node, selected_texture)
+            for right_node in forward_segments:
+                self.apply_texture(right_node, selected_texture)
+                
+        # Print the elapsed time since the corridor was initialized
+        elapsed_time = global_stopwatch.get_elapsed_time()
+        self.texture_time_history = np.append(self.texture_time_history, round(elapsed_time, 2))
+        times = np.full(len(self.trial_df), np.nan)
+        times[:len(self.texture_time_history)] = self.texture_time_history
+        self.trial_df['texture_change_time'] = times
+        self.trial_df.to_csv(self.trial_csv_path, index=False)
         
         # Return Task.done if task is None
         return Task.done if task is None else task.done
+    
+    def get_forward_segments(self, count: int) -> list[NodePath]:
+        """
+        Get the specified number of segments ahead of the camera.
+        Segments are returned in order from nearest to farthest.
+        
+        Parameters:
+            count (int): Number of segments to return
+            
+        Returns:
+            list[NodePath]: List of segment NodePaths
+        """
+        # Ensure segments are sorted by Y position (farthest segments have highest Y)
+        sorted_segments = sorted(self.left_segments + self.right_segments, key=lambda x: x.getY())
+        return sorted_segments[-count:]
 
     def change_wall_textures_temporarily_once(self, task: Task = None) -> Task:
         """
