@@ -483,20 +483,18 @@ class Corridor:
 
         # Apply the selected texture to the walls
         if selected_texture == self.stop_texture:
-            forward_segments = self.get_forward_segments(self.segments_until_revert)
-            print(f"Changing textures for {self.segments_until_revert} segments ahead")
-            print(f"Segments to change: {len(forward_segments)}")
-            for left_node in forward_segments:
+            forward_left, forward_right = self.get_forward_segments(self.segments_until_revert)
+            for left_node in forward_left:
                 self.apply_texture(left_node, selected_texture)
-            for right_node in forward_segments:
+            for right_node in forward_right:
                 self.apply_texture(right_node, selected_texture)
         elif selected_texture == self.go_texture:
-            middle_segments = self.get_middle_segments(self.segments_until_revert)
+            middle_left, middle_right = self.get_middle_segments(self.segments_until_revert)
             print(f"Changing textures for {self.segments_until_revert} segments in the middle")
-            print(f"Segments to change: {len(middle_segments)}")
-            for left_node in middle_segments:
+            print(f"Segments to change: {len(middle_left)}")
+            for left_node in middle_left:
                 self.apply_texture(left_node, selected_texture)
-            for right_node in middle_segments:
+            for right_node in middle_right:
                 self.apply_texture(right_node, selected_texture)
                 
         # Print the elapsed time since the corridor was initialized
@@ -510,47 +508,46 @@ class Corridor:
         # Return Task.done if task is None
         return Task.done if task is None else task.done
     
-    def get_middle_segments(self, count: int) -> list[NodePath]:
+    def get_middle_segments(self, count: int) -> tuple[list[NodePath], list[NodePath]]:
         """
-        Get the specified number of segments from the middle of the corridor.
-        Segments are returned in order from nearest to farthest.
-        
-        Parameters:
-            count (int): Number of segments to return from the middle
-            
-        Returns:
-            list[NodePath]: List of segment NodePaths from the middle
-        """
-        # Ensure segments are sorted by Y position
-        sorted_segments = sorted(self.left_segments + self.right_segments, key=lambda x: x.getY())
-        
-        # Calculate middle index
-        middle_index = len(sorted_segments) // 2
-        
-        # Calculate start and end indices to get segments centered around the middle
-        start_index = middle_index - (count // 2)
-        end_index = start_index + count
-        
-        # Ensure indices are within bounds
-        start_index = max(0, start_index)
-        end_index = min(len(sorted_segments), end_index)
-        
-        return sorted_segments[start_index:end_index]
-    
-    def get_forward_segments(self, count: int) -> list[NodePath]:
-        """
-        Get the specified number of segments ahead of the camera.
-        Segments are returned in order from nearest to farthest.
+        Get the specified number of segments ahead of the player position.
+        Returns separate lists for left and right segments.
         
         Parameters:
             count (int): Number of segments to return
             
         Returns:
-            list[NodePath]: List of segment NodePaths
+            tuple[list[NodePath], list[NodePath]]: Tuple of (left_segments, right_segments)
         """
-        # Ensure segments are sorted by Y position (farthest segments have highest Y)
-        sorted_segments = sorted(self.left_segments + self.right_segments, key=lambda x: x.getY())
-        return sorted_segments[-count:]
+        # Ensure segments are sorted by Y position
+        sorted_left = sorted(self.left_segments, key=lambda x: x.getY())
+        sorted_right = sorted(self.right_segments, key=lambda x: x.getY())
+        
+        # Find segments ahead of player position
+        player_pos = self.base.camera.getY()
+        forward_left = [seg for seg in sorted_left if seg.getY() > player_pos]
+        forward_right = [seg for seg in sorted_right if seg.getY() > player_pos]
+        
+        # Return requested number of segments (or all if count > available segments)
+        return forward_left[:count], forward_right[:count]
+    
+    def get_forward_segments(self, count: int) -> tuple[list[NodePath], list[NodePath]]:
+        """
+        Get the specified number of segments ahead of the camera.
+        Returns separate lists for left and right segments.
+        
+        Parameters:
+            count (int): Number of segments to return
+            
+        Returns:
+            tuple[list[NodePath], list[NodePath]]: Tuple of (left_segments, right_segments)
+        """
+        # Sort left and right segments separately by Y position
+        sorted_left = sorted(self.left_segments, key=lambda x: x.getY())
+        sorted_right = sorted(self.right_segments, key=lambda x: x.getY())
+        
+        # Return the furthest count segments for each side
+        return sorted_left[-count:], sorted_right[-count:]
 
     def change_wall_textures_temporarily_once(self, task: Task = None) -> Task:
         """
@@ -685,16 +682,16 @@ class Corridor:
             self.change_wall_textures(None)
             
             # Check if the new texture is the go texture
-            middle_segments = self.get_middle_segments(6)
-            new_front_texture = middle_segments[0].getTexture().getFilename()
+            middle_left, middle_right = self.get_middle_segments(1)
+            new_front_texture = middle_left[0].getTexture().getFilename()
             if new_front_texture == self.go_texture:
                 # Update the enter_go_time in the MousePortal instance
                 self.base.enter_go_time = global_stopwatch.get_elapsed_time()
-                #print(f"enter_go_time updated to {self.base.enter_go_time:.2f} seconds")
+                print(f"enter_go_time updated to {self.base.enter_go_time:.2f} seconds")
             elif new_front_texture == self.stop_texture:
                 # Update the enter_stay_time in the MousePortal instance
                 self.base.enter_stay_time = global_stopwatch.get_elapsed_time()
-                #print(f"enter_stay_time updated to {self.base.enter_stay_time:.2f} seconds")
+                print(f"enter_stay_time updated to {self.base.enter_stay_time:.2f} seconds")
 
             # Schedule the next texture change
             self.schedule_texture_change()
@@ -1827,14 +1824,15 @@ class MousePortal(ShowBase):
                 self.corridor.update_texture_change()
 
                 # Check if the new front segment has the stay or go textures
-                new_front_texture = self.corridor.left_segments[0].getTexture().getFilename()
+                middle_left, middle_right = self.corridor.get_middle_segments(1)
+                new_front_texture = middle_left[0].getTexture().getFilename()
                 if new_front_texture == self.corridor.go_texture:
                     self.segments_with_go_texture += 1
                     #print(f"New segment with go texture counted: {self.segments_with_go_texture}")
                 elif new_front_texture == self.corridor.stop_texture:
                     self.segments_with_stay_texture += 1
                     #print(f"New segment with stay texture counted: {self.segments_with_stay_texture}")
-        
+
         elif move_distance < 0:
             self.distance_since_recycle += move_distance
             while self.distance_since_recycle <= -self.segment_length:
@@ -1846,7 +1844,8 @@ class MousePortal(ShowBase):
 
         # FSM state transition logic
         # Dynamically get the current texture of the left wall
-        selected_texture = self.corridor.left_segments[0].getTexture().getFilename()
+        middle_left, middle_right = self.corridor.get_middle_segments(1)
+        selected_texture = middle_left[0].getTexture().getFilename()
         self.reward_time = self.cfg["reward_time"]
         self.puff_time = self.cfg["puff_time"]
 
