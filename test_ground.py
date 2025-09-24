@@ -490,6 +490,14 @@ class Corridor:
                 self.apply_texture(left_node, selected_texture)
             for right_node in forward_segments:
                 self.apply_texture(right_node, selected_texture)
+        elif selected_texture == self.go_texture:
+            middle_segments = self.get_middle_segments(self.segments_until_revert)
+            print(f"Changing textures for {self.segments_until_revert} segments in the middle")
+            print(f"Segments to change: {len(middle_segments)}")
+            for left_node in middle_segments:
+                self.apply_texture(left_node, selected_texture)
+            for right_node in middle_segments:
+                self.apply_texture(right_node, selected_texture)
                 
         # Print the elapsed time since the corridor was initialized
         elapsed_time = global_stopwatch.get_elapsed_time()
@@ -501,6 +509,33 @@ class Corridor:
         
         # Return Task.done if task is None
         return Task.done if task is None else task.done
+    
+    def get_middle_segments(self, count: int) -> list[NodePath]:
+        """
+        Get the specified number of segments from the middle of the corridor.
+        Segments are returned in order from nearest to farthest.
+        
+        Parameters:
+            count (int): Number of segments to return from the middle
+            
+        Returns:
+            list[NodePath]: List of segment NodePaths from the middle
+        """
+        # Ensure segments are sorted by Y position
+        sorted_segments = sorted(self.left_segments + self.right_segments, key=lambda x: x.getY())
+        
+        # Calculate middle index
+        middle_index = len(sorted_segments) // 2
+        
+        # Calculate start and end indices to get segments centered around the middle
+        start_index = middle_index - (count // 2)
+        end_index = start_index + count
+        
+        # Ensure indices are within bounds
+        start_index = max(0, start_index)
+        end_index = min(len(sorted_segments), end_index)
+        
+        return sorted_segments[start_index:end_index]
     
     def get_forward_segments(self, count: int) -> list[NodePath]:
         """
@@ -650,7 +685,8 @@ class Corridor:
             self.change_wall_textures(None)
             
             # Check if the new texture is the go texture
-            new_front_texture = self.left_segments[0].getTexture().getFilename()
+            middle_segments = self.get_middle_segments(6)
+            new_front_texture = middle_segments[0].getTexture().getFilename()
             if new_front_texture == self.go_texture:
                 # Update the enter_go_time in the MousePortal instance
                 self.base.enter_go_time = global_stopwatch.get_elapsed_time()
