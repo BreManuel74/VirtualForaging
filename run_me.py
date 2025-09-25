@@ -430,7 +430,7 @@ if __name__ == "__main__":
     
     animal_name = input("Enter animal name: ")
     level_file = select_file('Levels', '.json')
-    phase_file = os.path.join(os.getcwd(), 'Phases', 'final.py')  # Automatically select final.py
+    phase_file = os.path.join(os.getcwd(), 'test_ground.py')  # Automatically select final.py
     output_dir = select_dir(os.getcwd())
     batch_id = input("Enter batch ID number: ")
     teensy_port = input("Enter Teensy port (e.g., COM3): ")
