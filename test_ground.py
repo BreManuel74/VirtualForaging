@@ -2,24 +2,6 @@
 """
 Infinite Corridor using Panda3D
 
-This script creates an infinite corridor effect with user-controlled forward/backward movement.
-
-Features:
-- Configurable parameters loaded from JSON
-- Infinite corridor effect
-- User-controlled movement
-- [real-time] Data logging (timestamp, distance, speed)
-
-The corridor consists of left, right, ceiling, and floor segments.
-It uses the Panda3D CardMaker API to generate flat geometry for the corridor's four faces.
-An infinite corridor/hallway effect is simulated by recycling the front segments to the back when the player moves forward. 
-
-
-Configuration parameters are loaded from a JSON file "conf.json".
-
-Author: Jake Gronemeyer
-Date: 2025-02-23
-Version: 0.2
 """
 
 import json
@@ -274,6 +256,8 @@ class Corridor:
         self.trial_df.to_csv = self.base.trial_df.to_csv 
         self.trial_csv_path = self.base.trial_csv_path
 
+        self.zone_gap = 0  # Initialize zone_gap
+
         self.segment_length: float = config["segment_length"]
         self.corridor_width: float = config["corridor_width"]
         self.wall_height: float = config["wall_height"]
@@ -395,6 +379,31 @@ class Corridor:
         min_y = camera_pos - (self.view_distance / 2)
         max_y = camera_pos + (self.view_distance / 2)
         
+        # Create list for storing new segments' positions
+        positions_to_create = []
+        
+        # Add new segments behind if needed
+        if not self.left_segments or self.left_segments[0].getY() > min_y:
+            prev_pos = (self.left_segments[0].getY() - self.segment_length 
+                    if self.left_segments 
+                    else camera_pos)
+            while prev_pos >= min_y:
+                positions_to_create.append(prev_pos)
+                prev_pos -= self.segment_length
+                
+        # Add new segments ahead if needed
+        if not self.left_segments or self.left_segments[-1].getY() < max_y:
+            next_pos = (self.left_segments[-1].getY() + self.segment_length 
+                    if self.left_segments 
+                    else camera_pos)
+            while next_pos <= max_y:
+                positions_to_create.append(next_pos)
+                next_pos += self.segment_length
+        
+        # Create all new segments
+        for pos in sorted(positions_to_create):
+            self._create_segment(pos)
+        
         # Remove segments that are too far behind
         while self.left_segments and self.left_segments[0].getY() < min_y:
             self._delete_segment(0)
@@ -402,26 +411,18 @@ class Corridor:
         # Remove segments that are too far ahead
         while self.left_segments and self.left_segments[-1].getY() > max_y:
             self._delete_segment(-1)
+        
+        # Keep segments sorted by Y position
+        if self.left_segments:
+            segments = list(zip(self.left_segments, self.right_segments, 
+                            self.ceiling_segments, self.floor_segments))
+            segments.sort(key=lambda x: x[0].getY())
             
-        # Add new segments ahead if needed
-        while (not self.left_segments) or (self.left_segments[-1].getY() < max_y):
-            next_pos = (self.left_segments[-1].getY() + self.segment_length 
-                       if self.left_segments 
-                       else camera_pos)
-            self._create_segment(next_pos)
-            
-        # Add new segments behind if needed
-        while (not self.left_segments) or (self.left_segments[0].getY() > min_y):
-            prev_pos = (self.left_segments[0].getY() - self.segment_length 
-                       if self.left_segments 
-                       else camera_pos)
-            self._create_segment(prev_pos)
-            # Keep segments sorted by Y position
-            self.left_segments.sort(key=lambda x: x.getY())
-            self.right_segments.sort(key=lambda x: x.getY())
-            self.ceiling_segments.sort(key=lambda x: x.getY())
-            self.floor_segments.sort(key=lambda x: x.getY())
-            
+            self.left_segments = [s[0] for s in segments]
+            self.right_segments = [s[1] for s in segments]
+            self.ceiling_segments = [s[2] for s in segments]
+            self.floor_segments = [s[3] for s in segments]
+        
         # Ensure we don't exceed the maximum number of segments
         while len(self.left_segments) > self.num_segments:
             if abs(self.left_segments[0].getY() - camera_pos) > abs(self.left_segments[-1].getY() - camera_pos):
@@ -472,6 +473,10 @@ class Corridor:
         
         # Set the counter for segments to revert textures using a random value from stay_or_go_data
         self.segments_until_revert = int(random.choice(stay_or_go_data))
+        if selected_texture == self.stop_texture:
+            self.zone_gap = (12 - self.segments_until_revert)
+        else:
+            self.zone_gap = 0
         self.base.zone_length = self.segments_until_revert
         
         # Write the segments_until_revert value to the trial_data file
@@ -484,18 +489,20 @@ class Corridor:
         # Apply the selected texture to the walls
         if selected_texture == self.stop_texture:
             forward_left, forward_right = self.get_forward_segments(self.segments_until_revert)
-            for left_node in forward_left:
-                self.apply_texture(left_node, selected_texture)
-            for right_node in forward_right:
-                self.apply_texture(right_node, selected_texture)
+            # Ensure we have equal number of segments for both sides
+            num_segments = min(len(forward_left), len(forward_right))
+            for i in range(num_segments):
+                # Apply texture to matched pairs of segments
+                self.apply_texture(forward_left[i], selected_texture)
+                self.apply_texture(forward_right[i], selected_texture)
         elif selected_texture == self.go_texture:
             middle_left, middle_right = self.get_middle_segments(self.segments_until_revert)
-            print(f"Changing textures for {self.segments_until_revert} segments in the middle")
-            print(f"Segments to change: {len(middle_left)}")
-            for left_node in middle_left:
-                self.apply_texture(left_node, selected_texture)
-            for right_node in middle_right:
-                self.apply_texture(right_node, selected_texture)
+            # Ensure we have equal number of segments for both sides
+            num_segments = min(len(middle_left), len(middle_right))
+            for i in range(num_segments):
+                # Apply texture to matched pairs of segments
+                self.apply_texture(middle_left[i], selected_texture)
+                self.apply_texture(middle_right[i], selected_texture)
                 
         # Print the elapsed time since the corridor was initialized
         elapsed_time = global_stopwatch.get_elapsed_time()
@@ -510,44 +517,50 @@ class Corridor:
     
     def get_middle_segments(self, count: int) -> tuple[list[NodePath], list[NodePath]]:
         """
-        Get the specified number of segments ahead of the player position.
-        Returns separate lists for left and right segments.
-        
-        Parameters:
-            count (int): Number of segments to return
-            
-        Returns:
-            tuple[list[NodePath], list[NodePath]]: Tuple of (left_segments, right_segments)
+        Get segments ahead of player, using left wall Y positions as reference.
         """
-        # Ensure segments are sorted by Y position
+        # Sort left segments first
         sorted_left = sorted(self.left_segments, key=lambda x: x.getY())
-        sorted_right = sorted(self.right_segments, key=lambda x: x.getY())
         
-        # Find segments ahead of player position
+        # Filter to segments ahead of player
         player_pos = self.base.camera.getY()
         forward_left = [seg for seg in sorted_left if seg.getY() > player_pos]
-        forward_right = [seg for seg in sorted_right if seg.getY() > player_pos]
         
-        # Return requested number of segments (or all if count > available segments)
-        return forward_left[:count], forward_right[:count]
+        # Take requested number of left segments
+        selected_left = forward_left[:count]
+        
+        # Find matching right segments
+        selected_right = []
+        for left_seg in selected_left:
+            left_y = left_seg.getY()
+            closest_right = min(self.right_segments, 
+                            key=lambda x: abs(x.getY() - left_y))
+            selected_right.append(closest_right)
+        
+        return selected_left, selected_right
     
     def get_forward_segments(self, count: int) -> tuple[list[NodePath], list[NodePath]]:
         """
         Get the specified number of segments ahead of the camera.
-        Returns separate lists for left and right segments.
-        
-        Parameters:
-            count (int): Number of segments to return
-            
-        Returns:
-            tuple[list[NodePath], list[NodePath]]: Tuple of (left_segments, right_segments)
+        Uses left wall Y positions as reference for pairing segments.
         """
-        # Sort left and right segments separately by Y position
+        # Sort left segments first to use as reference
         sorted_left = sorted(self.left_segments, key=lambda x: x.getY())
-        sorted_right = sorted(self.right_segments, key=lambda x: x.getY())
+        # Take the furthest count left segments
+        selected_left = sorted_left[-count:]
         
-        # Return the furthest count segments for each side
-        return sorted_left[-count:], sorted_right[-count:]
+        # Create a list to store matching right segments
+        selected_right = []
+        
+        # For each left segment, find the closest right segment by Y position
+        for left_seg in selected_left:
+            left_y = left_seg.getY()
+            # Find the right segment with the closest Y position
+            closest_right = min(self.right_segments, 
+                            key=lambda x: abs(x.getY() - left_y))
+            selected_right.append(closest_right)
+        
+        return selected_left, selected_right
 
     def change_wall_textures_temporarily_once(self, task: Task = None) -> Task:
         """
@@ -636,11 +649,11 @@ class Corridor:
         self.trial_df['texture_revert'] = revert_times
         self.trial_df.to_csv(self.trial_csv_path, index=False)
 
-        # Reapply the original textures to the walls
-        for left_node in self.left_segments:
-            self.apply_texture(left_node, self.left_wall_texture)
-        for right_node in self.right_segments:
-            self.apply_texture(right_node, self.right_wall_texture)
+        # # Reapply the original textures to the walls
+        # for left_node in self.left_segments:
+        #     self.apply_texture(left_node, self.left_wall_texture)
+        # for right_node in self.right_segments:
+        #     self.apply_texture(right_node, self.right_wall_texture)
 
         # Conditional to make probe optional
         if self.probe:
@@ -654,7 +667,7 @@ class Corridor:
 
     def schedule_texture_change(self) -> None:
         """
-        Schedule the next texture change after a random number of wall segments are recycled.
+        Schedule the next texture change.
         """
         # Ensure segments_until_revert is initialized
         if not hasattr(self, 'segments_until_revert'):
@@ -671,11 +684,11 @@ class Corridor:
         self.trial_df['segments_to_wait'] = segs
         self.trial_df.to_csv(self.trial_csv_path, index=False)
         
-        self.segments_until_texture_change = segments_to_wait + self.segments_until_revert
+        self.segments_until_texture_change = segments_to_wait + self.segments_until_revert + self.zone_gap
 
     def update_texture_change(self) -> None:
         """
-        Check if the required number of segments has been recycled and change the texture if needed.
+        Check if a texture change is needed.
         """
         if self.segments_until_texture_change <= 0:
             # Trigger the texture change
@@ -683,7 +696,7 @@ class Corridor:
             
             # Check if the new texture is the go texture
             middle_left, middle_right = self.get_middle_segments(1)
-            new_front_texture = middle_left[0].getTexture().getFilename()
+            new_front_texture = middle_right[0].getTexture().getFilename()
             if new_front_texture == self.go_texture:
                 # Update the enter_go_time in the MousePortal instance
                 self.base.enter_go_time = global_stopwatch.get_elapsed_time()
@@ -1694,7 +1707,7 @@ class MousePortal(ShowBase):
         self.zone_length = 0
 
         # Variable to track movement since last recycling
-        self.distance_since_recycle: float = 0.0
+        self.distance_since_last_segment: float = 0.0
         
         # Movement speed (units per second)
         self.movement_speed: float = 10.0
@@ -1813,13 +1826,12 @@ class MousePortal(ShowBase):
         # Update corridor
         self.corridor.update_corridor(self.camera_position)
         
-        # Recycle corridor segments when the camera moves beyond one segment length
+        # Keep track of segments passed in either direction
         if move_distance > 0:
-            self.distance_since_recycle += move_distance
-            while self.distance_since_recycle >= self.segment_length:
-                # Recycle the segment in the forward direction
-                #self.corridor.recycle_segment(direction="forward")
-                self.distance_since_recycle -= self.segment_length
+            self.distance_since_last_segment += move_distance
+            while self.distance_since_last_segment >= self.segment_length:
+                # Count a segment passed in forward direction
+                self.distance_since_last_segment -= self.segment_length
                 self.corridor.segments_until_texture_change -= 1
                 self.corridor.update_texture_change()
 
@@ -1834,10 +1846,10 @@ class MousePortal(ShowBase):
                     #print(f"New segment with stay texture counted: {self.segments_with_stay_texture}")
 
         elif move_distance < 0:
-            self.distance_since_recycle += move_distance
-            while self.distance_since_recycle <= -self.segment_length:
-                #self.corridor.recycle_segment(direction="backward")
-                self.distance_since_recycle += self.segment_length
+            self.distance_since_last_segment += move_distance
+            while self.distance_since_last_segment <= -self.segment_length:
+                # Count a segment passed in backward direction
+                self.distance_since_last_segment += self.segment_length
 
         # Log movement data (timestamp, distance, speed)
         self.treadmill_logger.log(self.treadmill.data)
