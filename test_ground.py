@@ -698,16 +698,13 @@ class Corridor:
             
             # Get new front segments after texture change
             middle_left, middle_right = self.get_middle_segments(1)
-            new_front_texture = middle_left[0].getTexture().getFilename()
+            new_front_texture = middle_right[0].getTexture().getFilename()
             
             # Update enter times if the texture directly in front changed
             if new_front_texture != current_front_texture:
                 if new_front_texture == self.go_texture:
                     self.base.enter_go_time = global_stopwatch.get_elapsed_time()
                     print(f"enter_go_time updated to {self.base.enter_go_time:.2f} seconds")
-                elif new_front_texture == self.stop_texture:
-                    self.base.enter_stay_time = global_stopwatch.get_elapsed_time()
-                    print(f"enter_stay_time updated to {self.base.enter_stay_time:.2f} seconds")
 
             # Schedule the next texture change
             self.schedule_texture_change()
@@ -1057,7 +1054,9 @@ class RewardOrPuff(FSM):
 
         if self.state == 'Reward':
             # Transition to Neutral only if the wall texture matches the original wall texture
-            if current_texture == self.base.corridor.left_wall_texture:
+            middle_left, middle_right = self.base.corridor.get_middle_segments(1)
+            current_texture = middle_right[0].getTexture().getFilename()
+            if current_texture == self.base.corridor.right_wall_texture:
                 self.request('Neutral')
         elif self.state == 'Puff':
             # Transition to Neutral directly without checking the wall texture
@@ -1829,17 +1828,14 @@ class MousePortal(ShowBase):
         # Update corridor
         self.corridor.update_corridor(self.camera_position)
 
-    # Get current segments at camera position
-        player_pos = self.camera_position
-        middle_left = [seg for seg in self.corridor.left_segments if seg.getY() <= player_pos]
-        if middle_left:
-            current_segment = middle_left[-1]  # Get segment at or just behind camera
-            current_texture = current_segment.getTexture().getFilename()
+        # Get current segments at camera position using get_middle_segments
+        middle_left, middle_right = self.corridor.get_middle_segments(1)
+        if middle_right:  # Using right wall instead of left
+            current_texture = middle_right[0].getTexture().getFilename()
             
-            # Get previous segment if it exists
-            previous_texture = None
-            if len(middle_left) > 1:
-                previous_texture = middle_left[-2].getTexture().getFilename()
+            # Get previous segments to check for texture change
+            middle_left_prev, middle_right_prev = self.corridor.get_middle_segments(2)
+            previous_texture = middle_right_prev[1].getTexture().getFilename() if len(middle_right_prev) > 1 else None
             
             # Detect zone entry when camera actually enters the segment
             if previous_texture != current_texture:
@@ -1852,7 +1848,7 @@ class MousePortal(ShowBase):
                     self.enter_go_time = global_stopwatch.get_elapsed_time()
                     print(f"Entered GO zone at {self.enter_go_time:.2f} seconds")
                     self.segments_with_go_texture = 0
-        
+            
         # Keep track of segments passed in either direction
         if move_distance > 0:
             self.distance_since_last_segment += move_distance
@@ -1862,15 +1858,12 @@ class MousePortal(ShowBase):
                 self.corridor.segments_until_texture_change -= 1
                 self.corridor.update_texture_change()
 
-                # Check if the new front segment has the stay or go textures
-                middle_left, middle_right = self.corridor.get_middle_segments(1)
-                new_front_texture = middle_left[0].getTexture().getFilename()
-                if new_front_texture == self.corridor.go_texture:
+                if current_texture == self.corridor.go_texture:
                     self.segments_with_go_texture += 1
-                    #print(f"New segment with go texture counted: {self.segments_with_go_texture}")
-                elif new_front_texture == self.corridor.stop_texture:
+                    print(f"New segment with go texture counted: {self.segments_with_go_texture}")
+                elif current_texture == self.corridor.stop_texture:
                     self.segments_with_stay_texture += 1
-                    #print(f"New segment with stay texture counted: {self.segments_with_stay_texture}")
+                    print(f"New segment with stay texture counted: {self.segments_with_stay_texture}")
 
         elif move_distance < 0:
             self.distance_since_last_segment += move_distance
@@ -1898,7 +1891,7 @@ class MousePortal(ShowBase):
         else:
             self.speed_zero_start_time = None
 
-        #print(self.treadmill.data.speed)
+        #print(current_texture)
 
         if current_texture == self.corridor.stop_texture:
             #print(self.zone_length)
@@ -1912,18 +1905,18 @@ class MousePortal(ShowBase):
             if (self.segments_with_stay_texture <= self.zone_length and 
                 self.fsm.state != 'Reward' and 
                 (speed_zero_duration or meets_time_requirement)):  # Either condition can trigger reward
-                #print("Requesting Reward state")
+                print("Requesting Reward state")
                 self.fsm.request('Reward')
         elif current_texture == self.corridor.go_texture:
             #print(self.zone_length)
             if self.segments_with_go_texture <= self.zone_length and self.fsm.state != 'Puff' and current_time >= self.enter_go_time + (self.puff_time * self.zone_length):
-                #print("Requesting Puff state")
+                print("Requesting Puff state")
                 self.fsm.request('Puff')
         else:
             self.segments_with_go_texture = 0 
             self.segments_with_stay_texture = 0
             if self.fsm.state != 'Neutral':
-                #print("Requesting Neutral state")
+                print("Requesting Neutral state")
                 self.fsm.request('Neutral')
         
         return Task.cont
