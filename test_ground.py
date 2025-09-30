@@ -516,49 +516,49 @@ class Corridor:
         return Task.done if task is None else task.done
     
     def get_middle_segments(self, count: int) -> tuple[list[NodePath], list[NodePath]]:
-        """
-        Get segments ahead of player, using left wall Y positions as reference.
-        """
-        # Sort left segments first
+        """Get segments ahead of player, using left wall Y positions as reference."""
+        # Sort both left and right segments
         sorted_left = sorted(self.left_segments, key=lambda x: x.getY())
+        sorted_right = sorted(self.right_segments, key=lambda x: x.getY())
         
         # Filter to segments ahead of player
         player_pos = self.base.camera.getY()
         forward_left = [seg for seg in sorted_left if seg.getY() > player_pos]
+        forward_right = [seg for seg in sorted_right if seg.getY() > player_pos]
         
-        # Take requested number of left segments
-        selected_left = forward_left[:count]
+        # Take left segments starting one position closer to player
+        start_idx = max(0, forward_left.index(min(forward_left, key=lambda x: x.getY())))
+        selected_left = forward_left[start_idx:start_idx + count]
         
-        # Find matching right segments
-        selected_right = []
-        for left_seg in selected_left:
-            left_y = left_seg.getY()
-            closest_right = min(self.right_segments, 
-                            key=lambda x: abs(x.getY() - left_y))
-            selected_right.append(closest_right)
+        # Take right segments normally
+        start_idx_right = max(0, forward_right.index(min(forward_right, key=lambda x: x.getY())) + 1)
+        selected_right = forward_right[start_idx_right:start_idx_right + count]
+        
+        # # More detailed debug print
+        # print("\nMiddle Segments Y positions (with segment length):")
+        # print(f"Player position: {round(player_pos, 2)}")
+        # print(f"Segment length: {round(self.segment_length, 2)}")
+        # print("Left wall segments:", [round(seg.getY(), 2) for seg in selected_left])
+        # print("Right wall segments:", [round(seg.getY(), 2) for seg in selected_right])
         
         return selected_left, selected_right
-    
+
     def get_forward_segments(self, count: int) -> tuple[list[NodePath], list[NodePath]]:
-        """
-        Get the specified number of segments ahead of the camera.
-        Uses left wall Y positions as reference for pairing segments.
-        """
-        # Sort left segments first to use as reference
+        """Get the specified number of segments ahead of the camera."""
+        # Sort both left and right segments
         sorted_left = sorted(self.left_segments, key=lambda x: x.getY())
-        # Take the furthest count left segments
-        selected_left = sorted_left[-count:]
+        sorted_right = sorted(self.right_segments, key=lambda x: x.getY())
         
-        # Create a list to store matching right segments
-        selected_right = []
+        # Take the furthest count right segments normally
+        selected_right = sorted_right[-count:]
         
-        # For each left segment, find the closest right segment by Y position
-        for left_seg in selected_left:
-            left_y = left_seg.getY()
-            # Find the right segment with the closest Y position
-            closest_right = min(self.right_segments, 
-                            key=lambda x: abs(x.getY() - left_y))
-            selected_right.append(closest_right)
+        # Take left segments one position closer
+        selected_left = sorted_left[-(count+1):-1]  # Skip last segment
+        
+        # Debug print
+        print("\nForward Segments Y positions:")
+        print("Left wall segments:", [round(seg.getY(), 2) for seg in selected_left])
+        print("Right wall segments:", [round(seg.getY(), 2) for seg in selected_right])
         
         return selected_left, selected_right
 
