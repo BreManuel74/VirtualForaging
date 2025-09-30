@@ -555,10 +555,10 @@ class Corridor:
         # Take left segments one position closer
         selected_left = sorted_left[-(count+1):-1]  # Skip last segment
         
-        # Debug print
-        print("\nForward Segments Y positions:")
-        print("Left wall segments:", [round(seg.getY(), 2) for seg in selected_left])
-        print("Right wall segments:", [round(seg.getY(), 2) for seg in selected_right])
+        # # Debug print
+        # print("\nForward Segments Y positions:")
+        # print("Left wall segments:", [round(seg.getY(), 2) for seg in selected_left])
+        # print("Right wall segments:", [round(seg.getY(), 2) for seg in selected_right])
         
         return selected_left, selected_right
 
@@ -687,24 +687,27 @@ class Corridor:
         self.segments_until_texture_change = segments_to_wait + self.segments_until_revert + self.zone_gap
 
     def update_texture_change(self) -> None:
-        """
-        Check if a texture change is needed.
-        """
+        """Check if a texture change is needed and monitor texture directly in front of player."""
+        # Get current front segments
+        middle_left, middle_right = self.get_middle_segments(1)
+        current_front_texture = middle_left[0].getTexture().getFilename()
+        
         if self.segments_until_texture_change <= 0:
             # Trigger the texture change
             self.change_wall_textures(None)
             
-            # Check if the new texture is the go texture
+            # Get new front segments after texture change
             middle_left, middle_right = self.get_middle_segments(1)
-            new_front_texture = middle_right[0].getTexture().getFilename()
-            if new_front_texture == self.go_texture:
-                # Update the enter_go_time in the MousePortal instance
-                self.base.enter_go_time = global_stopwatch.get_elapsed_time()
-                print(f"enter_go_time updated to {self.base.enter_go_time:.2f} seconds")
-            elif new_front_texture == self.stop_texture:
-                # Update the enter_stay_time in the MousePortal instance
-                self.base.enter_stay_time = global_stopwatch.get_elapsed_time()
-                print(f"enter_stay_time updated to {self.base.enter_stay_time:.2f} seconds")
+            new_front_texture = middle_left[0].getTexture().getFilename()
+            
+            # Update enter times if the texture directly in front changed
+            if new_front_texture != current_front_texture:
+                if new_front_texture == self.go_texture:
+                    self.base.enter_go_time = global_stopwatch.get_elapsed_time()
+                    print(f"enter_go_time updated to {self.base.enter_go_time:.2f} seconds")
+                elif new_front_texture == self.stop_texture:
+                    self.base.enter_stay_time = global_stopwatch.get_elapsed_time()
+                    print(f"enter_stay_time updated to {self.base.enter_stay_time:.2f} seconds")
 
             # Schedule the next texture change
             self.schedule_texture_change()
@@ -1825,6 +1828,30 @@ class MousePortal(ShowBase):
 
         # Update corridor
         self.corridor.update_corridor(self.camera_position)
+
+    # Get current segments at camera position
+        player_pos = self.camera_position
+        middle_left = [seg for seg in self.corridor.left_segments if seg.getY() <= player_pos]
+        if middle_left:
+            current_segment = middle_left[-1]  # Get segment at or just behind camera
+            current_texture = current_segment.getTexture().getFilename()
+            
+            # Get previous segment if it exists
+            previous_texture = None
+            if len(middle_left) > 1:
+                previous_texture = middle_left[-2].getTexture().getFilename()
+            
+            # Detect zone entry when camera actually enters the segment
+            if previous_texture != current_texture:
+                if current_texture == self.corridor.stop_texture:
+                    self.enter_stay_time = global_stopwatch.get_elapsed_time()
+                    print(f"Entered STAY zone at {self.enter_stay_time:.2f} seconds")
+                    self.segments_with_stay_texture = 0
+                    
+                elif current_texture == self.corridor.go_texture:
+                    self.enter_go_time = global_stopwatch.get_elapsed_time()
+                    print(f"Entered GO zone at {self.enter_go_time:.2f} seconds")
+                    self.segments_with_go_texture = 0
         
         # Keep track of segments passed in either direction
         if move_distance > 0:
@@ -1856,8 +1883,8 @@ class MousePortal(ShowBase):
 
         # FSM state transition logic
         # Dynamically get the current texture of the left wall
-        middle_left, middle_right = self.corridor.get_middle_segments(1)
-        selected_texture = middle_left[0].getTexture().getFilename()
+        # middle_left, middle_right = self.corridor.get_middle_segments(1)
+        # selected_texture = middle_left[0].getTexture().getFilename()
         self.reward_time = self.cfg["reward_time"]
         self.puff_time = self.cfg["puff_time"]
 
@@ -1873,7 +1900,7 @@ class MousePortal(ShowBase):
 
         #print(self.treadmill.data.speed)
 
-        if selected_texture == self.corridor.stop_texture:
+        if current_texture == self.corridor.stop_texture:
             #print(self.zone_length)
             # Check if speed has been 0 for set time
             speed_zero_duration = (self.speed_zero_start_time is not None and 
@@ -1887,7 +1914,7 @@ class MousePortal(ShowBase):
                 (speed_zero_duration or meets_time_requirement)):  # Either condition can trigger reward
                 #print("Requesting Reward state")
                 self.fsm.request('Reward')
-        elif selected_texture == self.corridor.go_texture:
+        elif current_texture == self.corridor.go_texture:
             #print(self.zone_length)
             if self.segments_with_go_texture <= self.zone_length and self.fsm.state != 'Puff' and current_time >= self.enter_go_time + (self.puff_time * self.zone_length):
                 #print("Requesting Puff state")
