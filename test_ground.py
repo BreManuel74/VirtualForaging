@@ -496,11 +496,12 @@ class Corridor:
                 self.apply_texture(forward_left[i], selected_texture)
                 self.apply_texture(forward_right[i], selected_texture)
         elif selected_texture == self.go_texture:
+            # Get segments using new method
             middle_left, middle_right = self.get_forward_segments_near(self.segments_until_revert)
             # Ensure we have equal number of segments for both sides
             num_segments = min(len(middle_left), len(middle_right))
-            for i in range(num_segments):
-                # Apply texture to matched pairs of segments
+            # Apply textures from back to front (no reversal needed since get_forward_segments_near already returns from back)
+            for i in range(num_segments):  # Remove the reversal
                 self.apply_texture(middle_left[i], selected_texture)
                 self.apply_texture(middle_right[i], selected_texture)
                 
@@ -516,24 +517,32 @@ class Corridor:
         return Task.done if task is None else task.done
     
     def get_forward_segments_near(self, count: int) -> tuple[list[NodePath], list[NodePath]]:
-        """Get segments ahead of player, using left wall Y positions as reference."""
-        # Sort both left and right segments
+        """
+        Get segments starting from the one behind the camera and then
+        moving forward for the specified count.
+        Camera is between segments 12 and 13 in a 24-segment hallway.
+        
+        Parameters:
+            count (int): Number of segments to return
+            
+        Returns:
+            tuple[list[NodePath], list[NodePath]]: Selected left and right wall segments
+        """
+        # Sort both left and right segments by Y position (front to back)
         sorted_left = sorted(self.left_segments, key=lambda x: x.getY())
         sorted_right = sorted(self.right_segments, key=lambda x: x.getY())
         
-        # Filter to segments ahead of player
-        player_pos = self.base.camera.getY()
-        forward_left = [seg for seg in sorted_left if seg.getY() > player_pos]
-        forward_right = [seg for seg in sorted_right if seg.getY() > player_pos]
+        # Camera is between segments 12 and 13
+        # Start from segment 12 (behind camera) and take 'count' segments forward
+        start_index = 12
+        end_index = min(start_index + count, len(sorted_left))
         
-        # Take left segments starting one position closer to player
-        start_idx = max(0, forward_left.index(min(forward_left, key=lambda x: x.getY())))
-        selected_left = forward_left[start_idx:start_idx + count]
+        # Get segments from behind camera forward
+        selected_right = sorted_right[start_index:end_index]
         
-        # Take right segments normally
-        start_idx_right = max(0, forward_right.index(min(forward_right, key=lambda x: x.getY())) + 1)
-        selected_right = forward_right[start_idx_right:start_idx_right + count]
-        
+        # Offset left segments forward by 1 (same as get_forward_segments_far)
+        selected_left = sorted_left[start_index-1:end_index-1]
+
         return selected_left, selected_right
 
     def get_forward_segments_far(self, count: int) -> tuple[list[NodePath], list[NodePath]]:
@@ -702,23 +711,19 @@ class Corridor:
 
     def update_texture_change(self) -> None:
         """Check if a texture change is needed and monitor texture directly in front of player."""
-        # Get current front segments
-        middle_left, middle_right = self.get_forward_segments_near(1)
-        current_front_texture = middle_left[0].getTexture().getFilename()
         
         if self.segments_until_texture_change <= 0:
             # Trigger the texture change
             self.change_wall_textures(None)
             
             # Get new front segments after texture change
-            middle_left, middle_right = self.get_forward_segments_near(1)
-            new_front_texture = middle_right[0].getTexture().getFilename()
-            
+            middle_left, middle_right = self.get_middle_segments(4)
+            new_front_texture = middle_right[2].getTexture().getFilename()
+
             # Update enter times if the texture directly in front changed
-            if new_front_texture != current_front_texture:
-                if new_front_texture == self.go_texture:
-                    self.base.enter_go_time = global_stopwatch.get_elapsed_time()
-                    print(f"enter_go_time updated to {self.base.enter_go_time:.2f} seconds")
+            if new_front_texture == self.go_texture:
+                self.base.enter_go_time = global_stopwatch.get_elapsed_time()
+                print(f"enter_go_time updated to {self.base.enter_go_time:.2f} seconds")
 
             # Schedule the next texture change
             self.schedule_texture_change()
@@ -1865,10 +1870,10 @@ class MousePortal(ShowBase):
 
                 if self.current_texture == self.corridor.go_texture:
                     self.segments_with_go_texture += 1
-                    #print(f"New segment with go texture counted: {self.segments_with_go_texture}")
+                    print(f"New segment with go texture counted: {self.segments_with_go_texture}")
                 elif self.current_texture == self.corridor.stop_texture:
                     self.segments_with_stay_texture += 1
-                    #print(f"STAY zone - Segments: {self.segments_with_stay_texture}")
+                    print(f"STAY zone - Segments: {self.segments_with_stay_texture}")
 
         elif move_distance < 0:
             self.distance_since_last_segment += move_distance
