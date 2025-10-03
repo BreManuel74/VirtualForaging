@@ -534,13 +534,6 @@ class Corridor:
         start_idx_right = max(0, forward_right.index(min(forward_right, key=lambda x: x.getY())) + 1)
         selected_right = forward_right[start_idx_right:start_idx_right + count]
         
-        # # More detailed debug print
-        # print("\nMiddle Segments Y positions (with segment length):")
-        # print(f"Player position: {round(player_pos, 2)}")
-        # print(f"Segment length: {round(self.segment_length, 2)}")
-        # print("Left wall segments:", [round(seg.getY(), 2) for seg in selected_left])
-        # print("Right wall segments:", [round(seg.getY(), 2) for seg in selected_right])
-        
         return selected_left, selected_right
 
     def get_forward_segments_far(self, count: int) -> tuple[list[NodePath], list[NodePath]]:
@@ -567,15 +560,10 @@ class Corridor:
         # Sort both left and right segments
         sorted_left = sorted(self.left_segments, key=lambda x: x.getY())
         sorted_right = sorted(self.right_segments, key=lambda x: x.getY())
-        
-        # Filter to segments ahead of player
-        player_pos = self.base.camera.getY()
-        forward_left = [seg for seg in sorted_left if seg.getY() > player_pos]
-        forward_right = [seg for seg in sorted_right if seg.getY() > player_pos]
 
         # Calculate middle index
-        middle_left_idx = len(forward_left) // 2
-        middle_right_idx = len(forward_right) // 2
+        middle_left_idx = len(sorted_left) // 2
+        middle_right_idx = len(sorted_right) // 2
 
         # Calculate start and end indices to get segments centered around the middle
         start_left = max(0, middle_left_idx - count // 2)
@@ -583,8 +571,8 @@ class Corridor:
         start_right = max(0, middle_right_idx - count // 2)
         end_right = start_right + count
 
-        selected_left = forward_left[start_left:end_left]
-        selected_right = forward_right[start_right:end_right]
+        selected_left = sorted_left[start_left:end_left]
+        selected_right = sorted_right[start_right:end_right]
 
         return selected_left, selected_right
 
@@ -1857,9 +1845,9 @@ class MousePortal(ShowBase):
         self.corridor.update_corridor(self.camera_position)
 
         # Get current segments at camera position using get_middle_segments
-        middle_left, middle_right = self.corridor.get_middle_segments(24)
+        middle_left, middle_right = self.corridor.get_middle_segments(4)
         if middle_right:  # Using right wall instead of left
-            self.current_texture = middle_right[0].getTexture().getFilename()
+            self.current_texture = middle_right[2].getTexture().getFilename()
             #print(f"Current texture (right): {self.current_texture}")
 
             if self.current_texture == self.corridor.stop_texture:
@@ -1877,10 +1865,10 @@ class MousePortal(ShowBase):
 
                 if self.current_texture == self.corridor.go_texture:
                     self.segments_with_go_texture += 1
-                    print(f"New segment with go texture counted: {self.segments_with_go_texture}")
+                    #print(f"New segment with go texture counted: {self.segments_with_go_texture}")
                 elif self.current_texture == self.corridor.stop_texture:
                     self.segments_with_stay_texture += 1
-                    print(f"New segment with stay texture counted: {self.segments_with_stay_texture}")
+                    #print(f"STAY zone - Segments: {self.segments_with_stay_texture}")
 
         elif move_distance < 0:
             self.distance_since_last_segment += move_distance
