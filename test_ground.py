@@ -1068,13 +1068,11 @@ class RewardOrPuff(FSM):
         - For the Reward state: Only transition if the wall texture is the original wall texture.
         - For the Puff state: Transition directly without checking the wall texture.
         """
-        # Get the current texture of the left wall
-        current_texture = self.base.corridor.left_segments[0].getTexture().getFilename()
 
         if self.state == 'Reward':
             # Transition to Neutral only if the wall texture matches the original wall texture
-            middle_left, middle_right = self.base.corridor.get_forward_segments_near(1)
-            current_texture = middle_right[0].getTexture().getFilename()
+            middle_left, middle_right = self.base.corridor.get_middle_segments(4)
+            current_texture = middle_right[2].getTexture().getFilename()
             if current_texture == self.base.corridor.right_wall_texture:
                 self.request('Neutral')
         elif self.state == 'Puff':
@@ -1880,6 +1878,8 @@ class MousePortal(ShowBase):
             while self.distance_since_last_segment <= -self.segment_length:
                 # Count a segment passed in backward direction
                 self.distance_since_last_segment += self.segment_length
+                self.corridor.segments_until_texture_change += 1
+                self.corridor.update_texture_change()
 
         # Log movement data (timestamp, distance, speed)
         self.treadmill_logger.log(self.treadmill.data)
