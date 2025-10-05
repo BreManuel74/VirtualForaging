@@ -1801,6 +1801,7 @@ class MousePortal(ShowBase):
         # Initialize variables for tracking current texture and flag
         self.current_texture = self.corridor.right_segments[0].getTexture().getFilename()
         self.current_segment_flag = self.corridor.get_segment_flag(self.corridor.right_segments[0])
+        self.active_stay_zone = False
 
     def _signal_handler(self, signum, frame):
         """Handle system signals for graceful shutdown."""
@@ -1870,6 +1871,7 @@ class MousePortal(ShowBase):
 
             if self.current_texture == self.corridor.stop_texture and self.current_segment_flag == True:
                 self.enter_stay_time = global_stopwatch.get_elapsed_time()
+                self.active_stay_zone = True
                 print(f"Entered STAY zone at time: {self.enter_stay_time}")
                 for node in self.corridor.right_segments:
                     self.corridor.set_segment_flag(node, False)
@@ -1886,7 +1888,7 @@ class MousePortal(ShowBase):
                 if self.current_texture == self.corridor.go_texture:
                     self.segments_with_go_texture += 1
                     print(f"New segment with go texture counted: {self.segments_with_go_texture}")
-                elif self.current_texture == self.corridor.stop_texture:
+                elif self.current_texture == self.corridor.stop_texture and self.active_stay_zone == True:
                     self.segments_with_stay_texture += 1
                     print(f"STAY zone - Segments: {self.segments_with_stay_texture}")
 
@@ -1918,7 +1920,7 @@ class MousePortal(ShowBase):
 
         #print(current_texture)
 
-        if self.current_texture == self.corridor.stop_texture:
+        if self.current_texture == self.corridor.stop_texture and self.active_stay_zone == True:
             #print(self.zone_length)
             # Check if speed has been 0 for set time
             speed_zero_duration = (self.speed_zero_start_time is not None and 
@@ -1932,6 +1934,7 @@ class MousePortal(ShowBase):
                 (speed_zero_duration or meets_time_requirement)):  # Either condition can trigger reward
                 print("Requesting Reward state")
                 self.fsm.request('Reward')
+                self.active_stay_zone = False  # Reset stay zone flag after requesting reward
         elif self.current_texture == self.corridor.go_texture:
             #print(self.zone_length)
             if self.segments_with_go_texture <= self.zone_length and self.fsm.state != 'Puff' and current_time >= self.enter_go_time + (self.puff_time * self.zone_length):
