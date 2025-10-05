@@ -245,6 +245,9 @@ class Corridor:
         self.rounded_stay_data = rounded_stay_data
         self.rounded_go_data = rounded_go_data
 
+        # Initialize flag to track wall segments
+        self.segment_flag_key = "segment_flag"
+
         self.texture_history = self.base.texture_history
         self.texture_time_history = self.base.texture_time_history
         self.segments_until_revert_history = self.base.segments_until_revert_history
@@ -320,6 +323,7 @@ class Corridor:
         left_node.setPos(-self.corridor_width / 2, position, 0)
         left_node.setHpr(90, 0, 0)
         self.apply_texture(left_node, self.left_wall_texture)
+        left_node.setPythonTag(self.segment_flag_key, False)
         self.left_segments.append(left_node)
         
         # Create right wall
@@ -329,6 +333,7 @@ class Corridor:
         right_node.setPos(self.corridor_width / 2, position, 0)
         right_node.setHpr(-90, 0, 0)
         self.apply_texture(right_node, self.right_wall_texture)
+        right_node.setPythonTag(self.segment_flag_key, False)
         self.right_segments.append(right_node)
         
         # Create ceiling
@@ -366,6 +371,12 @@ class Corridor:
         del self.right_segments[index]
         del self.ceiling_segments[index]
         del self.floor_segments[index]
+
+    def set_segment_flag(self, node: NodePath, value: bool) -> None:
+        node.setPythonTag(self.segment_flag_key, bool(value))
+
+    def get_segment_flag(self, node: NodePath) -> bool:
+        return bool(node.getPythonTag(self.segment_flag_key) or False)
 
     def update_corridor(self, camera_pos: float) -> None:
         """
@@ -495,6 +506,7 @@ class Corridor:
                 # Apply texture to matched pairs of segments
                 self.apply_texture(forward_left[i], selected_texture)
                 self.apply_texture(forward_right[i], selected_texture)
+                self.set_segment_flag(forward_right[i], True)
         elif selected_texture == self.go_texture:
             # Get segments using new method
             middle_left, middle_right = self.get_forward_segments_near(self.segments_until_revert)
@@ -504,7 +516,8 @@ class Corridor:
             for i in range(num_segments):  # Remove the reversal
                 self.apply_texture(middle_left[i], selected_texture)
                 self.apply_texture(middle_right[i], selected_texture)
-                
+                self.set_segment_flag(middle_right[i], True)
+
         # Print the elapsed time since the corridor was initialized
         elapsed_time = global_stopwatch.get_elapsed_time()
         self.texture_time_history = np.append(self.texture_time_history, round(elapsed_time, 2))
@@ -1784,8 +1797,10 @@ class MousePortal(ShowBase):
         # Initialize TCP client for dynamic level changing
         self.tcp_client = TCPStreamClient(self)
         self.time_spent_at_zero_speed = self.cfg["time_spent_at_zero_speed"]
-
+        
+        # Initialize variables for tracking current texture and flag
         self.current_texture = self.corridor.right_segments[0].getTexture().getFilename()
+        self.current_segment_flag = self.corridor.get_segment_flag(self.corridor.right_segments[0])
 
     def _signal_handler(self, signum, frame):
         """Handle system signals for graceful shutdown."""
@@ -1851,11 +1866,13 @@ class MousePortal(ShowBase):
         middle_left, middle_right = self.corridor.get_middle_segments(4)
         if middle_right:  # Using right wall instead of left
             self.current_texture = middle_right[2].getTexture().getFilename()
-            #print(f"Current texture (right): {self.current_texture}")
+            self.current_segment_flag = self.corridor.get_segment_flag(middle_right[2])
 
-            if self.current_texture == self.corridor.stop_texture:
+            if self.current_texture == self.corridor.stop_texture and self.current_segment_flag == True:
                 self.enter_stay_time = global_stopwatch.get_elapsed_time()
-                #print(f"Entered STAY zone at {self.enter_stay_time:.2f} seconds")
+                print(f"Entered STAY zone at time: {self.enter_stay_time}")
+                for node in self.corridor.right_segments:
+                    self.corridor.set_segment_flag(node, False)
             
         # Keep track of segments passed in either direction
         if move_distance > 0:
