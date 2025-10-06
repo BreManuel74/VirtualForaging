@@ -300,6 +300,8 @@ class Corridor:
         self.segments_until_revert = 0  # Ensure this attribute exists
         self.texture_change_scheduled = False  # Flag to track texture change scheduling
 
+        self.current_segment_flag = self.get_segment_flag(self.right_segments[0])
+
     def build_initial_segments(self) -> None:
         """ 
         Build the initial corridor segments centered around the camera.
@@ -732,10 +734,14 @@ class Corridor:
             # Get new front segments after texture change
             middle_left, middle_right = self.get_middle_segments(4)
             new_front_texture = middle_right[2].getTexture().getFilename()
+            self.current_segment_flag = self.get_segment_flag(middle_right[2])
 
             # Update enter times if the texture directly in front changed
-            if new_front_texture == self.go_texture:
+            if new_front_texture == self.go_texture and self.current_segment_flag == True:
                 self.base.enter_go_time = global_stopwatch.get_elapsed_time()
+                self.base.active_puff_zone = True
+                for node in self.right_segments:
+                    self.set_segment_flag(node, False)
                 print(f"enter_go_time updated to {self.base.enter_go_time:.2f} seconds")
 
             # Schedule the next texture change
@@ -1019,6 +1025,7 @@ class RewardOrPuff(FSM):
         self.accept('puff-event', self.request, ['Puff'])
         self.accept('reward-event', self.request, ['Reward'])
         self.accept('neutral-event', self.request, ['Neutral'])
+        self.current_texture = None
 
     def enterPuff(self):
         """
@@ -1033,6 +1040,7 @@ class RewardOrPuff(FSM):
         # Combine 1 and puff_duration into a single integer
         signal = int(f"1{self.puff_duration}")
         self.base.serial_output.send_signal(signal)
+        print("puff!")
         self.base.doMethodLaterStopwatch(self.puff_to_neutral_time, self._transitionToNeutral, 'return-to-neutral')
 
     def exitPuff(self):
@@ -1077,19 +1085,36 @@ class RewardOrPuff(FSM):
 
     def _transitionToNeutral(self, task):
         """
-        Transition to the Neutral state.
-        - For the Reward state: Only transition if the wall texture is the original wall texture.
-        - For the Puff state: Transition directly without checking the wall texture.
+        Transition to the Neutral state or keep checking while Puff is active.
         """
-
-        if self.state == 'Reward':
-            # Transition to Neutral only if the wall texture matches the original wall texture
-            middle_left, middle_right = self.base.corridor.get_middle_segments(4)
-            current_texture = middle_right[2].getTexture().getFilename()
-            if current_texture == self.base.corridor.right_wall_texture:
+        try:
+            # If we just rewarded, always go neutral
+            if self.state == 'Reward':
                 self.request('Neutral')
-        elif self.state == 'Puff':
-            # Transition to Neutral directly without checking the wall texture
+                return Task.done
+
+            # If we are in Puff, check the wall texture in front
+            if self.state == 'Puff':
+                middle_left, middle_right = self.base.corridor.get_middle_segments(4)
+                # Be defensive about indexing
+                if middle_right and len(middle_right) >= 3:
+                    current_tex = str(middle_right[2].getTexture().getFilename())
+                    # If still in GO zone, keep Puff by re-scheduling the check
+                    if current_tex == self.base.corridor.go_texture:
+                        signal = int(f"1{self.puff_duration}")
+                        self.base.serial_output.send_signal(signal)
+                        print("puff!")
+                        self.base.doMethodLaterStopwatch(self.puff_to_neutral_time, self._transitionToNeutral, 'return-to-neutral')
+                        return Task.done
+
+                # Otherwise, leave Puff and go Neutral
+                self.request('Neutral')
+                print("Leaving Puff state, going to Neutral")
+                return Task.done
+
+        except Exception as e:
+            print(f"_transitionToNeutral error: {e}")
+            # On error, fall back to Neutral
             self.request('Neutral')
 
         return Task.done
@@ -1802,6 +1827,8 @@ class MousePortal(ShowBase):
         self.current_texture = self.corridor.right_segments[0].getTexture().getFilename()
         self.current_segment_flag = self.corridor.get_segment_flag(self.corridor.right_segments[0])
         self.active_stay_zone = False
+        self.active_puff_zone = False
+        self.fsm.current_state = 'Neutral'  # Start in neutral state
 
     def _signal_handler(self, signum, frame):
         """Handle system signals for graceful shutdown."""
@@ -1885,7 +1912,7 @@ class MousePortal(ShowBase):
                 self.corridor.segments_until_texture_change -= 1
                 self.corridor.update_texture_change()
 
-                if self.current_texture == self.corridor.go_texture:
+                if self.current_texture == self.corridor.go_texture and self.active_puff_zone == True:
                     self.segments_with_go_texture += 1
                     print(f"New segment with go texture counted: {self.segments_with_go_texture}")
                 elif self.current_texture == self.corridor.stop_texture and self.active_stay_zone == True:
@@ -1935,17 +1962,15 @@ class MousePortal(ShowBase):
                 print("Requesting Reward state")
                 self.fsm.request('Reward')
                 self.active_stay_zone = False  # Reset stay zone flag after requesting reward
-        elif self.current_texture == self.corridor.go_texture:
+        elif self.current_texture == self.corridor.go_texture and self.active_puff_zone == True:
             #print(self.zone_length)
             if self.segments_with_go_texture <= self.zone_length and self.fsm.state != 'Puff' and current_time >= self.enter_go_time + (self.puff_time * self.zone_length):
                 print("Requesting Puff state")
                 self.fsm.request('Puff')
+                self.active_puff_zone = False  # Reset puff zone flag after requesting puff
         else:
             self.segments_with_go_texture = 0 
             self.segments_with_stay_texture = 0
-            if self.fsm.state != 'Neutral':
-                print("Requesting Neutral state")
-                self.fsm.request('Neutral')
         
         return Task.cont
 
