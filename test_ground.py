@@ -301,6 +301,9 @@ class Corridor:
         self.texture_change_scheduled = False  # Flag to track texture change scheduling
 
         self.current_segment_flag = self.get_segment_flag(self.right_segments[0])
+        self.probe_left = None
+        self.probe_right = None
+        self.probe_segments = 0
 
     def build_initial_segments(self) -> None:
         """ 
@@ -638,12 +641,15 @@ class Corridor:
         self.trial_df['probe_time'] = probe_times
         self.trial_df.to_csv(self.trial_csv_path, index=False)
 
+        self.probe_left, self.probe_right = self.get_forward_segments_far(12)
+
         # Apply the selected texture to the walls
-        for left_node in self.left_segments:
-            self.apply_texture(left_node, selected_temporary_texture)
-        for right_node in self.right_segments:
-            self.apply_texture(right_node, selected_temporary_texture)
-        
+        self.probe_segments = min(len(self.probe_left), len(self.probe_right))
+        for i in range(self.probe_segments):
+            # Apply texture to matched pairs of segments
+            self.apply_texture(self.probe_left[i], selected_temporary_texture)
+            self.apply_texture(self.probe_right[i], selected_temporary_texture)
+
         # Schedule a task to revert the textures back after 1 second
         self.base.doMethodLaterStopwatch(self.probe_duration, self.revert_temporary_textures, "RevertWallTextures")
         
@@ -661,15 +667,15 @@ class Corridor:
             Task: Continuation signal for the task manager.
         """
         # Reapply the original textures to the walls
-        for left_node in self.left_segments:
-            self.apply_texture(left_node, self.left_wall_texture)
-        for right_node in self.right_segments:
-            self.apply_texture(right_node, self.right_wall_texture)
+        for i in range(self.probe_segments):
+            # Apply texture to matched pairs of segments
+            self.apply_texture(self.probe_left[i], self.right_wall_texture)
+            self.apply_texture(self.probe_right[i], self.right_wall_texture)
         
         # Return Task.done if task is None
         return Task.done if task is None else task.done
 
-    def revert_wall_textures(self, task: Task = None) -> Task:
+    def exit_special_zones(self, task: Task = None) -> Task:
         """
         Revert the textures of the left and right walls to their original textures.
         
@@ -740,6 +746,7 @@ class Corridor:
             if new_front_texture == self.go_texture and self.current_segment_flag == True:
                 self.base.enter_go_time = global_stopwatch.get_elapsed_time()
                 self.base.active_puff_zone = True
+                self.exit = True
                 for node in self.right_segments:
                     self.set_segment_flag(node, False)
                 print(f"enter_go_time updated to {self.base.enter_go_time:.2f} seconds")
@@ -747,11 +754,11 @@ class Corridor:
             # Schedule the next texture change
             self.schedule_texture_change()
 
-        # Check if textures need to be reverted
-        if hasattr(self, 'segments_until_revert') and self.segments_until_revert > 0:
-            self.segments_until_revert -= 1
-            if self.segments_until_revert == 0:
-                self.revert_wall_textures(None)  # Revert textures
+        # # Check if textures need to be reverted
+        # if hasattr(self, 'segments_until_revert') and self.segments_until_revert > 0:
+        #     self.segments_until_revert -= 1
+        #     if self.segments_until_revert == 0:
+        #         self.revert_wall_textures(None)  # Revert textures
 
 class FogEffect:
     """
@@ -1040,7 +1047,7 @@ class RewardOrPuff(FSM):
         # Combine 1 and puff_duration into a single integer
         signal = int(f"1{self.puff_duration}")
         self.base.serial_output.send_signal(signal)
-        print("puff!")
+        #print("puff!")
         self.base.doMethodLaterStopwatch(self.puff_to_neutral_time, self._transitionToNeutral, 'return-to-neutral')
 
     def exitPuff(self):
@@ -1103,13 +1110,13 @@ class RewardOrPuff(FSM):
                     if current_tex == self.base.corridor.go_texture:
                         signal = int(f"1{self.puff_duration}")
                         self.base.serial_output.send_signal(signal)
-                        print("puff!")
+                        #print("puff!")
                         self.base.doMethodLaterStopwatch(self.puff_to_neutral_time, self._transitionToNeutral, 'return-to-neutral')
                         return Task.done
 
                 # Otherwise, leave Puff and go Neutral
                 self.request('Neutral')
-                print("Leaving Puff state, going to Neutral")
+                #print("Leaving Puff state, going to Neutral")
                 return Task.done
 
         except Exception as e:
@@ -1829,6 +1836,7 @@ class MousePortal(ShowBase):
         self.active_stay_zone = False
         self.active_puff_zone = False
         self.fsm.current_state = 'Neutral'  # Start in neutral state
+        self.exit = True
 
     def _signal_handler(self, signum, frame):
         """Handle system signals for graceful shutdown."""
@@ -1894,14 +1902,22 @@ class MousePortal(ShowBase):
         middle_left, middle_right = self.corridor.get_middle_segments(4)
         if middle_right:  # Using right wall instead of left
             self.current_texture = middle_right[2].getTexture().getFilename()
+            self.former_texture = middle_right[1].getTexture().getFilename()
             self.current_segment_flag = self.corridor.get_segment_flag(middle_right[2])
 
             if self.current_texture == self.corridor.stop_texture and self.current_segment_flag == True:
                 self.enter_stay_time = global_stopwatch.get_elapsed_time()
                 self.active_stay_zone = True
-                print(f"Entered STAY zone at time: {self.enter_stay_time}")
+                self.exit = True
+                #print(f"Entered STAY zone at time: {self.enter_stay_time}")
                 for node in self.corridor.right_segments:
                     self.corridor.set_segment_flag(node, False)
+
+            if (self.former_texture == self.corridor.go_texture or self.former_texture == self.corridor.stop_texture) and self.current_texture == self.corridor.right_wall_texture and self.exit == True:
+                self.corridor.exit_special_zones()
+                #print("Exited a zone")
+                self.exit = False
+
             
         # Keep track of segments passed in either direction
         if move_distance > 0:
@@ -1914,10 +1930,10 @@ class MousePortal(ShowBase):
 
                 if self.current_texture == self.corridor.go_texture and self.active_puff_zone == True:
                     self.segments_with_go_texture += 1
-                    print(f"New segment with go texture counted: {self.segments_with_go_texture}")
+                    #print(f"New segment with go texture counted: {self.segments_with_go_texture}")
                 elif self.current_texture == self.corridor.stop_texture and self.active_stay_zone == True:
                     self.segments_with_stay_texture += 1
-                    print(f"STAY zone - Segments: {self.segments_with_stay_texture}")
+                    #print(f"STAY zone - Segments: {self.segments_with_stay_texture}")
 
         elif move_distance < 0:
             self.distance_since_last_segment += move_distance
@@ -1952,20 +1968,19 @@ class MousePortal(ShowBase):
             # Check if speed has been 0 for set time
             speed_zero_duration = (self.speed_zero_start_time is not None and 
                                        current_time >= self.speed_zero_start_time + self.time_spent_at_zero_speed)
-            
             # Check if enough time has been spent in the zone
             meets_time_requirement = current_time >= self.enter_stay_time + (self.reward_time * self.zone_length)
             
             if (self.segments_with_stay_texture <= self.zone_length and 
                 self.fsm.state != 'Reward' and 
                 (speed_zero_duration or meets_time_requirement)):  # Either condition can trigger reward
-                print("Requesting Reward state")
+                #print("Requesting Reward state")
                 self.fsm.request('Reward')
                 self.active_stay_zone = False  # Reset stay zone flag after requesting reward
         elif self.current_texture == self.corridor.go_texture and self.active_puff_zone == True:
             #print(self.zone_length)
             if self.segments_with_go_texture <= self.zone_length and self.fsm.state != 'Puff' and current_time >= self.enter_go_time + (self.puff_time * self.zone_length):
-                print("Requesting Puff state")
+                #print("Requesting Puff state")
                 self.fsm.request('Puff')
                 self.active_puff_zone = False  # Reset puff zone flag after requesting puff
         else:
