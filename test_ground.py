@@ -667,6 +667,8 @@ class Corridor:
             Task: Continuation signal for the task manager.
         """
         # Reapply the original textures to the walls
+        self.probe_left, self.probe_right = self.get_forward_segments_far(12)
+        self.probe_segments = min(len(self.probe_left), len(self.probe_right))
         for i in range(self.probe_segments):
             # Apply texture to matched pairs of segments
             self.apply_texture(self.probe_left[i], self.right_wall_texture)
@@ -747,6 +749,7 @@ class Corridor:
                 self.base.enter_go_time = global_stopwatch.get_elapsed_time()
                 self.base.active_puff_zone = True
                 self.exit = True
+                print(self.exit)
                 for node in self.right_segments:
                     self.set_segment_flag(node, False)
                 print(f"enter_go_time updated to {self.base.enter_go_time:.2f} seconds")
