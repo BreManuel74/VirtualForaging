@@ -748,11 +748,10 @@ class Corridor:
             if new_front_texture == self.go_texture and self.current_segment_flag == True:
                 self.base.enter_go_time = global_stopwatch.get_elapsed_time()
                 self.base.active_puff_zone = True
-                self.exit = True
-                print(self.exit)
+                self.base.exit = True
                 for node in self.right_segments:
                     self.set_segment_flag(node, False)
-                print(f"enter_go_time updated to {self.base.enter_go_time:.2f} seconds")
+                #print(f"enter_go_time updated to {self.base.enter_go_time:.2f} seconds")
 
             # Schedule the next texture change
             self.schedule_texture_change()
@@ -1119,7 +1118,7 @@ class RewardOrPuff(FSM):
 
                 # Otherwise, leave Puff and go Neutral
                 self.request('Neutral')
-                #print("Leaving Puff state, going to Neutral")
+               #print("Leaving Puff state, going to Neutral")
                 return Task.done
 
         except Exception as e:
