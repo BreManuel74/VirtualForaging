@@ -23,7 +23,7 @@ from dataclasses import dataclass
 
 from direct.showbase.ShowBase import ShowBase
 from direct.task import Task
-from panda3d.core import CardMaker, NodePath, Texture, WindowProperties, Fog
+from panda3d.core import CardMaker, NodePath, Texture, WindowProperties, Fog, ClockObject
 from direct.showbase import DirectObject
 import pandas as pd
 
@@ -1286,6 +1286,8 @@ class MousePortal(ShowBase):
         self.active_puff_zone = False
         self.fsm.current_state = 'Neutral'  # Start in neutral state
         self.exit = True
+        # Track whether we just re-entered a special zone (so exit shouldn't schedule probe again)
+        self.reentry_pending = False
 
     def _signal_handler(self, signum, frame):
         """Handle system signals for graceful shutdown."""
@@ -1316,7 +1318,7 @@ class MousePortal(ShowBase):
         Returns:
             Task: Continuation signal for the task manager.
         """
-        dt: float = globalClock.getDt()
+        dt: float = ClockObject.getGlobalClock().getDt()
         move_distance: float = 0.0
         
         self.camera_velocity = (int(self.treadmill.data.speed) / self.cfg["treadmill_speed_scaling"])
@@ -1346,11 +1348,26 @@ class MousePortal(ShowBase):
                 for node in self.corridor.right_segments:
                     self.corridor.set_segment_flag(node, False)
 
-            if (self.former_texture == self.corridor.go_texture or self.former_texture == self.corridor.stop_texture) and self.current_texture == self.corridor.right_wall_texture and self.exit == True:
-                self.corridor.texture_swapper.exit_special_zones()
-                #print("Exited a zone")
-                self.exit = False
+            # If we re-enter a special zone (GO or STOP) from neutral, allow a new exit log later
+            if (self.former_texture == self.corridor.right_wall_texture
+                and (self.current_texture == self.corridor.go_texture or self.current_texture == self.corridor.stop_texture)
+                and self.exit == False):
+                self.exit = True
+                self.reentry_pending = True
 
+            if (self.former_texture == self.corridor.go_texture or self.former_texture == self.corridor.stop_texture) and self.current_texture == self.corridor.right_wall_texture and self.exit == True:
+                if self.reentry_pending:
+                    # Log revert time locally without triggering probe again
+                    elapsed_time = global_stopwatch.get_elapsed_time()
+                    self.texture_revert_history = np.append(self.texture_revert_history, round(elapsed_time, 2))
+                    self.trial_logger.log_texture_revert_time(round(elapsed_time, 2))
+                else:
+                    # First exit for this zone: use centralized handler (may schedule probe)
+                    self.corridor.texture_swapper.exit_special_zones()
+                #print("Exited a zone")
+                self.reentry_pending = False
+                self.exit = False
+                
         # Keep track of segments passed in either direction
         if move_distance > 0:
             self.distance_since_last_segment += move_distance
