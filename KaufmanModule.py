@@ -88,9 +88,11 @@ class TrialLogging:
             'rounded_go_data': np.full(max_trials, np.nan),
             'segments_to_wait': np.full(max_trials, np.nan),
             'texture_history': np.full(max_trials, np.nan, dtype=object),
-            'texture_change_time': np.full(max_trials, np.nan),
+            'go_texture_change_time': np.full(max_trials, np.nan),
+            'stay_texture_change_time': np.full(max_trials, np.nan),
             'segments_until_revert': np.full(max_trials, np.nan),
-            'texture_revert': np.full(max_trials, np.nan),
+            'go_texture_revert_time': np.full(max_trials, np.nan),
+            'stay_texture_revert_time': np.full(max_trials, np.nan),
             'probe_texture_history': np.full(max_trials, np.nan, dtype=object),
             'probe_time': np.full(max_trials, np.nan),
             'puff_event': np.full(max_trials, np.nan, dtype=object),
@@ -121,8 +123,11 @@ class TrialLogging:
     def log_texture_history(self, texture: str) -> None:
         self._append_value('texture_history', str(texture))
 
-    def log_texture_change_time(self, t: float) -> None:
-        self._append_value('texture_change_time', float(t))
+    def log_go_texture_change_time(self, t: float) -> None:
+        self._append_value('go_texture_change_time', float(t))
+
+    def log_stay_texture_change_time(self, t: float) -> None:
+        self._append_value('stay_texture_change_time', float(t))
 
     def log_segments_until_revert(self, n: int) -> None:
         self._append_value('segments_until_revert', int(n))
@@ -136,8 +141,11 @@ class TrialLogging:
     def log_probe_time(self, t: float) -> None:
         self._append_value('probe_time', float(t))
 
-    def log_texture_revert_time(self, t: float) -> None:
-        self._append_value('texture_revert', float(t))
+    def log_go_texture_revert_time(self, t: float) -> None:
+        self._append_value('go_texture_revert_time', float(t))
+
+    def log_stay_texture_revert_time(self, t: float) -> None:
+        self._append_value('stay_texture_revert_time', float(t))
 
     def log_puff_event(self, t: float) -> None:
         self._append_value('puff_event', float(t))
@@ -205,7 +213,7 @@ class TextureSwapper:
         c.texture_history = np.append(c.texture_history, str(selected_texture))
         c.trial_logger.log_texture_history(str(selected_texture))
 
-        # Choose distribution based on selected texture
+    # Choose distribution based on selected texture
         stay_or_go_data = c.rounded_go_data if selected_texture == c.go_texture else c.rounded_stay_data
 
         # Determine length of special zone and side effects
@@ -280,7 +288,30 @@ class TextureSwapper:
         c = self.corridor
         elapsed_time = global_stopwatch.get_elapsed_time()
         c.texture_revert_history = np.append(c.texture_revert_history, round(elapsed_time, 2))
-        c.trial_logger.log_texture_revert_time(round(elapsed_time, 2))
+        # Determine last special texture type just exited by inspecting previous frame info from base
+        try:
+            last_tex = getattr(c.base, 'prev_current_texture', None)
+            if last_tex == c.go_texture:
+                c.trial_logger.log_go_texture_revert_time(round(elapsed_time, 2))
+            elif last_tex == c.stop_texture:
+                c.trial_logger.log_stay_texture_revert_time(round(elapsed_time, 2))
+            else:
+                # Fallback: if base doesn't have prev_current_texture, try current flag context
+                middle_left, middle_right = c.get_middle_segments(4)
+                if middle_right and len(middle_right) >= 3:
+                    # If we are now neutral, we assume we exited whatever was active in base flags
+                    # Use active zone flags from base
+                    if getattr(c.base, 'active_puff_zone', False):
+                        c.trial_logger.log_go_texture_revert_time(round(elapsed_time, 2))
+                    elif getattr(c.base, 'active_stay_zone', False):
+                        c.trial_logger.log_stay_texture_revert_time(round(elapsed_time, 2))
+                    else:
+                        # Unknown; default to GO to avoid missing data
+                        c.trial_logger.log_go_texture_revert_time(round(elapsed_time, 2))
+                else:
+                    c.trial_logger.log_go_texture_revert_time(round(elapsed_time, 2))
+        except Exception:
+            c.trial_logger.log_go_texture_revert_time(round(elapsed_time, 2))
 
         if c.probe and random.random() < c.probe_probability:
             c.base.doMethodLaterStopwatch(c.probe_onset, self.apply_probe_texture, "ApplyProbeTexture")
@@ -313,9 +344,9 @@ class TextureSwapper:
 
                 if new_front_texture == c.go_texture and c.current_segment_flag is True:
                     c.base.enter_go_time = global_stopwatch.get_elapsed_time()
-                    # Log time
+                    # Log GO change time
                     c.texture_time_history = np.append(c.texture_time_history, round(c.base.enter_go_time, 2))
-                    c.trial_logger.log_texture_change_time(round(c.base.enter_go_time, 2))
+                    c.trial_logger.log_go_texture_change_time(round(c.base.enter_go_time, 2))
                     c.base.active_puff_zone = True
                     c.base.exit = True
                     for node in c.right_segments:
