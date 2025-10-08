@@ -30,6 +30,78 @@ from direct.showbase import DirectObject
 from direct.fsm.FSM import FSM
 import pandas as pd
 
+class TrialLogging:
+    """
+    Centralizes logging of trial-level events into a DataFrame and CSV.
+    Provides append-style APIs for each event type.
+    """
+    def __init__(self, output_dir: str, max_trials: int = 1000) -> None:
+        ts = int(time.time())
+        self.csv_path = os.path.join(output_dir, f"{ts}trial_log.csv")
+        # Initialize dataframe with known columns
+        self.df = pd.DataFrame({
+            'rounded_base_hallway_data': np.full(max_trials, np.nan),
+            'rounded_stay_data': np.full(max_trials, np.nan),
+            'rounded_go_data': np.full(max_trials, np.nan),
+            'segments_to_wait': np.full(max_trials, np.nan),
+            'texture_history': np.full(max_trials, np.nan, dtype=object),
+            'texture_change_time': np.full(max_trials, np.nan),
+            'segments_until_revert': np.full(max_trials, np.nan),
+            'texture_revert': np.full(max_trials, np.nan),
+            'probe_texture_history': np.full(max_trials, np.nan, dtype=object),
+            'probe_time': np.full(max_trials, np.nan),
+            'puff_event': np.full(max_trials, np.nan, dtype=object),
+            'reward_event': np.full(max_trials, np.nan, dtype=object),
+        })
+        self.save()
+
+    def save(self) -> None:
+        self.df.to_csv(self.csv_path, index=False)
+
+    def _append_value(self, column: str, value: Any) -> None:
+        col = self.df[column]
+        # Find first NaN slot
+        idxs = np.where(pd.isna(col))[0]
+        if len(idxs) == 0:
+            return  # No space left; optionally could expand
+        self.df.at[int(idxs[0]), column] = value
+        self.save()
+
+    def set_initial_distributions(self, base: np.ndarray, stay: np.ndarray, go: np.ndarray) -> None:
+        # Fill from start with provided arrays
+        self.df.loc[0:len(base)-1, 'rounded_base_hallway_data'] = base
+        self.df.loc[0:len(stay)-1, 'rounded_stay_data'] = stay
+        self.df.loc[0:len(go)-1, 'rounded_go_data'] = go
+        self.save()
+
+    # Event-specific helpers
+    def log_texture_history(self, texture: str) -> None:
+        self._append_value('texture_history', str(texture))
+
+    def log_texture_change_time(self, t: float) -> None:
+        self._append_value('texture_change_time', float(t))
+
+    def log_segments_until_revert(self, n: int) -> None:
+        self._append_value('segments_until_revert', int(n))
+
+    def log_segments_to_wait(self, n: int) -> None:
+        self._append_value('segments_to_wait', int(n))
+
+    def log_probe_texture(self, texture: str) -> None:
+        self._append_value('probe_texture_history', str(texture))
+
+    def log_probe_time(self, t: float) -> None:
+        self._append_value('probe_time', float(t))
+
+    def log_texture_revert_time(self, t: float) -> None:
+        self._append_value('texture_revert', float(t))
+
+    def log_puff_event(self, t: float) -> None:
+        self._append_value('puff_event', float(t))
+
+    def log_reward_event(self, t: float) -> None:
+        self._append_value('reward_event', float(t))
+
 class Stopwatch:
     """
     A simple stopwatch class to measure elapsed time.
@@ -255,12 +327,13 @@ class Corridor:
         self.probe_texture_history = self.base.probe_texture_history
         self.probe_time_history = self.base.probe_time_history
         self.texture_revert_history = self.base.texture_revert_history
-        self.trial_df = self.base.trial_df
-        self.trial_df.to_csv = self.base.trial_df.to_csv 
-        self.trial_csv_path = self.base.trial_csv_path
+        # Trial logging references (centralized)
+        self.trial_logger = self.base.trial_logger
+        self.trial_df = self.trial_logger.df
+        self.trial_csv_path = self.trial_logger.csv_path
 
         self.zone_gap = 0  # Initialize zone_gap
-
+        
         self.segment_length: float = config["segment_length"]
         self.corridor_width: float = config["corridor_width"]
         self.wall_height: float = config["wall_height"]
@@ -538,13 +611,10 @@ class TextureSwapper:
         c = self.corridor
         # Choose stop or go based on configured probability
         selected_texture = c.stop_texture if random.random() < c.stop_texture_probability else c.go_texture
-
+        
         # Log selected texture
         c.texture_history = np.append(c.texture_history, str(selected_texture))
-        textures = np.full(len(c.trial_df), np.nan, dtype=object)
-        textures[:len(c.texture_history)] = c.texture_history
-        c.trial_df['texture_history'] = textures
-        c.trial_df.to_csv(c.trial_csv_path, index=False)
+        c.trial_logger.log_texture_history(str(selected_texture))
 
         # Choose distribution based on selected texture
         stay_or_go_data = c.rounded_go_data if selected_texture == c.go_texture else c.rounded_stay_data
@@ -553,13 +623,10 @@ class TextureSwapper:
         c.segments_until_revert = int(random.choice(stay_or_go_data))
         c.zone_gap = (12 - c.segments_until_revert) if selected_texture == c.stop_texture else 0
         c.base.zone_length = c.segments_until_revert
-
+        
         # Log length
         c.segments_until_revert_history = np.append(c.segments_until_revert_history, int(c.segments_until_revert))
-        length = np.full(len(c.trial_df), np.nan, dtype=float)
-        length[:len(c.segments_until_revert_history)] = c.segments_until_revert_history
-        c.trial_df['segments_until_revert'] = length
-        c.trial_df.to_csv(c.trial_csv_path, index=False)
+        c.trial_logger.log_segments_until_revert(int(c.segments_until_revert))
 
         # Apply textures to appropriate segments
         if selected_texture == c.stop_texture:
@@ -580,12 +647,9 @@ class TextureSwapper:
         # Log time
         elapsed_time = global_stopwatch.get_elapsed_time()
         c.texture_time_history = np.append(c.texture_time_history, round(elapsed_time, 2))
-        times = np.full(len(c.trial_df), np.nan)
-        times[:len(c.texture_time_history)] = c.texture_time_history
-        c.trial_df['texture_change_time'] = times
-        c.trial_df.to_csv(c.trial_csv_path, index=False)
+        c.trial_logger.log_texture_change_time(round(elapsed_time, 2))
 
-        return Task.done if task is None else task.done
+        return Task.done
 
     def change_wall_textures_temporarily_once(self, task: Task = None) -> Task:
         """Temporarily change both walls to a neutral/probe texture, then revert later."""
@@ -600,17 +664,11 @@ class TextureSwapper:
 
         # Log probe texture and time
         c.probe_texture_history = np.append(c.probe_texture_history, str(selected_temporary_texture))
-        probe_textures = np.full(len(c.trial_df), np.nan, dtype=object)
-        probe_textures[:len(c.probe_texture_history)] = c.probe_texture_history
-        c.trial_df['probe_texture_history'] = probe_textures
-        c.trial_df.to_csv(c.trial_csv_path, index=False)
+        c.trial_logger.log_probe_texture(str(selected_temporary_texture))
 
         elapsed_time = global_stopwatch.get_elapsed_time()
         c.probe_time_history = np.append(c.probe_time_history, round(elapsed_time, 2))
-        probe_times = np.full(len(c.trial_df), np.nan)
-        probe_times[:len(c.probe_time_history)] = c.probe_time_history
-        c.trial_df['probe_time'] = probe_times
-        c.trial_df.to_csv(c.trial_csv_path, index=False)
+        c.trial_logger.log_probe_time(round(elapsed_time, 2))
 
         # Apply temporary texture to forward segments
         probe_left, probe_right = c.get_forward_segments_far(12)
@@ -621,7 +679,7 @@ class TextureSwapper:
 
         # Schedule revert
         c.base.doMethodLaterStopwatch(c.probe_duration, self.revert_temporary_textures, "RevertWallTextures")
-        return Task.done if task is None else task.done
+        return Task.done
 
     def revert_temporary_textures(self, task: Task = None) -> Task:
         """Revert temporary probe textures back to corridor's right_wall_texture."""
@@ -631,22 +689,18 @@ class TextureSwapper:
         for i in range(probe_segments):
             c.apply_texture(probe_left[i], c.right_wall_texture)
             c.apply_texture(probe_right[i], c.right_wall_texture)
-        return Task.done if task is None else task.done
+        return Task.done
 
     def exit_special_zones(self, task: Task = None) -> Task:
         """Log zone exit and optionally schedule a probe texture swap."""
         c = self.corridor
         elapsed_time = global_stopwatch.get_elapsed_time()
         c.texture_revert_history = np.append(c.texture_revert_history, round(elapsed_time, 2))
-
-        revert_times = np.full(len(c.trial_df), np.nan)
-        revert_times[:len(c.texture_revert_history)] = c.texture_revert_history
-        c.trial_df['texture_revert'] = revert_times
-        c.trial_df.to_csv(c.trial_csv_path, index=False)
+        c.trial_logger.log_texture_revert_time(round(elapsed_time, 2))
 
         if c.probe and random.random() < c.probe_probability:
             c.base.doMethodLaterStopwatch(c.probe_onset, self.change_wall_textures_temporarily_once, "ChangeWallTexturesTemporarilyOnce")
-        return Task.done if task is None else task.done
+        return Task.done
 
     def schedule_texture_change(self) -> None:
         """Schedule the next texture change by computing segments to wait."""
@@ -656,11 +710,7 @@ class TextureSwapper:
 
         segments_to_wait = random.choice(c.rounded_base_hallway_data)
         c.segments_to_wait_history = np.append(c.segments_to_wait_history, int(segments_to_wait))
-
-        segs = np.full(len(c.trial_df), np.nan)
-        segs[:len(c.segments_to_wait_history)] = c.segments_to_wait_history
-        c.trial_df['segments_to_wait'] = segs
-        c.trial_df.to_csv(c.trial_csv_path, index=False)
+        c.trial_logger.log_segments_to_wait(int(segments_to_wait))
 
         c.segments_until_texture_change = segments_to_wait + c.segments_until_revert + c.zone_gap
 
@@ -953,9 +1003,8 @@ class RewardOrPuff(FSM):
         self.reward_duration = self.base.reward_duration
         self.puff_history = self.base.puff_history
         self.reward_history = self.base.reward_history
-        self.trial_df = self.base.trial_df
-        self.trial_df.to_csv = self.base.trial_df.to_csv 
-        self.trial_csv_path = self.base.trial_csv_path
+        # Use centralized trial logger for logging events
+        self.trial_logger = self.base.trial_logger
         self.accept('puff-event', self.request, ['Puff'])
         self.accept('reward-event', self.request, ['Reward'])
         self.accept('neutral-event', self.request, ['Neutral'])
@@ -966,10 +1015,8 @@ class RewardOrPuff(FSM):
         Enter the Puff state.
         """
         self.puff_history = np.append(self.puff_history, round(global_stopwatch.get_elapsed_time(), 2))
-        puff_times = np.full(len(self.trial_df), np.nan)
-        puff_times[:len(self.puff_history)] = self.puff_history
-        self.trial_df['puff_event'] = puff_times
-        self.trial_df.to_csv(self.trial_csv_path, index=False)
+        # Log puff event via trial logger
+        self.trial_logger.log_puff_event(round(global_stopwatch.get_elapsed_time(), 2))
 
         # Combine 1 and puff_duration into a single integer
         signal = int(f"1{self.puff_duration}")
@@ -988,10 +1035,8 @@ class RewardOrPuff(FSM):
         Enter the Reward state.
         """
         self.reward_history = np.append(self.reward_history, round(global_stopwatch.get_elapsed_time(), 2))
-        reward_times = np.full(len(self.trial_df), np.nan)
-        reward_times[:len(self.reward_history)] = self.reward_history
-        self.trial_df['reward_event'] = reward_times
-        self.trial_df.to_csv(self.trial_csv_path, index=False)
+        # Log reward event via trial logger
+        self.trial_logger.log_reward_event(round(global_stopwatch.get_elapsed_time(), 2))
 
         # Send reward message through TCP client if connected
         if hasattr(self.base, 'tcp_client') and self.base.tcp_client:
@@ -1552,9 +1597,7 @@ class MousePortal(ShowBase):
             min_value=self.cfg["go_zone_min_value"]
         )
 
-        self.trial_csv_path = os.path.join(os.environ.get("OUTPUT_DIR"), f"{int(time.time())}trial_log.csv")
-
-        max_trials = 1000
+        # Initialize histories
         self.segments_to_wait_history = np.array([], dtype=int)
         self.texture_history = np.array([], dtype=str)
         self.texture_time_history = np.array([], dtype=float)
@@ -1565,39 +1608,17 @@ class MousePortal(ShowBase):
         self.puff_history = np.array([], dtype=float)
         self.reward_history = np.array([], dtype=float)
 
-        trial_df = pd.DataFrame({
-            'rounded_base_hallway_data': np.full(max_trials, np.nan),
-            'rounded_stay_data': np.full(max_trials, np.nan),
-            'rounded_go_data': np.full(max_trials, np.nan),
-            'segments_to_wait': np.full(max_trials, np.nan),
-            'texture_history': np.full(max_trials, np.nan, dtype=object),
-            'texture_change_time': np.full(max_trials, np.nan),
-            'segments_until_revert': np.full(max_trials, np.nan),
-            'texture_revert': np.full(max_trials, np.nan),
-            'probe_texture_history': np.full(max_trials, np.nan, dtype=object),
-            'probe_time': np.full(max_trials, np.nan),
-            'puff_event': np.full(max_trials, np.nan, dtype=object),
-            'reward_event': np.full(max_trials, np.nan, dtype=object),
-        })
-        trial_df.to_csv(self.trial_csv_path, index=False)
-        self.trial_df = trial_df
-
-        # Save initial distributions to the dataframe
-        # Extend arrays to match dataframe length if needed
-        base_data = np.full(len(self.trial_df), np.nan)
-        base_data[:len(self.rounded_base_hallway_data)] = self.rounded_base_hallway_data
-        self.trial_df['rounded_base_hallway_data'] = base_data
-        
-        stay_data = np.full(len(self.trial_df), np.nan)
-        stay_data[:len(self.rounded_stay_data)] = self.rounded_stay_data
-        self.trial_df['rounded_stay_data'] = stay_data
-        
-        go_data = np.full(len(self.trial_df), np.nan)
-        go_data[:len(self.rounded_go_data)] = self.rounded_go_data
-        self.trial_df['rounded_go_data'] = go_data
-        
-        # Save the updated dataframe with initial distributions
-        self.trial_df.to_csv(self.trial_csv_path, index=False)
+        # Set up centralized TrialLogging
+        output_dir = os.environ.get("OUTPUT_DIR")
+        self.trial_logger = TrialLogging(output_dir)
+        self.trial_logger.set_initial_distributions(
+            self.rounded_base_hallway_data,
+            self.rounded_stay_data,
+            self.rounded_go_data,
+        )
+        # Back-compat attributes
+        self.trial_df = self.trial_logger.df
+        self.trial_csv_path = self.trial_logger.csv_path
 
         # Retrieve the reward_amount and batch_id from the configuration
         reward_amount = self.cfg.get("reward_amount", 0.0)
