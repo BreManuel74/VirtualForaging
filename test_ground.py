@@ -471,7 +471,7 @@ class FogEffect:
         self.fog.setExpDensity(density)
         
         # Attach the fog to the root node to affect the entire scene.
-        render.setFog(self.fog)
+        self.base.render.setFog(self.fog)
 
 class SerialInputManager(DirectObject.DirectObject):
     """
@@ -1343,7 +1343,7 @@ class MousePortal(ShowBase):
             if self.current_texture == self.corridor.stop_texture and self.current_segment_flag == True:
                 self.enter_stay_time = global_stopwatch.get_elapsed_time()
                 self.texture_time_history = np.append(self.texture_time_history, round(self.enter_stay_time, 2))
-                self.trial_logger.log_texture_change_time(round(self.enter_stay_time, 2))
+                self.trial_logger.log_stay_texture_change_time(round(self.enter_stay_time, 2))
                 self.active_stay_zone = True
                 self.exit = True
                 #print(f"Entered STAY zone at time: {self.enter_stay_time}")
@@ -1356,10 +1356,13 @@ class MousePortal(ShowBase):
                 and self.exit == False):
                 self.exit = True
                 self.reentry_pending = True
-                # Re-log this re-entry time to texture_change_time
+                # Re-log this re-entry time to GO/STAY-specific change column
                 elapsed_time = global_stopwatch.get_elapsed_time()
                 self.texture_time_history = np.append(self.texture_time_history, round(elapsed_time, 2))
-                self.trial_logger.log_texture_change_time(round(elapsed_time, 2))
+                if self.current_texture == self.corridor.go_texture:
+                    self.trial_logger.log_go_texture_change_time(round(elapsed_time, 2))
+                elif self.current_texture == self.corridor.stop_texture:
+                    self.trial_logger.log_stay_texture_change_time(round(elapsed_time, 2))
                 
 
             if ((self.prev_current_texture == self.corridor.go_texture or self.prev_current_texture == self.corridor.stop_texture)
@@ -1368,7 +1371,11 @@ class MousePortal(ShowBase):
                     # Log revert time locally without triggering probe again
                     elapsed_time = global_stopwatch.get_elapsed_time()
                     self.texture_revert_history = np.append(self.texture_revert_history, round(elapsed_time, 2))
-                    self.trial_logger.log_texture_revert_time(round(elapsed_time, 2))
+                    # Use prev_current_texture to determine which column to log
+                    if self.prev_current_texture == self.corridor.go_texture:
+                        self.trial_logger.log_go_texture_revert_time(round(elapsed_time, 2))
+                    elif self.prev_current_texture == self.corridor.stop_texture:
+                        self.trial_logger.log_stay_texture_revert_time(round(elapsed_time, 2))
                 else:
                     # First exit for this zone: use centralized handler (may schedule probe)
                     self.corridor.texture_swapper.exit_special_zones()
