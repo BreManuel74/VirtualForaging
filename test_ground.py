@@ -695,12 +695,6 @@ class Corridor:
         self.trial_df['texture_revert'] = revert_times
         self.trial_df.to_csv(self.trial_csv_path, index=False)
 
-        # # Reapply the original textures to the walls
-        # for left_node in self.left_segments:
-        #     self.apply_texture(left_node, self.left_wall_texture)
-        # for right_node in self.right_segments:
-        #     self.apply_texture(right_node, self.right_wall_texture)
-
         # Conditional to make probe optional
         if self.probe:
             # Configurable chance of calling the probe function
@@ -755,12 +749,6 @@ class Corridor:
 
             # Schedule the next texture change
             self.schedule_texture_change()
-
-        # # Check if textures need to be reverted
-        # if hasattr(self, 'segments_until_revert') and self.segments_until_revert > 0:
-        #     self.segments_until_revert -= 1
-        #     if self.segments_until_revert == 0:
-        #         self.revert_wall_textures(None)  # Revert textures
 
 class FogEffect:
     """
