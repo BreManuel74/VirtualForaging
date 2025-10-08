@@ -651,7 +651,7 @@ class TextureSwapper:
 
         return Task.done
 
-    def change_wall_textures_temporarily_once(self, task: Task = None) -> Task:
+    def apply_probe_texture(self, task: Task = None) -> Task:
         """Temporarily change both walls to a neutral/probe texture, then revert later."""
         c = self.corridor
         temporary_wall_textures = [
@@ -678,10 +678,10 @@ class TextureSwapper:
             c.apply_texture(probe_right[i], selected_temporary_texture)
 
         # Schedule revert
-        c.base.doMethodLaterStopwatch(c.probe_duration, self.revert_temporary_textures, "RevertWallTextures")
+        c.base.doMethodLaterStopwatch(c.probe_duration, self.revert_probe_texture, "RevertProbeTexture")
         return Task.done
 
-    def revert_temporary_textures(self, task: Task = None) -> Task:
+    def revert_probe_texture(self, task: Task = None) -> Task:
         """Revert temporary probe textures back to corridor's right_wall_texture."""
         c = self.corridor
         probe_left, probe_right = c.get_forward_segments_far(12)
@@ -699,7 +699,7 @@ class TextureSwapper:
         c.trial_logger.log_texture_revert_time(round(elapsed_time, 2))
 
         if c.probe and random.random() < c.probe_probability:
-            c.base.doMethodLaterStopwatch(c.probe_onset, self.change_wall_textures_temporarily_once, "ChangeWallTexturesTemporarilyOnce")
+            c.base.doMethodLaterStopwatch(c.probe_onset, self.apply_probe_texture, "ApplyProbeTexture")
         return Task.done
 
     def schedule_texture_change(self) -> None:
