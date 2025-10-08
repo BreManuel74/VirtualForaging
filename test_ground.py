@@ -1286,6 +1286,8 @@ class MousePortal(ShowBase):
         self.active_puff_zone = False
         self.fsm.current_state = 'Neutral'  # Start in neutral state
         self.exit = True
+        # Track last frame's current texture to detect re-entries reliably
+        self.prev_current_texture = self.current_texture
         # Track whether we just re-entered a special zone (so exit shouldn't schedule probe again)
         self.reentry_pending = False
 
@@ -1349,13 +1351,19 @@ class MousePortal(ShowBase):
                     self.corridor.set_segment_flag(node, False)
 
             # If we re-enter a special zone (GO or STOP) from neutral, allow a new exit log later
-            if (self.former_texture == self.corridor.right_wall_texture
+            if (self.prev_current_texture == self.corridor.right_wall_texture
                 and (self.current_texture == self.corridor.go_texture or self.current_texture == self.corridor.stop_texture)
                 and self.exit == False):
                 self.exit = True
                 self.reentry_pending = True
+                # Re-log this re-entry time to texture_change_time
+                elapsed_time = global_stopwatch.get_elapsed_time()
+                self.texture_time_history = np.append(self.texture_time_history, round(elapsed_time, 2))
+                self.trial_logger.log_texture_change_time(round(elapsed_time, 2))
+                
 
-            if (self.former_texture == self.corridor.go_texture or self.former_texture == self.corridor.stop_texture) and self.current_texture == self.corridor.right_wall_texture and self.exit == True:
+            if ((self.prev_current_texture == self.corridor.go_texture or self.prev_current_texture == self.corridor.stop_texture)
+                and self.current_texture == self.corridor.right_wall_texture and self.exit == True):
                 if self.reentry_pending:
                     # Log revert time locally without triggering probe again
                     elapsed_time = global_stopwatch.get_elapsed_time()
@@ -1367,6 +1375,9 @@ class MousePortal(ShowBase):
                 #print("Exited a zone")
                 self.reentry_pending = False
                 self.exit = False
+            
+            # Update previous texture at the end of evaluation
+            self.prev_current_texture = self.current_texture
                 
         # Keep track of segments passed in either direction
         if move_distance > 0:
