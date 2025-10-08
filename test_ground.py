@@ -293,17 +293,16 @@ class Corridor:
         
         self.build_initial_segments()
         
+        # Initialize texture swapper and schedule first texture change
+        self.texture_swapper = TextureSwapper(self)
         # Add a task to change textures at a random interval.
-        self.schedule_texture_change()
+        self.texture_swapper.schedule_texture_change()
 
         # Initialize attributes
         self.segments_until_revert = 0  # Ensure this attribute exists
         self.texture_change_scheduled = False  # Flag to track texture change scheduling
 
         self.current_segment_flag = self.get_segment_flag(self.right_segments[0])
-        self.probe_left = None
-        self.probe_right = None
-        self.probe_segments = 0
 
     def build_initial_segments(self) -> None:
         """ 
@@ -456,84 +455,6 @@ class Corridor:
         texture: Texture = self.base.loader.loadTexture(texture_path)
         node.setTexture(texture)
             
-    def change_wall_textures(self, task: Task = None) -> Task:
-        """
-        Change the textures of the left and right walls to a randomly selected texture.
-        
-        Parameters:
-            task (Task): The Panda3D task instance (optional).
-            
-        Returns:
-            Task: Continuation signal for the task manager.
-        """
-        # Define a list of possible wall textures with weighted probabilities
-        # Use configurable probability for stop_texture, remainder for go_texture
-        if random.random() < self.stop_texture_probability:
-            selected_texture = self.stop_texture
-        else:
-            selected_texture = self.go_texture
-        
-        # Append to numpy array
-        self.texture_history = np.append(self.texture_history, str(selected_texture))
-
-        textures = np.full(len(self.trial_df), np.nan, dtype=object)
-        textures[:len(self.texture_history)] = self.texture_history
-        self.trial_df['texture_history'] = textures
-        self.trial_df.to_csv(self.trial_csv_path, index=False)
-        
-        # Determine the stay_or_go_data based on the selected texture
-        if selected_texture == self.go_texture:
-            stay_or_go_data = self.rounded_go_data
-        else:
-            stay_or_go_data = self.rounded_stay_data
-        
-        # Set the counter for segments to revert textures using a random value from stay_or_go_data
-        self.segments_until_revert = int(random.choice(stay_or_go_data))
-        if selected_texture == self.stop_texture:
-            self.zone_gap = (12 - self.segments_until_revert)
-        else:
-            self.zone_gap = 0
-        self.base.zone_length = self.segments_until_revert
-        
-        # Write the segments_until_revert value to the trial_data file
-        self.segments_until_revert_history = np.append(self.segments_until_revert_history, int(self.segments_until_revert))
-        length = np.full(len(self.trial_df), np.nan, dtype=float)
-        length[:len(self.segments_until_revert_history)] = self.segments_until_revert_history
-        self.trial_df['segments_until_revert'] = length
-        self.trial_df.to_csv(self.trial_csv_path, index=False)
-
-        # Apply the selected texture to the walls
-        if selected_texture == self.stop_texture:
-            forward_left, forward_right = self.get_forward_segments_far(self.segments_until_revert)
-            # Ensure we have equal number of segments for both sides
-            num_segments = min(len(forward_left), len(forward_right))
-            for i in range(num_segments):
-                # Apply texture to matched pairs of segments
-                self.apply_texture(forward_left[i], selected_texture)
-                self.apply_texture(forward_right[i], selected_texture)
-                self.set_segment_flag(forward_right[i], True)
-        elif selected_texture == self.go_texture:
-            # Get segments using new method
-            middle_left, middle_right = self.get_forward_segments_near(self.segments_until_revert)
-            # Ensure we have equal number of segments for both sides
-            num_segments = min(len(middle_left), len(middle_right))
-            # Apply textures from back to front (no reversal needed since get_forward_segments_near already returns from back)
-            for i in range(num_segments):  # Remove the reversal
-                self.apply_texture(middle_left[i], selected_texture)
-                self.apply_texture(middle_right[i], selected_texture)
-                self.set_segment_flag(middle_right[i], True)
-
-        # Print the elapsed time since the corridor was initialized
-        elapsed_time = global_stopwatch.get_elapsed_time()
-        self.texture_time_history = np.append(self.texture_time_history, round(elapsed_time, 2))
-        times = np.full(len(self.trial_df), np.nan)
-        times[:len(self.texture_time_history)] = self.texture_time_history
-        self.trial_df['texture_change_time'] = times
-        self.trial_df.to_csv(self.trial_csv_path, index=False)
-        
-        # Return Task.done if task is None
-        return Task.done if task is None else task.done
-    
     def get_forward_segments_near(self, count: int) -> tuple[list[NodePath], list[NodePath]]:
         """
         Get segments starting from the one behind the camera and then
@@ -601,151 +522,167 @@ class Corridor:
         selected_left = sorted_left[start_left:end_left]
         selected_right = sorted_right[start_right:end_right]
 
-        return selected_left, selected_right
+        return selected_left, selected_right  
+
+class TextureSwapper:
+    """
+    Class to manage and apply textures to the walls. Operates on a Corridor instance.
+    """
+    def __init__(self, corridor: 'Corridor'):
+        self.corridor = corridor
+
+    def change_wall_textures(self, task: Task = None) -> Task:
+        """
+        Change the textures of the left and right walls to a randomly selected texture.
+        """
+        c = self.corridor
+        # Choose stop or go based on configured probability
+        selected_texture = c.stop_texture if random.random() < c.stop_texture_probability else c.go_texture
+
+        # Log selected texture
+        c.texture_history = np.append(c.texture_history, str(selected_texture))
+        textures = np.full(len(c.trial_df), np.nan, dtype=object)
+        textures[:len(c.texture_history)] = c.texture_history
+        c.trial_df['texture_history'] = textures
+        c.trial_df.to_csv(c.trial_csv_path, index=False)
+
+        # Choose distribution based on selected texture
+        stay_or_go_data = c.rounded_go_data if selected_texture == c.go_texture else c.rounded_stay_data
+
+        # Determine length of special zone and side effects
+        c.segments_until_revert = int(random.choice(stay_or_go_data))
+        c.zone_gap = (12 - c.segments_until_revert) if selected_texture == c.stop_texture else 0
+        c.base.zone_length = c.segments_until_revert
+
+        # Log length
+        c.segments_until_revert_history = np.append(c.segments_until_revert_history, int(c.segments_until_revert))
+        length = np.full(len(c.trial_df), np.nan, dtype=float)
+        length[:len(c.segments_until_revert_history)] = c.segments_until_revert_history
+        c.trial_df['segments_until_revert'] = length
+        c.trial_df.to_csv(c.trial_csv_path, index=False)
+
+        # Apply textures to appropriate segments
+        if selected_texture == c.stop_texture:
+            forward_left, forward_right = c.get_forward_segments_far(c.segments_until_revert)
+            num_segments = min(len(forward_left), len(forward_right))
+            for i in range(num_segments):
+                c.apply_texture(forward_left[i], selected_texture)
+                c.apply_texture(forward_right[i], selected_texture)
+                c.set_segment_flag(forward_right[i], True)
+        else:
+            middle_left, middle_right = c.get_forward_segments_near(c.segments_until_revert)
+            num_segments = min(len(middle_left), len(middle_right))
+            for i in range(num_segments):
+                c.apply_texture(middle_left[i], selected_texture)
+                c.apply_texture(middle_right[i], selected_texture)
+                c.set_segment_flag(middle_right[i], True)
+
+        # Log time
+        elapsed_time = global_stopwatch.get_elapsed_time()
+        c.texture_time_history = np.append(c.texture_time_history, round(elapsed_time, 2))
+        times = np.full(len(c.trial_df), np.nan)
+        times[:len(c.texture_time_history)] = c.texture_time_history
+        c.trial_df['texture_change_time'] = times
+        c.trial_df.to_csv(c.trial_csv_path, index=False)
+
+        return Task.done if task is None else task.done
 
     def change_wall_textures_temporarily_once(self, task: Task = None) -> Task:
-        """
-        Temporarily change the wall textures for 1 second and then revert them back.
-        This method ensures the temporary texture change happens only once.
-        
-        Parameters:
-            task (Task): The Panda3D task instance (optional).
-            
-        Returns:
-            Task: Continuation signal for the task manager.
-        """
-        # Define a list of possible wall textures
+        """Temporarily change both walls to a neutral/probe texture, then revert later."""
+        c = self.corridor
         temporary_wall_textures = [
-            self.neutral_stim_1,   # Texture 1
-            self.neutral_stim_2,   # Texture 2
-            self.neutral_stim_3,   # Texture 3
-            self.neutral_stim_4,   # Texture 4
+            c.neutral_stim_1,
+            c.neutral_stim_2,
+            c.neutral_stim_3,
+            c.neutral_stim_4,
         ]
-
-        # Randomly select a texture
         selected_temporary_texture = random.choice(temporary_wall_textures)
 
-        self.probe_texture_history = np.append(self.probe_texture_history, str(selected_temporary_texture))
+        # Log probe texture and time
+        c.probe_texture_history = np.append(c.probe_texture_history, str(selected_temporary_texture))
+        probe_textures = np.full(len(c.trial_df), np.nan, dtype=object)
+        probe_textures[:len(c.probe_texture_history)] = c.probe_texture_history
+        c.trial_df['probe_texture_history'] = probe_textures
+        c.trial_df.to_csv(c.trial_csv_path, index=False)
 
-        probe_textures = np.full(len(self.trial_df), np.nan, dtype=object)
-        probe_textures[:len(self.probe_texture_history)] = self.probe_texture_history
-        self.trial_df['probe_texture_history'] = probe_textures
-        self.trial_df.to_csv(self.trial_csv_path, index=False)
+        elapsed_time = global_stopwatch.get_elapsed_time()
+        c.probe_time_history = np.append(c.probe_time_history, round(elapsed_time, 2))
+        probe_times = np.full(len(c.trial_df), np.nan)
+        probe_times[:len(c.probe_time_history)] = c.probe_time_history
+        c.trial_df['probe_time'] = probe_times
+        c.trial_df.to_csv(c.trial_csv_path, index=False)
 
-        ## Print the elapsed time since the corridor was initialized
-        elapsed_time = global_stopwatch.get_elapsed_time() 
-        self.probe_time_history = np.append(self.probe_time_history, round(elapsed_time, 2))
-        
-        probe_times = np.full(len(self.trial_df), np.nan)
-        probe_times[:len(self.probe_time_history)] = self.probe_time_history
-        self.trial_df['probe_time'] = probe_times
-        self.trial_df.to_csv(self.trial_csv_path, index=False)
+        # Apply temporary texture to forward segments
+        probe_left, probe_right = c.get_forward_segments_far(12)
+        probe_segments = min(len(probe_left), len(probe_right))
+        for i in range(probe_segments):
+            c.apply_texture(probe_left[i], selected_temporary_texture)
+            c.apply_texture(probe_right[i], selected_temporary_texture)
 
-        self.probe_left, self.probe_right = self.get_forward_segments_far(12)
-
-        # Apply the selected texture to the walls
-        self.probe_segments = min(len(self.probe_left), len(self.probe_right))
-        for i in range(self.probe_segments):
-            # Apply texture to matched pairs of segments
-            self.apply_texture(self.probe_left[i], selected_temporary_texture)
-            self.apply_texture(self.probe_right[i], selected_temporary_texture)
-
-        # Schedule a task to revert the textures back after 1 second
-        self.base.doMethodLaterStopwatch(self.probe_duration, self.revert_temporary_textures, "RevertWallTextures")
-        
-        # Do not reset the texture_change_scheduled flag here to prevent repeated scheduling
+        # Schedule revert
+        c.base.doMethodLaterStopwatch(c.probe_duration, self.revert_temporary_textures, "RevertWallTextures")
         return Task.done if task is None else task.done
-    
+
     def revert_temporary_textures(self, task: Task = None) -> Task:
-        """
-        Revert the temporary textures of the left and right walls back to their original textures.
-        
-        Parameters:
-            task (Task): The Panda3D task instance (optional).
-            
-        Returns:
-            Task: Continuation signal for the task manager.
-        """
-        # Reapply the original textures to the walls
-        self.probe_left, self.probe_right = self.get_forward_segments_far(12)
-        self.probe_segments = min(len(self.probe_left), len(self.probe_right))
-        for i in range(self.probe_segments):
-            # Apply texture to matched pairs of segments
-            self.apply_texture(self.probe_left[i], self.right_wall_texture)
-            self.apply_texture(self.probe_right[i], self.right_wall_texture)
-        
-        # Return Task.done if task is None
+        """Revert temporary probe textures back to corridor's right_wall_texture."""
+        c = self.corridor
+        probe_left, probe_right = c.get_forward_segments_far(12)
+        probe_segments = min(len(probe_left), len(probe_right))
+        for i in range(probe_segments):
+            c.apply_texture(probe_left[i], c.right_wall_texture)
+            c.apply_texture(probe_right[i], c.right_wall_texture)
         return Task.done if task is None else task.done
 
     def exit_special_zones(self, task: Task = None) -> Task:
-        """
-        Revert the textures of the left and right walls to their original textures.
-        
-        Parameters:
-            task (Task): The Panda3D task instance (optional).
-            
-        Returns:
-            Task: Continuation signal for the task manager.
-        """
+        """Log zone exit and optionally schedule a probe texture swap."""
+        c = self.corridor
         elapsed_time = global_stopwatch.get_elapsed_time()
-        self.texture_revert_history = np.append(self.texture_revert_history, round(elapsed_time, 2))
+        c.texture_revert_history = np.append(c.texture_revert_history, round(elapsed_time, 2))
 
-        revert_times = np.full(len(self.trial_df), np.nan)
-        revert_times[:len(self.texture_revert_history)] = self.texture_revert_history
-        self.trial_df['texture_revert'] = revert_times
-        self.trial_df.to_csv(self.trial_csv_path, index=False)
+        revert_times = np.full(len(c.trial_df), np.nan)
+        revert_times[:len(c.texture_revert_history)] = c.texture_revert_history
+        c.trial_df['texture_revert'] = revert_times
+        c.trial_df.to_csv(c.trial_csv_path, index=False)
 
-        # Conditional to make probe optional
-        if self.probe:
-            # Configurable chance of calling the probe function
-            if random.random() < self.probe_probability:
-                # Schedule a task to change the wall textures temporarily after reverting
-                self.base.doMethodLaterStopwatch(self.probe_onset, self.change_wall_textures_temporarily_once, "ChangeWallTexturesTemporarilyOnce")
-        
-        # Return Task.done if task is None
+        if c.probe and random.random() < c.probe_probability:
+            c.base.doMethodLaterStopwatch(c.probe_onset, self.change_wall_textures_temporarily_once, "ChangeWallTexturesTemporarilyOnce")
         return Task.done if task is None else task.done
 
     def schedule_texture_change(self) -> None:
-        """
-        Schedule the next texture change.
-        """
-        # Ensure segments_until_revert is initialized
-        if not hasattr(self, 'segments_until_revert'):
-            self.segments_until_revert = 0
+        """Schedule the next texture change by computing segments to wait."""
+        c = self.corridor
+        if not hasattr(c, 'segments_until_revert'):
+            c.segments_until_revert = 0
 
-        # Randomly determine the number of segments after which to change the texture
-        segments_to_wait = random.choice(self.rounded_base_hallway_data)
+        segments_to_wait = random.choice(c.rounded_base_hallway_data)
+        c.segments_to_wait_history = np.append(c.segments_to_wait_history, int(segments_to_wait))
 
-        # Append to numpy array
-        self.segments_to_wait_history = np.append(self.segments_to_wait_history, int(segments_to_wait))
+        segs = np.full(len(c.trial_df), np.nan)
+        segs[:len(c.segments_to_wait_history)] = c.segments_to_wait_history
+        c.trial_df['segments_to_wait'] = segs
+        c.trial_df.to_csv(c.trial_csv_path, index=False)
 
-        segs = np.full(len(self.trial_df), np.nan)
-        segs[:len(self.segments_to_wait_history)] = self.segments_to_wait_history
-        self.trial_df['segments_to_wait'] = segs
-        self.trial_df.to_csv(self.trial_csv_path, index=False)
-        
-        self.segments_until_texture_change = segments_to_wait + self.segments_until_revert + self.zone_gap
+        c.segments_until_texture_change = segments_to_wait + c.segments_until_revert + c.zone_gap
 
     def update_texture_change(self) -> None:
-        """Check if a texture change is needed and monitor texture directly in front of player."""
-        
-        if self.segments_until_texture_change <= 0:
+        """Check if a texture change is needed and update state accordingly."""
+        c = self.corridor
+        if getattr(c, 'segments_until_texture_change', 0) <= 0:
             # Trigger the texture change
             self.change_wall_textures(None)
-            
-            # Get new front segments after texture change
-            middle_left, middle_right = self.get_middle_segments(4)
-            new_front_texture = middle_right[2].getTexture().getFilename()
-            self.current_segment_flag = self.get_segment_flag(middle_right[2])
 
-            # Update enter times if the texture directly in front changed
-            if new_front_texture == self.go_texture and self.current_segment_flag == True:
-                self.base.enter_go_time = global_stopwatch.get_elapsed_time()
-                self.base.active_puff_zone = True
-                self.base.exit = True
-                for node in self.right_segments:
-                    self.set_segment_flag(node, False)
-                #print(f"enter_go_time updated to {self.base.enter_go_time:.2f} seconds")
+            # Inspect new front segments
+            middle_left, middle_right = c.get_middle_segments(4)
+            if middle_right and len(middle_right) >= 3:
+                new_front_texture = middle_right[2].getTexture().getFilename()
+                c.current_segment_flag = c.get_segment_flag(middle_right[2])
+
+                if new_front_texture == c.go_texture and c.current_segment_flag is True:
+                    c.base.enter_go_time = global_stopwatch.get_elapsed_time()
+                    c.base.active_puff_zone = True
+                    c.base.exit = True
+                    for node in c.right_segments:
+                        c.set_segment_flag(node, False)
 
             # Schedule the next texture change
             self.schedule_texture_change()
@@ -1880,7 +1817,7 @@ class MousePortal(ShowBase):
                     self.corridor.set_segment_flag(node, False)
 
             if (self.former_texture == self.corridor.go_texture or self.former_texture == self.corridor.stop_texture) and self.current_texture == self.corridor.right_wall_texture and self.exit == True:
-                self.corridor.exit_special_zones()
+                self.corridor.texture_swapper.exit_special_zones()
                 #print("Exited a zone")
                 self.exit = False
 
@@ -1892,7 +1829,7 @@ class MousePortal(ShowBase):
                 # Count a segment passed in forward direction
                 self.distance_since_last_segment -= self.segment_length
                 self.corridor.segments_until_texture_change -= 1
-                self.corridor.update_texture_change()
+                self.corridor.texture_swapper.update_texture_change()
 
                 if self.current_texture == self.corridor.go_texture and self.active_puff_zone == True:
                     self.segments_with_go_texture += 1
@@ -1907,7 +1844,7 @@ class MousePortal(ShowBase):
                 # Count a segment passed in backward direction
                 self.distance_since_last_segment += self.segment_length
                 self.corridor.segments_until_texture_change += 1
-                self.corridor.update_texture_change()
+                self.corridor.texture_swapper.update_texture_change()
 
         # Log movement data (timestamp, distance, speed)
         self.treadmill_logger.log(self.treadmill.data)
