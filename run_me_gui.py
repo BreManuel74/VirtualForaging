@@ -392,10 +392,10 @@ class TCPDataServer:
             return True
         return False
 
-class MousePortalGUI:
+class KaufmanGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Game Control")
+        self.root.title("Kaufman Game Control")
         self.root.geometry("800x600")
         
         # For reward tracking
@@ -899,7 +899,7 @@ class MousePortalGUI:
         
         # Get file paths
         level_file = os.path.join(os.getcwd(), 'Levels', self.level_combobox.get())
-        phase_file = os.path.join(os.getcwd(), 'Phases', 'final.py')
+        phase_file = os.path.join(os.getcwd(), 'test_ground.py')
         
         # Log the run
         self.log_run(self.animal_name.get(), level_file, self.batch_id.get())
@@ -962,7 +962,7 @@ class MousePortalGUI:
 
 def main():
     root = tk.Tk()
-    app = MousePortalGUI(root)
+    app = KaufmanGUI(root)
     
     def on_closing():
         if app.process or app.tcp_server:
