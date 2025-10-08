@@ -644,11 +644,6 @@ class TextureSwapper:
                 c.apply_texture(middle_right[i], selected_texture)
                 c.set_segment_flag(middle_right[i], True)
 
-        # Log time
-        elapsed_time = global_stopwatch.get_elapsed_time()
-        c.texture_time_history = np.append(c.texture_time_history, round(elapsed_time, 2))
-        c.trial_logger.log_texture_change_time(round(elapsed_time, 2))
-
         return Task.done
 
     def apply_probe_texture(self, task: Task = None) -> Task:
@@ -729,6 +724,9 @@ class TextureSwapper:
 
                 if new_front_texture == c.go_texture and c.current_segment_flag is True:
                     c.base.enter_go_time = global_stopwatch.get_elapsed_time()
+                    # Log time
+                    c.texture_time_history = np.append(c.texture_time_history, round(c.base.enter_go_time, 2))
+                    c.trial_logger.log_texture_change_time(round(c.base.enter_go_time, 2))
                     c.base.active_puff_zone = True
                     c.base.exit = True
                     for node in c.right_segments:
@@ -1831,6 +1829,8 @@ class MousePortal(ShowBase):
 
             if self.current_texture == self.corridor.stop_texture and self.current_segment_flag == True:
                 self.enter_stay_time = global_stopwatch.get_elapsed_time()
+                self.texture_time_history = np.append(self.texture_time_history, round(self.enter_stay_time, 2))
+                self.trial_logger.log_texture_change_time(round(self.enter_stay_time, 2))
                 self.active_stay_zone = True
                 self.exit = True
                 #print(f"Entered STAY zone at time: {self.enter_stay_time}")
