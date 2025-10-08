@@ -1728,12 +1728,6 @@ class MousePortal(ShowBase):
         self.camera.setPos(0, self.camera_position, self.camera_height)
         self.camera.setHpr(0, 0, 0)
         
-        # Set up key mapping for keyboard input
-        self.key_map: Dict[str, bool] = {"forward": False, "backward": False}
-        self.accept("arrow_up", self.set_key, ["forward", True])
-        self.accept("arrow_up-up", self.set_key, ["forward", False])
-        self.accept("arrow_down", self.set_key, ["backward", True])
-        self.accept("arrow_down-up", self.set_key, ["backward", False])
         self.accept('escape', self.userExit)
 
         # Set up shared Arduino serial connection
@@ -1858,16 +1852,6 @@ class MousePortal(ShowBase):
             return Task.cont
         base.taskMgr.add(wrapper, name)
 
-    def set_key(self, key: str, value: bool) -> None:
-        """
-        Update the key state for the given key.
-        
-        Parameters:
-            key (str): The key identifier.
-            value (bool): True if pressed, False if released.
-        """
-        self.key_map[key] = value
-        
     def update(self, task: Task) -> Task:
         """
         Update the camera's position based on user input and recycle corridor segments
@@ -1881,14 +1865,6 @@ class MousePortal(ShowBase):
         """
         dt: float = globalClock.getDt()
         move_distance: float = 0.0
-        
-        # Update camera velocity based on key input
-        if self.key_map["forward"]:
-            self.camera_velocity = self.speed_scaling
-        elif self.key_map["backward"]:
-            self.camera_velocity = -self.speed_scaling
-        else:
-            self.camera_velocity = 0.0
         
         self.camera_velocity = (int(self.treadmill.data.speed) / self.cfg["treadmill_speed_scaling"])
 
