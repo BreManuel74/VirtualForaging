@@ -37,9 +37,15 @@ class TCPDataServer:
         self._reward_lock = threading.Lock()
         # Add socket timeout
         self._socket_timeout = 1.0
+        # Cache for reward thresholds to avoid repeated file I/O
+        self._threshold_cache = {}
 
     def _get_level_reward_threshold(self, level_file):
-        """Read the reward threshold from a level file."""
+        """Read the reward threshold from a level file (cached for performance)."""
+        # Check cache first to avoid repeated file I/O
+        if level_file in self._threshold_cache:
+            return self._threshold_cache[level_file]
+        
         try:
             import json
             level_path = os.path.join(os.getcwd(), 'Levels', level_file)
@@ -49,11 +55,16 @@ class TCPDataServer:
                 #print(f"Read reward threshold {threshold} from {level_file}")
                 if not isinstance(threshold, (int, float)) or threshold <= 0:
                     print(f"Invalid threshold value {threshold}, using infinity")
-                    return float('inf')
+                    threshold = float('inf')
+                
+                # Cache the result for future use
+                self._threshold_cache[level_file] = threshold
                 return threshold
         except Exception as e:
             print(f"Error reading reward threshold from {level_file}: {e}")
-            return float('inf')
+            threshold = float('inf')
+            self._threshold_cache[level_file] = threshold
+            return threshold
         
     def _get_available_levels(self):
         """Get list of available level files sorted by their numeric order."""
@@ -211,23 +222,20 @@ class TCPDataServer:
             if not self.running:
                 return False
 
-        # Then handle client socket access
+        # Then handle client socket access - avoid nested locks!
         with self._client_lock:
-            if self.client_socket:
-                try:
-                    message = f"{data}\n"
-                    with self._shutdown_lock:  # Prevent socket closure during send
-                        if not self.client_socket:  # Double-check after acquiring lock
-                            return False
-                        self.client_socket.settimeout(self._socket_timeout)
-                        self.client_socket.send(message.encode('utf-8'))
-                        return True
-                except Exception as e:
-                    print(f"Error sending data: {e}")
-                    self._close_client_socket()
-                    return False
-            else:
-                print("No client connected")
+            if not self.client_socket:
+                return False
+                
+            try:
+                message = f"{data}\n"
+                # Don't nest shutdown_lock inside client_lock - reduces contention
+                self.client_socket.settimeout(self._socket_timeout)
+                self.client_socket.send(message.encode('utf-8'))
+                return True
+            except Exception as e:
+                print(f"Error sending data: {e}")
+                # Don't close socket here - let the main loop handle it
                 return False
                 
     def _close_client_socket(self):
@@ -251,17 +259,27 @@ class TCPDataServer:
             if data.startswith("REWARD:"):
                 with self._reward_lock:
                     self.reward_count += 1
-                    if self.reward_callback:
-                        # Check if threshold is reached
-                        threshold_reached = False
-                        if hasattr(self, 'current_reward_threshold'):
-                            threshold_reached = self.reward_count >= self.current_reward_threshold
+                    count = self.reward_count  # Capture current count
+                    threshold_reached = False
+                    
+                    if hasattr(self, 'current_reward_threshold'):
+                        threshold_reached = self.reward_count >= self.current_reward_threshold
+                        # Only print debug info when threshold is reached or every 10 rewards
+                        if threshold_reached or self.reward_count % 10 == 0:
                             print(f"Reward check: count={self.reward_count}, threshold={self.current_reward_threshold}, reached={threshold_reached}")
-                        else:
-                            print("No reward threshold set!")
-                        self.reward_callback(self.reward_count, threshold_reached)
+                    
+                    # Schedule callback on main thread - don't block the TCP thread!
+                    if self.reward_callback:
+                        # Use a copy of the values to avoid race conditions
+                        self._schedule_callback(count, threshold_reached)
         except Exception as e:
             print(f"Error handling received data: {e}")
+    
+    def _schedule_callback(self, count, threshold_reached):
+        """Schedule the reward callback to run on the main thread (non-blocking)."""
+        # This method can be overridden by the GUI to use proper thread scheduling
+        if self.reward_callback:
+            self.reward_callback(count, threshold_reached)
             
     def set_reward_callback(self, callback):
         """Set a callback function to be called when a reward is received."""
@@ -271,8 +289,8 @@ class TCPDataServer:
         """Reset the reward counter to zero."""
         with self._reward_lock:
             self.reward_count = 0
-            if self.reward_callback:
-                self.reward_callback(self.reward_count)
+            # Don't call callback here - let the GUI update happen naturally
+            # The callback will be triggered by the next reward event
     
     def send_level_change(self, level_file):
         """Send level change command to the game."""
@@ -622,8 +640,11 @@ class KaufmanGUI:
             self.output_dir.set(dir_path)
     
     def log_to_console(self, message):
+        """Log a message to the console with optimal performance."""
         self.console.insert(tk.END, f"{message}\n")
         self.console.see(tk.END)
+        # Don't force updates - let Tkinter handle it naturally during idle time
+        # This prevents blocking the UI thread
     
     def send_command(self):
         command = self.cmd_entry.get().strip()
@@ -636,26 +657,36 @@ class KaufmanGUI:
         self.cmd_entry.delete(0, tk.END)
     
     def log_level_change(self, level_file):
-        """Log a level change to the progress report CSV."""
-        try:
-            now = datetime.now()
-            date_str = now.strftime("%Y-%m-%d")
-            time_str = now.strftime("%H:%M:%S")
-            
-            if hasattr(self, 'log_file'):
-                with open(self.log_file, mode="a", newline="") as f:
-                    writer = csv.writer(f)
-                    writer.writerow([date_str, time_str, level_file, self.batch_id.get()])
-        except Exception as e:
-            self.log_to_console(f"Error logging level change: {str(e)}")
+        """Log a level change to the progress report CSV asynchronously."""
+        # Schedule file I/O on a background thread to avoid blocking GUI
+        def _write_log():
+            try:
+                now = datetime.now()
+                date_str = now.strftime("%Y-%m-%d")
+                time_str = now.strftime("%H:%M:%S")
+                
+                if hasattr(self, 'log_file'):
+                    with open(self.log_file, mode="a", newline="") as f:
+                        writer = csv.writer(f)
+                        writer.writerow([date_str, time_str, level_file, self.batch_id.get()])
+            except Exception as e:
+                # Schedule error logging back on main thread
+                self.root.after(0, lambda: self.log_to_console(f"Error logging level change: {str(e)}"))
+        
+        # Execute file I/O on background thread
+        threading.Thread(target=_write_log, daemon=True, name="LogWriter").start()
 
     def change_to_next_level(self):
         if self.tcp_server:
             next_level = self.tcp_server.get_next_level()
             if next_level:
+                # Update UI first for instant feedback
+                self.current_level.set(next_level)
+                self.reward_count.set("0")
+                
+                # Then do the network/file operations
                 success = self.tcp_server.send_level_change(next_level)
                 if success:
-                    self.current_level.set(next_level)
                     current_idx = self.tcp_server.current_level_index + 1
                     total_levels = len(self.tcp_server.ordered_levels)
                     self.log_to_console(f"Advanced to: {next_level} (Level {current_idx} of {total_levels})")
@@ -670,9 +701,13 @@ class KaufmanGUI:
         if self.tcp_server:
             prev_level = self.tcp_server.get_previous_level()
             if prev_level:
+                # Update UI first for instant feedback
+                self.current_level.set(prev_level)
+                self.reward_count.set("0")
+                
+                # Then do the network/file operations
                 success = self.tcp_server.send_level_change(prev_level)
                 if success:
-                    self.current_level.set(prev_level)
                     current_idx = self.tcp_server.current_level_index + 1
                     total_levels = len(self.tcp_server.ordered_levels)
                     self.log_to_console(f"Changed to previous level: {prev_level} (Level {current_idx} of {total_levels})")
@@ -875,16 +910,19 @@ class KaufmanGUI:
     
     def _update_reward_display(self, count, threshold_reached=False):
         """Callback function to update the reward display when new rewards are received."""
+        # Update the counter display (convert to string once)
         self.reward_count.set(str(count))
         
-        # Print debug info
-        self.log_to_console(f"Reward update: count={count}, threshold_reached={threshold_reached}")
-        
-        # If threshold reached, automatically advance to next level
+        # Only log significant events, not every reward
+        # This prevents console spam and improves GUI responsiveness
         if threshold_reached:
-            self.log_to_console("Reward threshold reached - advancing to next level")
-            # Schedule the level change on the main thread
-            self.root.after_idle(lambda: self.change_to_next_level())
+            self.log_to_console(f"Reward threshold reached! Total rewards: {count}")
+            self.log_to_console("Advancing to next level...")
+            # Schedule the level change on the main thread with after() instead of after_idle()
+            # after(1) is faster than after_idle() because it doesn't wait for idle state
+            self.root.after(1, self.change_to_next_level)
+        elif count % 10 == 0:  # Only log every 10th reward to reduce console spam
+            self.log_to_console(f"Rewards: {count}")
     
     def start_session(self):
         # Prevent starting multiple sessions
@@ -899,7 +937,7 @@ class KaufmanGUI:
         
         # Get file paths
         level_file = os.path.join(os.getcwd(), 'Levels', self.level_combobox.get())
-        phase_file = os.path.join(os.getcwd(), 'test_ground.py')
+        phase_file = os.path.join(os.getcwd(), 'final.py')
         
         # Log the run
         self.log_run(self.animal_name.get(), level_file, self.batch_id.get())
@@ -911,6 +949,13 @@ class KaufmanGUI:
             # Start TCP server
             self.tcp_server = TCPDataServer()
             server_port = self.tcp_server.start_server()
+            
+            # Override the callback scheduler to use Tkinter's thread-safe after() method
+            def thread_safe_schedule(count, threshold_reached):
+                # This runs in the TCP thread, schedule the actual callback on the main thread
+                self.root.after(0, lambda: self._update_reward_display(count, threshold_reached))
+            
+            self.tcp_server._schedule_callback = thread_safe_schedule
             
             # Set up reward counting callback
             self.tcp_server.set_reward_callback(self._update_reward_display)
