@@ -12,6 +12,14 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from tkinter.scrolledtext import ScrolledText
 
+# Import psutil at module level to avoid import overhead later
+try:
+    import psutil
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
+    print("Warning: psutil not available, process tree killing will be limited")
+
 class TCPDataServer:
     """
     TCP server to send data to the Panda3D game application.
@@ -216,27 +224,42 @@ class TCPDataServer:
             self._close_client_socket()
     
     def send_data(self, data):
-        """Send data to the connected game client with thread safety."""
+        """Send data to the connected game client with thread safety (non-blocking)."""
         # First check running state
         with self._running_lock:
             if not self.running:
                 return False
 
-        # Then handle client socket access - avoid nested locks!
-        with self._client_lock:
-            if not self.client_socket:
-                return False
-                
-            try:
-                message = f"{data}\n"
-                # Don't nest shutdown_lock inside client_lock - reduces contention
-                self.client_socket.settimeout(self._socket_timeout)
-                self.client_socket.send(message.encode('utf-8'))
-                return True
-            except Exception as e:
-                print(f"Error sending data: {e}")
-                # Don't close socket here - let the main loop handle it
-                return False
+        # Schedule send on background thread to never block GUI
+        def _async_send():
+            with self._client_lock:
+                if not self.client_socket:
+                    print("No client socket available for send")
+                    return False
+                    
+                try:
+                    message = f"{data}\n"
+                    # Set a very short timeout - if client can't receive, fail fast
+                    self.client_socket.settimeout(0.1)  # 100ms max wait
+                    
+                    send_start = time.time()
+                    self.client_socket.sendall(message.encode('utf-8'))
+                    send_time = time.time() - send_start
+                    
+                    if send_time > 0.05:  # Warn if send takes >50ms
+                        print(f"WARNING: Socket send took {send_time*1000:.1f}ms - client may be slow")
+                    
+                    return True
+                except socket.timeout:
+                    print(f"ERROR: Socket send timeout after 100ms - client buffer full or not reading")
+                    return False
+                except Exception as e:
+                    print(f"Error sending data: {e}")
+                    return False
+        
+        # For non-blocking operation, send on background thread
+        threading.Thread(target=_async_send, daemon=True, name="SocketSender").start()
+        return True  # Return immediately, actual send happens in background
                 
     def _close_client_socket(self):
         """Helper method to safely close client socket with proper locking."""
@@ -681,18 +704,32 @@ class KaufmanGUI:
             next_level = self.tcp_server.get_next_level()
             if next_level:
                 # Update UI first for instant feedback
+                start_time = time.time()
                 self.current_level.set(next_level)
                 self.reward_count.set("0")
+                ui_time = time.time() - start_time
                 
-                # Then do the network/file operations
-                success = self.tcp_server.send_level_change(next_level)
-                if success:
-                    current_idx = self.tcp_server.current_level_index + 1
-                    total_levels = len(self.tcp_server.ordered_levels)
-                    self.log_to_console(f"Advanced to: {next_level} (Level {current_idx} of {total_levels})")
-                    self.log_level_change(next_level)
-                else:
-                    self.log_to_console("Failed to change level")
+                print(f"Level change timing: UI={ui_time*1000:.1f}ms")
+                
+                # Do the network/file operations asynchronously to avoid blocking GUI
+                def _async_level_change():
+                    net_start = time.time()
+                    success = self.tcp_server.send_level_change(next_level)
+                    net_time = time.time() - net_start
+                    
+                    print(f"Network operation completed: {net_time*1000:.1f}ms")
+                    
+                    # Schedule UI updates back on main thread
+                    if success:
+                        current_idx = self.tcp_server.current_level_index + 1
+                        total_levels = len(self.tcp_server.ordered_levels)
+                        self.root.after(0, lambda: self.log_to_console(f"Advanced to: {next_level} (Level {current_idx} of {total_levels})"))
+                        self.log_level_change(next_level)
+                    else:
+                        self.root.after(0, lambda: self.log_to_console("Failed to change level"))
+                
+                # Execute network operation on background thread - don't block GUI!
+                threading.Thread(target=_async_level_change, daemon=True, name="LevelChanger").start()
             else:
                 self.log_to_console("No more levels available")
     
@@ -705,15 +742,21 @@ class KaufmanGUI:
                 self.current_level.set(prev_level)
                 self.reward_count.set("0")
                 
-                # Then do the network/file operations
-                success = self.tcp_server.send_level_change(prev_level)
-                if success:
-                    current_idx = self.tcp_server.current_level_index + 1
-                    total_levels = len(self.tcp_server.ordered_levels)
-                    self.log_to_console(f"Changed to previous level: {prev_level} (Level {current_idx} of {total_levels})")
-                    self.log_level_change(prev_level)
-                else:
-                    self.log_to_console("Failed to change level")
+                # Do the network/file operations asynchronously to avoid blocking GUI
+                def _async_level_change():
+                    success = self.tcp_server.send_level_change(prev_level)
+                    
+                    # Schedule UI updates back on main thread
+                    if success:
+                        current_idx = self.tcp_server.current_level_index + 1
+                        total_levels = len(self.tcp_server.ordered_levels)
+                        self.root.after(0, lambda: self.log_to_console(f"Changed to previous level: {prev_level} (Level {current_idx} of {total_levels})"))
+                        self.log_level_change(prev_level)
+                    else:
+                        self.root.after(0, lambda: self.log_to_console("Failed to change level"))
+                
+                # Execute network operation on background thread - don't block GUI!
+                threading.Thread(target=_async_level_change, daemon=True, name="LevelChanger").start()
             else:
                 self.log_to_console("Already at first level")
 
@@ -783,8 +826,11 @@ class KaufmanGUI:
     
     def kill_process_tree(self, pid):
         """Kill a process and all its children."""
+        if not PSUTIL_AVAILABLE:
+            self.log_to_console("psutil not available - using basic termination")
+            return
+            
         try:
-            import psutil
             parent = psutil.Process(pid)
             children = parent.children(recursive=True)
             
@@ -911,7 +957,12 @@ class KaufmanGUI:
     def _update_reward_display(self, count, threshold_reached=False):
         """Callback function to update the reward display when new rewards are received."""
         # Update the counter display (convert to string once)
+        start_time = time.time()
         self.reward_count.set(str(count))
+        update_time = time.time() - start_time
+        
+        if update_time > 0.01:  # If update takes more than 10ms, log it
+            print(f"WARNING: Reward display update took {update_time*1000:.1f}ms")
         
         # Only log significant events, not every reward
         # This prevents console spam and improves GUI responsiveness
