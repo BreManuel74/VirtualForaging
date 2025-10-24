@@ -861,6 +861,23 @@ class KaufmanGUI:
         if messagebox.askyesno("Confirm Stop", "Are you sure you want to stop the current session?"):
             self.log_to_console("\nShutting down...")
             
+            # Log final session state before shutdown
+            try:
+                if hasattr(self, 'log_file'):
+                    now = datetime.now()
+                    date_str = now.strftime("%Y-%m-%d")
+                    time_str = now.strftime("%H:%M:%S")
+                    current_level = self.current_level.get()
+                    batch_id = self.batch_id.get()
+                    reward_count = self.reward_count.get()
+                    
+                    with open(self.log_file, mode="a", newline="") as f:
+                        writer = csv.writer(f)
+                        writer.writerow([date_str, time_str, f"{current_level} (Session End - {reward_count} rewards)", batch_id])
+                    self.log_to_console(f"Final session state logged: Level={current_level}, Rewards={reward_count}")
+            except Exception as e:
+                self.log_to_console(f"Error logging final session state: {str(e)}")
+            
             try:
                 # Signal thorcam to stop - create flag in the same directory as run_me.py
                 stop_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stop_recording.flag")
