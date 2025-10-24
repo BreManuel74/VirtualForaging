@@ -509,6 +509,7 @@ class KaufmanGUI:
         self.output_dir = tk.StringVar(value=os.getcwd())
         self.reward_count = tk.StringVar(value="0")
         self.session_active = False  # Track if a session is active
+        self.selected_progress_report = tk.StringVar()  # Track selected progress report
         
         # Initialize list for session-sensitive widgets before creating frames
         self.session_sensitive_widgets = []
@@ -562,12 +563,12 @@ class KaufmanGUI:
         browse_btn.pack(side=tk.RIGHT)
         self.session_sensitive_widgets.extend([output_entry, browse_btn])
         
-        # Level Selection
-        ttk.Label(setup_frame, text="Starting Level:", style="Custom.TLabel").grid(row=4, column=0, sticky=tk.W)
-        self.level_combobox = ttk.Combobox(setup_frame, state="readonly")
-        self.level_combobox.grid(row=4, column=1, sticky=(tk.W, tk.E))
-        self.update_level_list()
-        self.session_sensitive_widgets.append(self.level_combobox)
+        # Progress Report Selection
+        ttk.Label(setup_frame, text="Progress Report:", style="Custom.TLabel").grid(row=4, column=0, sticky=tk.W)
+        self.progress_report_combobox = ttk.Combobox(setup_frame, textvariable=self.selected_progress_report, state="readonly")
+        self.progress_report_combobox.grid(row=4, column=1, sticky=(tk.W, tk.E))
+        self.update_progress_report_list()
+        self.session_sensitive_widgets.append(self.progress_report_combobox)
         
         # Start Button
         self.start_button = ttk.Button(setup_frame, text="Start Session", command=self.start_session)
@@ -636,6 +637,80 @@ class KaufmanGUI:
         
         # Bind Enter key to send command
         self.cmd_entry.bind('<Return>', lambda e: self.send_command())
+        
+    def update_progress_report_list(self):
+        """Update the list of available progress reports."""
+        try:
+            log_dir = "Progress_Reports"
+            if not os.path.exists(log_dir):
+                os.makedirs(log_dir, exist_ok=True)
+                self.progress_report_combobox['values'] = []
+                return
+            
+            # Get all CSV files in the Progress_Reports directory
+            report_files = [f for f in os.listdir(log_dir) if f.endswith('_log.csv')]
+            
+            if report_files:
+                self.progress_report_combobox['values'] = report_files
+                self.progress_report_combobox.set(report_files[0])
+            else:
+                self.progress_report_combobox['values'] = []
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load progress reports: {str(e)}")
+    
+    def get_starting_level_from_report(self, report_file):
+        """
+        Get the starting level from the most recent entry in the progress report.
+        If the report doesn't exist or is empty, return level_1.json.
+        """
+        try:
+            log_dir = "Progress_Reports"
+            report_path = os.path.join(log_dir, report_file)
+            
+            # If report doesn't exist, return level_1.json
+            if not os.path.exists(report_path):
+                self.log_to_console(f"Progress report not found, starting with level_1.json")
+                return "level_1.json"
+            
+            # Read the CSV file
+            with open(report_path, mode="r", newline="") as f:
+                reader = csv.reader(f)
+                rows = list(reader)
+                
+                # Check if file is empty or only has header
+                if len(rows) <= 1:
+                    self.log_to_console(f"Progress report is empty, starting with level_1.json")
+                    return "level_1.json"
+                
+                # Get the last entry (most recent)
+                last_row = rows[-1]
+                
+                # Extract level from the last row (column index 2)
+                if len(last_row) >= 3:
+                    level_entry = last_row[2]
+                    
+                    # Check if this is a "Session End" entry
+                    if "(Session End" in level_entry:
+                        # Extract the level name before " (Session End"
+                        level_name = level_entry.split(" (Session End")[0].strip()
+                    else:
+                        level_name = level_entry.strip()
+                    
+                    # Validate that the level file exists
+                    level_path = os.path.join(os.getcwd(), 'Levels', level_name)
+                    if os.path.exists(level_path):
+                        self.log_to_console(f"Resuming from last level: {level_name}")
+                        return level_name
+                    else:
+                        self.log_to_console(f"Level {level_name} not found, starting with level_1.json")
+                        return "level_1.json"
+                else:
+                    self.log_to_console(f"Invalid progress report format, starting with level_1.json")
+                    return "level_1.json"
+                    
+        except Exception as e:
+            self.log_to_console(f"Error reading progress report: {str(e)}, starting with level_1.json")
+            return "level_1.json"
         
     def update_level_list(self):
         try:
@@ -1003,12 +1078,17 @@ class KaufmanGUI:
             messagebox.showerror("Error", "Please fill in all required fields")
             return
         
+        # Determine the starting level from the progress report
+        animal_name = self.animal_name.get()
+        report_file = f"{animal_name}_log.csv"
+        starting_level = self.get_starting_level_from_report(report_file)
+        
         # Get file paths
-        level_file = os.path.join(os.getcwd(), 'Levels', self.level_combobox.get())
+        level_file = os.path.join(os.getcwd(), 'Levels', starting_level)
         phase_file = os.path.join(os.getcwd(), 'final.py')
         
         # Log the run
-        self.log_run(self.animal_name.get(), level_file, self.batch_id.get())
+        self.log_run(animal_name, level_file, self.batch_id.get())
         
         # Convert level file path to relative with forward slashes
         level_file_path = level_file.replace(os.getcwd() + os.sep, '').replace('\\', '/')
@@ -1029,7 +1109,7 @@ class KaufmanGUI:
             self.tcp_server.set_reward_callback(self._update_reward_display)
             
             # Set the initial level index and threshold
-            initial_level = self.level_combobox.get()
+            initial_level = starting_level
             if not self.tcp_server.set_initial_level(initial_level):
                 raise Exception(f"Invalid starting level: {initial_level}")
             
@@ -1053,7 +1133,7 @@ class KaufmanGUI:
             self.process = subprocess.Popen([sys.executable, phase_file], env=env)
             
             # Set initial current level
-            self.current_level.set(self.level_combobox.get())
+            self.current_level.set(starting_level)
             
             # Initialize reward counting for the first level at 0
             self.tcp_server.reset_reward_count()
@@ -1061,7 +1141,7 @@ class KaufmanGUI:
             # Log success
             self.log_to_console(f"Started session with:")
             self.log_to_console(f"Animal: {self.animal_name.get()}")
-            self.log_to_console(f"Level: {self.level_combobox.get()}")
+            self.log_to_console(f"Level: {starting_level}")
             self.log_to_console(f"Batch ID: {self.batch_id.get()}")
             self.log_to_console(f"Teensy Port: {self.teensy_port.get()}")
             self.log_to_console(f"TCP server started on port {server_port}")
