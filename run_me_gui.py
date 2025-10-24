@@ -660,17 +660,18 @@ class KaufmanGUI:
     
     def get_starting_level_from_report(self, report_file):
         """
-        Get the starting level from the most recent entry in the progress report.
-        If the report doesn't exist or is empty, return level_1.json.
+        Get the starting level and reward count from the most recent entry in the progress report.
+        If the report doesn't exist or is empty, return (level_1.json, 0).
+        Returns: tuple (level_name, reward_count)
         """
         try:
             log_dir = "Progress_Reports"
             report_path = os.path.join(log_dir, report_file)
             
-            # If report doesn't exist, return level_1.json
+            # If report doesn't exist, return level_1.json with 0 rewards
             if not os.path.exists(report_path):
                 self.log_to_console(f"Progress report not found, starting with level_1.json")
-                return "level_1.json"
+                return ("level_1.json", 0)
             
             # Read the CSV file
             with open(report_path, mode="r", newline="") as f:
@@ -680,7 +681,7 @@ class KaufmanGUI:
                 # Check if file is empty or only has header
                 if len(rows) <= 1:
                     self.log_to_console(f"Progress report is empty, starting with level_1.json")
-                    return "level_1.json"
+                    return ("level_1.json", 0)
                 
                 # Get the last entry (most recent)
                 last_row = rows[-1]
@@ -688,29 +689,43 @@ class KaufmanGUI:
                 # Extract level from the last row (column index 2)
                 if len(last_row) >= 3:
                     level_entry = last_row[2]
+                    reward_count = 0  # Default to 0
                     
                     # Check if this is a "Session End" entry
                     if "(Session End" in level_entry:
                         # Extract the level name before " (Session End"
                         level_name = level_entry.split(" (Session End")[0].strip()
+                        
+                        # Try to extract reward count from the session end entry
+                        try:
+                            # Format is "level_X.json (Session End - N rewards)"
+                            reward_part = level_entry.split("Session End - ")[1]
+                            reward_count_str = reward_part.split(" rewards")[0].strip()
+                            reward_count = int(reward_count_str)
+                            self.log_to_console(f"Found reward count from session end: {reward_count}")
+                        except (IndexError, ValueError) as e:
+                            self.log_to_console(f"Could not parse reward count, defaulting to 0")
+                            reward_count = 0
                     else:
                         level_name = level_entry.strip()
+                        # For non-session-end entries, default to 0 rewards
+                        reward_count = 0
                     
                     # Validate that the level file exists
                     level_path = os.path.join(os.getcwd(), 'Levels', level_name)
                     if os.path.exists(level_path):
-                        self.log_to_console(f"Resuming from last level: {level_name}")
-                        return level_name
+                        self.log_to_console(f"Resuming from last level: {level_name} with {reward_count} rewards")
+                        return (level_name, reward_count)
                     else:
                         self.log_to_console(f"Level {level_name} not found, starting with level_1.json")
-                        return "level_1.json"
+                        return ("level_1.json", 0)
                 else:
                     self.log_to_console(f"Invalid progress report format, starting with level_1.json")
-                    return "level_1.json"
+                    return ("level_1.json", 0)
                     
         except Exception as e:
             self.log_to_console(f"Error reading progress report: {str(e)}, starting with level_1.json")
-            return "level_1.json"
+            return ("level_1.json", 0)
         
     def update_level_list(self):
         try:
@@ -1081,7 +1096,7 @@ class KaufmanGUI:
         # Determine the starting level from the progress report
         animal_name = self.animal_name.get()
         report_file = f"{animal_name}_log.csv"
-        starting_level = self.get_starting_level_from_report(report_file)
+        starting_level, starting_reward_count = self.get_starting_level_from_report(report_file)
         
         # Get file paths
         level_file = os.path.join(os.getcwd(), 'Levels', starting_level)
@@ -1135,13 +1150,19 @@ class KaufmanGUI:
             # Set initial current level
             self.current_level.set(starting_level)
             
-            # Initialize reward counting for the first level at 0
+            # Initialize reward counting for the first level - use the reward count from progress report
             self.tcp_server.reset_reward_count()
+            # Manually set the reward count to the value from the progress report
+            with self.tcp_server._reward_lock:
+                self.tcp_server.reward_count = starting_reward_count
+            # Update the display
+            self.reward_count.set(str(starting_reward_count))
             
             # Log success
             self.log_to_console(f"Started session with:")
             self.log_to_console(f"Animal: {self.animal_name.get()}")
             self.log_to_console(f"Level: {starting_level}")
+            self.log_to_console(f"Starting Reward Count: {starting_reward_count}")
             self.log_to_console(f"Batch ID: {self.batch_id.get()}")
             self.log_to_console(f"Teensy Port: {self.teensy_port.get()}")
             self.log_to_console(f"TCP server started on port {server_port}")
