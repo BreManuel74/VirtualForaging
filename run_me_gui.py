@@ -320,8 +320,8 @@ class TCPDataServer:
         command = f"CHANGE_LEVEL:{level_file}"
         if self.send_data(command):
             try:
-                # Reset reward count for new level
-                self.reset_reward_count()
+                # Note: reward count should be reset BEFORE calling this method
+                # to prevent race conditions with incoming rewards
                 
                 # Set the current index based on the actual level file
                 if level_file in self.ordered_levels:
@@ -793,7 +793,10 @@ class KaufmanGUI:
         if self.tcp_server:
             next_level = self.tcp_server.get_next_level()
             if next_level:
-                # Update UI first for instant feedback
+                # Reset reward count FIRST before any UI updates to prevent race conditions
+                self.tcp_server.reset_reward_count()
+                
+                # Update UI for instant feedback
                 start_time = time.time()
                 self.current_level.set(next_level)
                 self.reward_count.set("0")
