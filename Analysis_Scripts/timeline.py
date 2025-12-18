@@ -546,7 +546,7 @@ else:
 plt.tight_layout()
 
 # --- Prepare data for heatmap with 2-second window ---
-window_heatmap = 2  # seconds before and after for heatmap
+window_heatmap = 5  # seconds before and after for heatmap
 
 cap_event_windows_heatmap = []
 for rt in reward_event_times_flat:
@@ -578,7 +578,7 @@ tick_labels = [f'{time_labels[i]:.1f}' for i in tick_indices]
 plt.xticks(tick_indices, tick_labels)
 plt.xlabel('Time from Reward Event (s)')
 plt.ylabel('Reward Event #')
-plt.title(f'Heatmap: Capacitive Value Across All Reward Events (2s window, n={n_rewards_event})')
+plt.title(f'Heatmap: Capacitive Value Across All Reward Events (5s window, n={n_rewards_event})')
 
 # Add colorbar
 cbar = plt.colorbar(im)
@@ -888,8 +888,48 @@ if len(puff_zone_times_flat) > 0:
                         'n_events': n_puff_event_cap
                     }
         
-        # Create subplot figure
-        fig, axs = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
+        # --- Also analyze treadmill speed aligned to puff events ---
+        puff_event_speed_data = None
+        if 'puff_event' in trial_log_df.columns:
+            puff_event_times = pd.to_numeric(trial_log_df['puff_event'], errors='coerce').dropna()
+            puff_event_times = puff_event_times[~np.isnan(puff_event_times)]
+            
+            if len(puff_event_times) > 0:
+                # Ensure puff_event_times is a numpy array of floats
+                puff_event_times = np.array(puff_event_times, dtype=float)
+                
+                # Extract speed windows around each puff event time
+                speed_puff_event_windows = []
+                for puff_event_time in puff_event_times:
+                    mask = (cap_time >= puff_event_time - window_puff) & (cap_time <= puff_event_time + window_puff)
+                    speed_segment = speed_val[mask]
+                    speed_puff_event_windows.append(speed_segment)
+                
+                # Pad all segments to the same length (max found)
+                if speed_puff_event_windows and max(len(seg) for seg in speed_puff_event_windows) > 0:
+                    max_puff_speed_len = max(len(seg) for seg in speed_puff_event_windows)
+                    speed_puff_event_windows_padded = np.array([
+                        np.pad(seg.astype(float), (0, max_puff_speed_len - len(seg)), constant_values=np.nan)
+                        for seg in speed_puff_event_windows
+                    ])
+                    
+                    # Create a common time axis centered at 0 for speed data
+                    aligned_time_puff_speed = np.linspace(-window_puff, window_puff, max_puff_speed_len)
+                    
+                    # Calculate mean and SEM for speed data
+                    n_puff_event_speed = speed_puff_event_windows_padded.shape[0]
+                    mean_speed_puff_event = np.nanmean(speed_puff_event_windows_padded, axis=0)
+                    sem_speed_puff_event = np.nanstd(speed_puff_event_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(speed_puff_event_windows_padded), axis=0))
+                    
+                    puff_event_speed_data = {
+                        'aligned_time': aligned_time_puff_speed,
+                        'mean_values': mean_speed_puff_event,
+                        'sem_values': sem_speed_puff_event,
+                        'n_events': n_puff_event_speed
+                    }
+
+        # Create subplot figure with 3 subplots
+        fig, axs = plt.subplots(3, 1, figsize=(12, 14), sharex=True)
         
         # --- Plot 1: Treadmill Speed aligned to puff zone entry times ---
         axs[0].plot(aligned_time_puff, mean_speed_puff, color='red', linewidth=2, label=f'Mean Speed (n={n_puff_events})')
@@ -923,12 +963,36 @@ if len(puff_zone_times_flat) > 0:
             axs[1].set_ylabel('Capacitive Value')
             axs[1].set_title('Capacitive Value Aligned to Puff Events (No Data)')
         
-        axs[1].set_xlabel('Time from Puff Event (s)')
         axs[1].set_xlim(-5, 5)
-        axs[1].set_xticks(np.arange(-5, 6, 1))
         axs[1].spines['top'].set_visible(False)
         axs[1].spines['right'].set_visible(False)
         axs[1].tick_params(axis='both', direction='out')
+        
+        # --- Plot 3: Treadmill Speed aligned to puff events ---
+        if puff_event_speed_data is not None:
+            axs[2].plot(puff_event_speed_data['aligned_time'], puff_event_speed_data['mean_values'], 
+                       color='purple', linewidth=2, label=f'Mean Speed (n={puff_event_speed_data["n_events"]})')
+            axs[2].fill_between(puff_event_speed_data['aligned_time'], 
+                               puff_event_speed_data['mean_values'] - puff_event_speed_data['sem_values'], 
+                               puff_event_speed_data['mean_values'] + puff_event_speed_data['sem_values'], 
+                               color='purple', alpha=0.2, label='SEM')
+            axs[2].axvline(0, color='black', linestyle='--', alpha=0.8, linewidth=2, label='Puff Event (t=0)')
+            axs[2].set_ylabel('Treadmill Speed (interpolated)')
+            axs[2].set_title(f'Average Treadmill Speed Aligned to Puff Events (n={puff_event_speed_data["n_events"]})')
+            axs[2].legend()
+        else:
+            axs[2].text(0.5, 0.5, 'No puff event data available\nfor treadmill speed analysis', 
+                       horizontalalignment='center', verticalalignment='center', 
+                       transform=axs[2].transAxes, fontsize=12)
+            axs[2].set_ylabel('Treadmill Speed')
+            axs[2].set_title('Treadmill Speed Aligned to Puff Events (No Data)')
+        
+        axs[2].set_xlabel('Time from Puff Event (s)')
+        axs[2].set_xlim(-5, 5)
+        axs[2].set_xticks(np.arange(-5, 6, 1))
+        axs[2].spines['top'].set_visible(False)
+        axs[2].spines['right'].set_visible(False)
+        axs[2].tick_params(axis='both', direction='out')
         
         plt.tight_layout()
         save_figure(fig, "puff_events_analysis")
