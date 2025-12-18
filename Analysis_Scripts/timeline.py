@@ -48,8 +48,9 @@ if not folder_path:
 trial_log_files = [f for f in os.listdir(folder_path) if 'trial_log.csv' in f]
 treadmill_files = [f for f in os.listdir(folder_path) if 'treadmill.csv' in f]
 capacitive_files = [f for f in os.listdir(folder_path) if 'capacitive.csv' in f]
+pupil_files = [f for f in os.listdir(folder_path) if 'exposure.csv' in f]
 
-# Check if all three types of files are present
+# Check if all three required types of files are present
 missing_types = []
 if not trial_log_files:
     missing_types.append("trial_log.csv")
@@ -59,12 +60,19 @@ if not capacitive_files:
     missing_types.append("capacitive.csv")
 
 if missing_types:
-    print(f"Warning: Missing file types in selected folder: {missing_types}")
-    print("Please ensure all three file types are present:")
+    print(f"Warning: Missing required file types in selected folder: {missing_types}")
+    print("Please ensure all three required file types are present:")
     print("  - A file containing 'trial_log.csv'")
     print("  - A file containing 'treadmill.csv'")
     print("  - A file containing 'capacitive.csv'")
     exit()
+
+# Check for optional pupil file
+has_pupil_data = len(pupil_files) > 0
+if has_pupil_data:
+    print(f"Pupil data file found: {pupil_files[0]}")
+else:
+    print("No pupil data file found (optional) - skipping pupil analyses")
 
 # Use the first file found for each type
 trial_log_path = os.path.join(folder_path, trial_log_files[0])
@@ -75,6 +83,13 @@ print(f"Loading files:")
 print(f"  - {os.path.basename(trial_log_path)}")
 print(f"  - {os.path.basename(treadmill_path)}")
 print(f"  - {os.path.basename(capacitive_path)}")
+
+# Conditionally set up pupil file path
+if has_pupil_data:
+    pupil_path = os.path.join(folder_path, pupil_files[0])
+    #print(f"  - {os.path.basename(pupil_path)} (pupil data)")
+else:
+    pupil_path = None
 
 # Create an output folder for SVG files
 output_folder = os.path.join(folder_path, "svg_plots")
@@ -88,6 +103,15 @@ else:
 trial_log_df = pd.read_csv(trial_log_path, engine='python')
 treadmill_df = pd.read_csv(treadmill_path, comment='/', engine='python')
 capacitive_df = pd.read_csv(capacitive_path, comment='/', engine='python')
+
+# Conditionally load pupil data
+if has_pupil_data:
+    # Skip first 3 rows (scorer, bodyparts, coords) as they contain metadata
+    pupil_df = pd.read_csv(pupil_path, comment='/', engine='python', skiprows=3)
+    #print(f"Pupil data loaded successfully: {pupil_df.shape[0]} rows, {pupil_df.shape[1]} columns")
+    #print(f"Pupil data columns: {list(pupil_df.columns[:6])}...")  # Show first 6 columns
+else:
+    pupil_df = None
 
 # Safe literal eval function
 def safe_literal_eval(val):
@@ -1011,6 +1035,79 @@ else:
     print("Check if the punish_texture_change_time data contains valid numeric values.")
 
 plt.show()
+
+# --- PUPIL DATA ANALYSIS SECTION ---
+# This section will only run if pupil data is available
+
+if has_pupil_data and pupil_df is not None:
+    print(f"\n=== PUPIL DATA ANALYSIS ===")
+    print(f"Pupil data shape: {pupil_df.shape}")
+    
+    # Rename the columns for clarity
+    pupil_df.columns.values[0] = 'frame_number'
+    pupil_df.columns.values[1] = 'point_1_x'
+    pupil_df.columns.values[2] = 'point_1_y'
+    pupil_df.columns.values[3] = 'point_1_likelihood'
+    pupil_df.columns.values[4] = 'point_2_x'
+    pupil_df.columns.values[5] = 'point_2_y'
+    pupil_df.columns.values[6] = 'point_2_likelihood'
+    pupil_df.columns.values[7] = 'point_3_x'
+    pupil_df.columns.values[8] = 'point_3_y'
+    pupil_df.columns.values[9] = 'point_3_likelihood'
+    pupil_df.columns.values[10] = 'point_4_x'
+    pupil_df.columns.values[11] = 'point_4_y'
+    pupil_df.columns.values[12] = 'point_4_likelihood'
+    pupil_df.columns.values[13] = 'point_5_x'
+    pupil_df.columns.values[14] = 'point_5_y'
+    pupil_df.columns.values[15] = 'point_5_likelihood'
+    pupil_df.columns.values[16] = 'point_6_x'
+    pupil_df.columns.values[17] = 'point_6_y'
+    pupil_df.columns.values[18] = 'point_6_likelihood'
+    pupil_df.columns.values[19] = 'point_7_x'
+    pupil_df.columns.values[20] = 'point_7_y'
+    pupil_df.columns.values[21] = 'point_7_likelihood'
+    pupil_df.columns.values[22] = 'point_8_x'
+    pupil_df.columns.values[23] = 'point_8_y'
+    pupil_df.columns.values[24] = 'point_8_likelihood'
+    
+    # Calculate euclidean distance between points 3 and 7, but only for frames with high likelihood
+    # Create condition: both point 3 and point 7 must have likelihood >= 0.80
+    high_likelihood_mask = (pupil_df['point_3_likelihood'] >= 0.80) & (pupil_df['point_7_likelihood'] >= 0.80)
+    
+    # Calculate diameter only where both points have high likelihood, otherwise NaN
+    pupil_df['pupil_diameter'] = np.where(
+        high_likelihood_mask,
+        np.sqrt((pupil_df['point_7_x'] - pupil_df['point_3_x'])**2 + 
+                (pupil_df['point_7_y'] - pupil_df['point_3_y'])**2),
+        np.nan
+    )
+    
+    # Report statistics
+    total_frames = len(pupil_df)
+    valid_frames = high_likelihood_mask.sum()
+    invalid_frames = total_frames - valid_frames
+    
+    print(f"\nCalculated pupil diameter as euclidean distance between points 3 and 7")
+    print(f"Quality control: {valid_frames}/{total_frames} frames passed likelihood threshold (≥0.80)")
+    print(f"Frames with low likelihood (set to NaN): {invalid_frames}")
+    print(f"Pupil diameter stats (valid frames only): mean={pupil_df['pupil_diameter'].mean():.2f}, std={pupil_df['pupil_diameter'].std():.2f}")
+    
+    # TODO: Add your pupil-specific analysis code here
+    # The pupil data appears to be DLC (DeepLabCut) output with x, y, likelihood columns
+    # for multiple body parts. Common analyses might include:
+    # 1. Extract pupil coordinates and calculate pupil diameter
+    # 2. Pupil diameter changes aligned to reward events
+    # 3. Pupil diameter changes aligned to puff events  
+    # 4. Pupil diameter changes aligned to probe events
+    # 5. Correlation between pupil diameter and treadmill speed
+    # 6. Correlation between pupil diameter and capacitive sensor values
+    
+    print("\nPupil analysis data structure inspection complete - ready for implementation")
+    
+else:
+    print(f"\n=== PUPIL DATA ANALYSIS SKIPPED ===")
+    print("No pupil data available for this session")
+    print("Expected file: '*exposure.csv' (DeepLabCut output with 3-row header)")
 
 # Show a summary of saved figures
 if hasattr(save_figure, 'figure_count'):
