@@ -1130,6 +1130,37 @@ if has_pupil_data and pupil_df is not None and frame_log_df is not None:
     print(f"Frames with low likelihood (set to NaN): {invalid_frames}")
     print(f"Pupil diameter stats (valid frames only): mean={pupil_df['pupil_diameter'].mean():.2f}, std={pupil_df['pupil_diameter'].std():.2f}")
     
+    # Interpolate pupil diameter to match capacitive elapsed_time timeline
+    # Only use frames that have both valid timestamps and valid pupil diameter measurements
+    valid_data_mask = pupil_df['time_seconds'].notna() & pupil_df['pupil_diameter'].notna()
+    
+    if valid_data_mask.sum() > 1:  # Need at least 2 points for interpolation
+        pupil_time_valid = pupil_df.loc[valid_data_mask, 'time_seconds'].values
+        pupil_diameter_valid = pupil_df.loc[valid_data_mask, 'pupil_diameter'].values
+        
+        # Interpolate to capacitive timeline
+        pupil_diameter_interp = pd.Series(
+            data=np.interp(
+                capacitive_df['elapsed_time'],
+                pupil_time_valid,
+                pupil_diameter_valid,
+                left=np.nan,  # Use NaN for extrapolation beyond data range
+                right=np.nan
+            ),
+            index=capacitive_df['elapsed_time']
+        )
+        
+        # Report interpolation statistics
+        valid_interp_points = (~pupil_diameter_interp.isna()).sum()
+        total_interp_points = len(pupil_diameter_interp)
+        print(f"\nInterpolated pupil diameter to capacitive timeline:")
+        print(f"Valid interpolated points: {valid_interp_points}/{total_interp_points}")
+        print(f"Pupil time range: {pupil_time_valid.min():.2f} - {pupil_time_valid.max():.2f} seconds")
+        print(f"Capacitive time range: {capacitive_df['elapsed_time'].min():.2f} - {capacitive_df['elapsed_time'].max():.2f} seconds")
+    else:
+        print(f"\nWarning: Insufficient valid pupil data for interpolation (only {valid_data_mask.sum()} valid points)")
+        pupil_diameter_interp = pd.Series(np.nan, index=capacitive_df['elapsed_time'])
+    
     # Create plot of pupil diameter over time (seconds)
     fig, ax = plt.subplots(1, 1, figsize=(12, 6))
     
