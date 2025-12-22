@@ -254,6 +254,91 @@ if has_pupil_data and pupil_df is not None and frame_log_df is not None:
     else:
         pupil_diameter_interp = pd.Series(np.nan, index=capacitive_df['elapsed_time'])
         print(f"Warning: Insufficient pupil data for early interpolation")
+    
+    # --- Correlation Analysis between Treadmill Speed and Pupil Diameter ---
+    if pupil_diameter_interp is not None and not pupil_diameter_interp.isna().all():
+        print(f"\n=== TREADMILL SPEED vs PUPIL DIAMETER CORRELATION ===")
+        
+        # Get data where both measurements are valid (not NaN)
+        treadmill_values = treadmill_interp.values
+        pupil_values = pupil_diameter_interp.values
+        
+        # Create mask for valid data points (both treadmill and pupil data available)
+        valid_correlation_mask = ~np.isnan(treadmill_values) & ~np.isnan(pupil_values)
+        n_valid_points = valid_correlation_mask.sum()
+        
+        if n_valid_points > 10:  # Need sufficient data points for meaningful correlation
+            treadmill_valid = treadmill_values[valid_correlation_mask]
+            pupil_valid = pupil_values[valid_correlation_mask]
+            
+            # Calculate Pearson correlation coefficient
+            correlation_coeff = np.corrcoef(treadmill_valid, pupil_valid)[0, 1]
+            
+            # Calculate p-value using scipy if available
+            try:
+                from scipy.stats import pearsonr
+                correlation_coeff_scipy, p_value = pearsonr(treadmill_valid, pupil_valid)
+                print(f"Pearson correlation coefficient: {correlation_coeff_scipy:.4f}")
+                print(f"P-value: {p_value:.6f}")
+                if p_value < 0.001:
+                    print("*** Highly significant correlation (p < 0.001)")
+                elif p_value < 0.01:
+                    print("** Significant correlation (p < 0.01)")
+                elif p_value < 0.05:
+                    print("* Significant correlation (p < 0.05)")
+                else:
+                    print("Not statistically significant (p ≥ 0.05)")
+            except ImportError:
+                print(f"Pearson correlation coefficient: {correlation_coeff:.4f}")
+                print("(scipy not available for p-value calculation)")
+            
+            print(f"Number of valid data points: {n_valid_points:,}")
+            print(f"Correlation strength interpretation:")
+            abs_corr = abs(correlation_coeff)
+            if abs_corr >= 0.7:
+                strength = "Strong"
+            elif abs_corr >= 0.3:
+                strength = "Moderate" 
+            elif abs_corr >= 0.1:
+                strength = "Weak"
+            else:
+                strength = "Very weak"
+            
+            direction = "positive" if correlation_coeff > 0 else "negative"
+            print(f"  - {strength} {direction} correlation (r = {correlation_coeff:.4f})")
+            
+            # Create correlation scatter plot
+            plt.figure(figsize=(10, 8))
+            plt.scatter(treadmill_valid, pupil_valid, alpha=0.5, s=1, color='blue')
+            
+            # Add trend line
+            z = np.polyfit(treadmill_valid, pupil_valid, 1)
+            p = np.poly1d(z)
+            x_trend = np.linspace(treadmill_valid.min(), treadmill_valid.max(), 100)
+            plt.plot(x_trend, p(x_trend), "r--", alpha=0.8, linewidth=2, label=f'Trend line (r={correlation_coeff:.3f})')
+            
+            plt.xlabel('Treadmill Speed (interpolated)')
+            plt.ylabel('Pupil Diameter (pixels)')
+            plt.title(f'Treadmill Speed vs Pupil Diameter Correlation\n(r = {correlation_coeff:.4f}, n = {n_valid_points:,} points)')
+            plt.legend()
+            plt.grid(True, alpha=0.3)
+            
+            # Remove top and right spines
+            ax = plt.gca()
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+            
+            plt.tight_layout()
+            save_figure(plt.gcf(), "treadmill_pupil_correlation")
+            plt.show()
+            
+        else:
+            print(f"Insufficient valid data points for correlation analysis: {n_valid_points}")
+            print("Need at least 10 overlapping data points")
+    
+    else:
+        print("Pupil diameter data not available for correlation analysis")
+    
 else:
     pupil_diameter_interp = None
 
