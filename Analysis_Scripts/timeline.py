@@ -1092,6 +1092,33 @@ if has_pupil_data and pupil_df is not None:
     print(f"Frames with low likelihood (set to NaN): {invalid_frames}")
     print(f"Pupil diameter stats (valid frames only): mean={pupil_df['pupil_diameter'].mean():.2f}, std={pupil_df['pupil_diameter'].std():.2f}")
     
+    # Create plot of pupil diameter over frame numbers
+    fig, ax = plt.subplots(1, 1, figsize=(12, 6))
+    
+    # Plot pupil diameter vs frame number
+    ax.plot(pupil_df['frame_number'], pupil_df['pupil_diameter'], 'b-', alpha=0.7, linewidth=0.8, label='Pupil Diameter')
+    
+    # Add horizontal line at mean diameter for reference
+    mean_diameter = pupil_df['pupil_diameter'].mean()
+    ax.axhline(y=mean_diameter, color='red', linestyle='--', alpha=0.8, label=f'Mean = {mean_diameter:.2f}')
+    
+    # Formatting
+    ax.set_xlabel('Frame Number')
+    ax.set_ylabel('Pupil Diameter (pixels)')
+    ax.set_title(f'Pupil Diameter Over Time\n({valid_frames}/{total_frames} frames with likelihood ≥ 0.80)')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    
+    # Set y-axis to start from 0 if there are valid measurements
+    if not pupil_df['pupil_diameter'].isna().all():
+        ax.set_ylim(bottom=0)
+    
+    plt.tight_layout()
+    save_figure(fig, "pupil_diameter_timeseries")
+    plt.show()
+    
     # TODO: Add your pupil-specific analysis code here
     # The pupil data appears to be DLC (DeepLabCut) output with x, y, likelihood columns
     # for multiple body parts. Common analyses might include:
