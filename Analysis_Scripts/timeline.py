@@ -49,6 +49,7 @@ trial_log_files = [f for f in os.listdir(folder_path) if 'trial_log.csv' in f]
 treadmill_files = [f for f in os.listdir(folder_path) if 'treadmill.csv' in f]
 capacitive_files = [f for f in os.listdir(folder_path) if 'capacitive.csv' in f]
 pupil_files = [f for f in os.listdir(folder_path) if 'exposure.csv' in f]
+frame_log_files = [f for f in os.listdir(folder_path) if 'frame_log.txt' in f]
 
 # Check if all three required types of files are present
 missing_types = []
@@ -67,12 +68,16 @@ if missing_types:
     print("  - A file containing 'capacitive.csv'")
     exit()
 
-# Check for optional pupil file
-has_pupil_data = len(pupil_files) > 0
+# Check for optional pupil file and frame log
+has_pupil_data = len(pupil_files) > 0 and len(frame_log_files) > 0
 if has_pupil_data:
     print(f"Pupil data file found: {pupil_files[0]}")
+    print(f"Frame log file found: {frame_log_files[0]}")
 else:
-    print("No pupil data file found (optional) - skipping pupil analyses")
+    if len(pupil_files) == 0:
+        print("No pupil data file found (optional) - skipping pupil analyses")
+    if len(frame_log_files) == 0:
+        print("No frame log file found (required for pupil timing) - skipping pupil analyses")
 
 # Use the first file found for each type
 trial_log_path = os.path.join(folder_path, trial_log_files[0])
@@ -84,12 +89,15 @@ print(f"  - {os.path.basename(trial_log_path)}")
 print(f"  - {os.path.basename(treadmill_path)}")
 print(f"  - {os.path.basename(capacitive_path)}")
 
-# Conditionally set up pupil file path
+# Conditionally set up pupil file path and frame log path
 if has_pupil_data:
     pupil_path = os.path.join(folder_path, pupil_files[0])
+    frame_log_path = os.path.join(folder_path, frame_log_files[0])
     #print(f"  - {os.path.basename(pupil_path)} (pupil data)")
+    #print(f"  - {os.path.basename(frame_log_path)} (frame timestamps)")
 else:
     pupil_path = None
+    frame_log_path = None
 
 # Create an output folder for SVG files
 output_folder = os.path.join(folder_path, "svg_plots")
@@ -104,14 +112,18 @@ trial_log_df = pd.read_csv(trial_log_path, engine='python')
 treadmill_df = pd.read_csv(treadmill_path, comment='/', engine='python')
 capacitive_df = pd.read_csv(capacitive_path, comment='/', engine='python')
 
-# Conditionally load pupil data
+# Conditionally load pupil data and frame log
 if has_pupil_data:
     # Skip first 3 rows (scorer, bodyparts, coords) as they contain metadata
     pupil_df = pd.read_csv(pupil_path, comment='/', engine='python', skiprows=3)
+    # Load frame log with timestamps
+    frame_log_df = pd.read_csv(frame_log_path, sep='\t', engine='python')
     #print(f"Pupil data loaded successfully: {pupil_df.shape[0]} rows, {pupil_df.shape[1]} columns")
+    #print(f"Frame log loaded successfully: {frame_log_df.shape[0]} rows, {frame_log_df.shape[1]} columns")
     #print(f"Pupil data columns: {list(pupil_df.columns[:6])}...")  # Show first 6 columns
 else:
     pupil_df = None
+    frame_log_df = None
 
 # Safe literal eval function
 def safe_literal_eval(val):
@@ -1039,9 +1051,10 @@ plt.show()
 # --- PUPIL DATA ANALYSIS SECTION ---
 # This section will only run if pupil data is available
 
-if has_pupil_data and pupil_df is not None:
+if has_pupil_data and pupil_df is not None and frame_log_df is not None:
     print(f"\n=== PUPIL DATA ANALYSIS ===")
     print(f"Pupil data shape: {pupil_df.shape}")
+    print(f"Frame log shape: {frame_log_df.shape}")
     
     # Rename the columns for clarity
     pupil_df.columns.values[0] = 'frame_number'
@@ -1070,6 +1083,31 @@ if has_pupil_data and pupil_df is not None:
     pupil_df.columns.values[23] = 'point_8_y'
     pupil_df.columns.values[24] = 'point_8_likelihood'
     
+    # Align frames with timestamps
+    # Frame 0 in CSV corresponds to frame_number 1 in frame log
+    # So we need to add 1 to the CSV frame numbers for alignment
+    print(f"\nAligning frame numbers with timestamps...")
+    print(f"Frame alignment: CSV frame 0 = frame_log frame 1")
+    
+    # Create a mapping from frame_log frame_number to time_seconds
+    frame_to_time_mapping = dict(zip(frame_log_df['frame_number'], frame_log_df['time_seconds']))
+    
+    # Add 1 to pupil_df frame numbers to align with frame_log frame numbers
+    pupil_df['aligned_frame_number'] = pupil_df['frame_number'] + 1
+    
+    # Map the aligned frame numbers to timestamps
+    pupil_df['time_seconds'] = pupil_df['aligned_frame_number'].map(frame_to_time_mapping)
+    
+    # Report alignment statistics
+    matched_frames = pupil_df['time_seconds'].notna().sum()
+    total_pupil_frames = len(pupil_df)
+    print(f"Successfully aligned {matched_frames}/{total_pupil_frames} pupil frames with timestamps")
+    
+    if matched_frames < total_pupil_frames:
+        unmatched_frames = total_pupil_frames - matched_frames
+        print(f"Warning: {unmatched_frames} pupil frames could not be matched to timestamps")
+        print(f"This could occur if pupil data extends beyond the frame log range")
+    
     # Calculate euclidean distance between points 3 and 7, but only for frames with high likelihood
     # Create condition: both point 3 and point 7 must have likelihood >= 0.80
     high_likelihood_mask = (pupil_df['point_3_likelihood'] >= 0.80) & (pupil_df['point_7_likelihood'] >= 0.80)
@@ -1092,20 +1130,23 @@ if has_pupil_data and pupil_df is not None:
     print(f"Frames with low likelihood (set to NaN): {invalid_frames}")
     print(f"Pupil diameter stats (valid frames only): mean={pupil_df['pupil_diameter'].mean():.2f}, std={pupil_df['pupil_diameter'].std():.2f}")
     
-    # Create plot of pupil diameter over frame numbers
+    # Create plot of pupil diameter over time (seconds)
     fig, ax = plt.subplots(1, 1, figsize=(12, 6))
     
-    # Plot pupil diameter vs frame number
-    ax.plot(pupil_df['frame_number'], pupil_df['pupil_diameter'], 'b-', alpha=0.7, linewidth=0.8, label='Pupil Diameter')
+    # Plot pupil diameter vs time in seconds (only for frames with timestamps)
+    valid_time_mask = pupil_df['time_seconds'].notna()
+    ax.plot(pupil_df.loc[valid_time_mask, 'time_seconds'], 
+            pupil_df.loc[valid_time_mask, 'pupil_diameter'], 
+            'b-', alpha=0.7, linewidth=0.8, label='Pupil Diameter')
     
     # Add horizontal line at mean diameter for reference
     mean_diameter = pupil_df['pupil_diameter'].mean()
     ax.axhline(y=mean_diameter, color='red', linestyle='--', alpha=0.8, label=f'Mean = {mean_diameter:.2f}')
     
     # Formatting
-    ax.set_xlabel('Frame Number')
+    ax.set_xlabel('Time (seconds)')
     ax.set_ylabel('Pupil Diameter (pixels)')
-    ax.set_title(f'Pupil Diameter Over Time\n({valid_frames}/{total_frames} frames with likelihood ≥ 0.80)')
+    ax.set_title(f'Pupil Diameter Over Time\n({valid_frames}/{total_frames} frames with likelihood ≥ 0.80, {matched_frames} with timestamps)')
     ax.legend()
     ax.grid(True, alpha=0.3)
     ax.spines['top'].set_visible(False)
@@ -1133,8 +1174,11 @@ if has_pupil_data and pupil_df is not None:
     
 else:
     print(f"\n=== PUPIL DATA ANALYSIS SKIPPED ===")
-    print("No pupil data available for this session")
-    print("Expected file: '*exposure.csv' (DeepLabCut output with 3-row header)")
+    if not has_pupil_data:
+        print("Pupil data or frame log not available for this session")
+        print("Required files: '*exposure.csv' (DeepLabCut output) and '*frame_log.txt' (timestamp data)")
+    else:
+        print("Pupil data or frame log could not be loaded properly")
 
 # Show a summary of saved figures
 if hasattr(save_figure, 'figure_count'):
