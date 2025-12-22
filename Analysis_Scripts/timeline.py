@@ -204,8 +204,69 @@ treadmill_interp = pd.Series(
     index=capacitive_df['elapsed_time']
 )
 
-# Plot both on the same graph (capacitive only, with reward and puff events)
-fig, axs = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
+# Interpolate pupil diameter to match capacitive elapsed_time timeline (if pupil data is available)
+if has_pupil_data and pupil_df is not None and frame_log_df is not None:
+    print(f"\n=== EARLY PUPIL PROCESSING FOR TIMELINE PLOT ===")
+    
+    # Quick column renaming for early processing
+    if pupil_df.columns[0] != 'frame_number':
+        pupil_df_columns = pupil_df.columns.tolist()
+        pupil_df_columns[0] = 'frame_number'
+        pupil_df_columns[7] = 'point_3_x'
+        pupil_df_columns[8] = 'point_3_y' 
+        pupil_df_columns[9] = 'point_3_likelihood'
+        pupil_df_columns[19] = 'point_7_x'
+        pupil_df_columns[20] = 'point_7_y'
+        pupil_df_columns[21] = 'point_7_likelihood'
+        pupil_df.columns = pupil_df_columns
+    
+    # Quick frame alignment and timestamp mapping
+    frame_to_time_mapping = dict(zip(frame_log_df['frame_number'], frame_log_df['time_seconds']))
+    pupil_df['aligned_frame_number'] = pupil_df['frame_number'] + 1
+    pupil_df['time_seconds'] = pupil_df['aligned_frame_number'].map(frame_to_time_mapping)
+    
+    # Quick pupil diameter calculation
+    high_likelihood_mask = (pupil_df['point_3_likelihood'] >= 0.80) & (pupil_df['point_7_likelihood'] >= 0.80)
+    pupil_df['pupil_diameter'] = np.where(
+        high_likelihood_mask,
+        np.sqrt((pupil_df['point_7_x'] - pupil_df['point_3_x'])**2 + 
+                (pupil_df['point_7_y'] - pupil_df['point_3_y'])**2),
+        np.nan
+    )
+    
+    # Interpolate pupil diameter
+    valid_data_mask = pupil_df['time_seconds'].notna() & pupil_df['pupil_diameter'].notna()
+    if valid_data_mask.sum() > 1:
+        pupil_time_valid = pupil_df.loc[valid_data_mask, 'time_seconds'].values
+        pupil_diameter_valid = pupil_df.loc[valid_data_mask, 'pupil_diameter'].values
+        
+        pupil_diameter_interp = pd.Series(
+            data=np.interp(
+                capacitive_df['elapsed_time'],
+                pupil_time_valid,
+                pupil_diameter_valid,
+                left=np.nan,
+                right=np.nan
+            ),
+            index=capacitive_df['elapsed_time']
+        )
+        print(f"Early pupil interpolation successful for timeline plot")
+    else:
+        pupil_diameter_interp = pd.Series(np.nan, index=capacitive_df['elapsed_time'])
+        print(f"Warning: Insufficient pupil data for early interpolation")
+else:
+    pupil_diameter_interp = None
+
+# Plot all data streams on the same graph with reward and puff events
+# Adjust number of subplots based on available data
+num_plots = 3 if has_pupil_data else 2
+fig, axs = plt.subplots(num_plots, 1, figsize=(14, 10 if has_pupil_data else 8), sharex=True)
+
+# Make sure axs is always a list for consistent indexing
+if num_plots == 2:
+    axs = [axs[0], axs[1]]
+else:
+    axs = [axs[0], axs[1], axs[2]]
 
 # --- Plot 1: Capacitive Value ---
 axs[0].plot(capacitive_df['elapsed_time'], capacitive_df['capacitive_value'], label='Capacitive Value')
@@ -301,10 +362,60 @@ for trial_idx in range(punish_texture_change_time_first.shape[0]):
     except (ValueError, TypeError):
         continue
 
-axs[1].set_xlabel('Elapsed Time (s)')
+axs[1].set_xlabel('Elapsed Time (s)' if not has_pupil_data else '')
 axs[1].set_ylabel('Speed')
 axs[1].set_title('Interpolated Treadmill Speed Over Time with Reward and Puff Events')
 axs[1].legend(loc='upper right')
+
+# --- Plot 3: Pupil Diameter (if available) ---
+if has_pupil_data and pupil_diameter_interp is not None:
+    axs[2].plot(
+        capacitive_df['elapsed_time'],
+        pupil_diameter_interp,
+        label='Pupil Diameter (interpolated)',
+        color='orange'
+    )
+
+    # Reward events
+    for i, rt in enumerate(reward_times):
+        axs[2].axvline(x=rt, color='green', linestyle='-', alpha=0.7, linewidth=2, label='Reward Event' if i == 0 else "")
+
+    # Puff events
+    if 'puff_event' in trial_log_df.columns:
+        for i, pt in enumerate(puff_times):
+            axs[2].axvline(x=pt, color='red', linestyle='-', alpha=0.7, linewidth=2, label='Puff Event' if i == 0 else "")
+
+    # Probe events
+    if 'probe_time' in trial_log_df.columns:
+        for i, pt in enumerate(probe_times):
+            axs[2].axvline(x=pt, color='black', linestyle='-', alpha=0.7, linewidth=2, label='Probe Event' if i == 0 else "")
+
+    # Highlight reward intervals
+    for trial_idx in range(reward_texture_change_time.shape[0]):
+        for seg_idx in range(reward_texture_change_time.shape[1]):
+            try:
+                start = float(reward_texture_change_time[trial_idx, seg_idx])
+                end = float(reward_revert_time[trial_idx, seg_idx])
+                if not np.isnan(start) and not np.isnan(end):
+                    axs[2].axvspan(start, end, color='green', alpha=0.15)
+            except (ValueError, TypeError):
+                continue
+
+    # Highlight punish intervals - only using first puff per zone
+    for trial_idx in range(punish_texture_change_time_first.shape[0]):
+        try:
+            start = float(punish_texture_change_time_first[trial_idx])
+            end = float(punish_revert_time_first[trial_idx])
+            if not np.isnan(start) and not np.isnan(end):
+                axs[2].axvspan(start, end, color='red', alpha=0.15)
+        except (ValueError, TypeError):
+            continue
+
+    axs[2].set_xlabel('Elapsed Time (s)')
+    axs[2].set_ylabel('Pupil Diameter (pixels)')
+    axs[2].set_title('Interpolated Pupil Diameter Over Time with Reward and Puff Events')
+    axs[2].legend(loc='upper right')
+    axs[2].set_ylim(bottom=0)
 
 # Set x-axis limits to the data range
 xmin = capacitive_df['elapsed_time'].min()
@@ -313,7 +424,7 @@ for ax in axs:
     ax.set_xlim([xmin, xmax])
 
 plt.tight_layout()
-save_figure(fig, "timeline_capacitive_and_treadmill")
+save_figure(fig, f"timeline_{'capacitive_treadmill_pupil' if has_pupil_data else 'capacitive_and_treadmill'}")
 plt.show()
 
 window = 5  # seconds before and after
