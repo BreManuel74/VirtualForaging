@@ -515,9 +515,12 @@ if has_pupil_data and pupil_diameter_interp is not None:
     # Get interpolated pupil diameter as numpy array
     pupil_val = pupil_diameter_interp.values
     
+    # Use larger window for pupil analysis (10 seconds before and after)
+    window_pupil = 10
+    
     pupil_windows = []
     for rt in reward_times_flat:
-        mask = (cap_time >= rt - window) & (cap_time <= rt + window)
+        mask = (cap_time >= rt - window_pupil) & (cap_time <= rt + window_pupil)
         pupil_segment = pupil_val[mask]
         pupil_windows.append(pupil_segment)
     
@@ -529,7 +532,7 @@ if has_pupil_data and pupil_diameter_interp is not None:
     ])
     
     # Create a common time axis centered at 0 for pupil
-    aligned_time_pupil = np.linspace(-window, window, max_pupil_len)
+    aligned_time_pupil = np.linspace(-window_pupil, window_pupil, max_pupil_len)
     
     n_rewards_pupil = pupil_windows_padded.shape[0]
     
@@ -549,6 +552,7 @@ reward_event_times_flat = pd.to_numeric(trial_log_df['reward_event'], errors='co
 reward_event_times_flat = reward_event_times_flat[~np.isnan(reward_event_times_flat)]
 
 window_event = 5  # seconds before and after for capacitive analysis
+window_event_pupil = 10  # seconds before and after for pupil analysis
 
 # Ensure reward_event_times_flat is a numpy array of floats
 reward_event_times_flat = np.array(reward_event_times_flat, dtype=float)
@@ -646,7 +650,7 @@ if has_pupil_data and pupil_diameter_interp is not None:
     # --- Pupil Diameter aligned to reward_event_times_flat ---
     pupil_event_windows = []
     for rt in reward_event_times_flat:
-        mask = (cap_time >= rt - window_event) & (cap_time <= rt + window_event)
+        mask = (cap_time >= rt - window_event_pupil) & (cap_time <= rt + window_event_pupil)
         pupil_segment = pupil_val[mask]
         pupil_event_windows.append(pupil_segment)
     
@@ -658,7 +662,7 @@ if has_pupil_data and pupil_diameter_interp is not None:
     ])
     
     # Create a common time axis centered at 0
-    aligned_time_pupil_event = np.linspace(-window_event, window_event, max_pupil_event_len)
+    aligned_time_pupil_event = np.linspace(-window_event_pupil, window_event_pupil, max_pupil_event_len)
     
     n_rewards_pupil_event = pupil_event_windows_padded.shape[0]
     
@@ -677,7 +681,7 @@ if has_pupil_data and pupil_diameter_interp is not None:
         axs[0].set_ylabel('Pupil Diameter (pixels)')
         axs[0].set_title('Pupil Diameter Aligned to Reward Zone Onset')
         axs[0].legend()
-        axs[0].set_xlim(-5, 5)
+        axs[0].set_xlim(-10, 10)
         axs[0].set_ylim(bottom=0)
         axs[0].spines['top'].set_visible(False)
         axs[0].spines['right'].set_visible(False)
@@ -691,7 +695,7 @@ if has_pupil_data and pupil_diameter_interp is not None:
     axs[1].set_ylabel('Pupil Diameter (pixels)')
     axs[1].set_title('Pupil Diameter Aligned to Reward Events')
     axs[1].legend()
-    axs[1].set_xlim(-5, 5)
+    axs[1].set_xlim(-10, 10)
     axs[1].set_ylim(bottom=0)
     axs[1].spines['top'].set_visible(False)
     axs[1].spines['right'].set_visible(False)
@@ -699,7 +703,7 @@ if has_pupil_data and pupil_diameter_interp is not None:
     
     # Set consistent x-axis formatting
     for ax in axs:
-        ax.set_xticks(np.arange(-5, 6, 1))
+        ax.set_xticks(np.arange(-10, 11, 2))
     
     plt.tight_layout()
     save_figure(fig, "pupil_diameter_reward_combined")
@@ -770,7 +774,7 @@ if 'probe_time' in trial_log_df.columns:
             axs[0].set_ylabel('Treadmill Speed (interpolated)')
             axs[0].set_title('Treadmill Speed Aligned to Probe Events')
             axs[0].legend()
-            axs[0].set_xlim(-5, 5)
+            axs[0].set_xlim(-10, 10)
             axs[0].spines['top'].set_visible(False)
             axs[0].spines['right'].set_visible(False)
             axs[0].tick_params(axis='both', direction='out')
@@ -1074,6 +1078,8 @@ puff_zone_times_flat = puff_zone_times_flat[~np.isnan(puff_zone_times_flat)]
 
 if len(puff_zone_times_flat) > 0:
     window_puff = 5  # seconds before and after puff zone entry
+    window_puff_pupil = 10  # seconds before and after puff zone entry for pupil analysis
+    window_puff_pupil = 10  # seconds before and after puff zone entry for pupil analysis
     
     # Get interpolated speed as numpy array (already calculated above)
     speed_val = treadmill_interp.values
@@ -1267,7 +1273,7 @@ if len(puff_zone_times_flat) > 0:
             # --- Pupil Diameter aligned to puff zone entry ---
             pupil_puff_windows = []
             for puff_time in puff_zone_times_flat:
-                mask = (cap_time >= puff_time - window_puff) & (cap_time <= puff_time + window_puff)
+                mask = (cap_time >= puff_time - window_puff_pupil) & (cap_time <= puff_time + window_puff_pupil)
                 pupil_segment = pupil_val[mask]
                 pupil_puff_windows.append(pupil_segment)
             
@@ -1279,7 +1285,7 @@ if len(puff_zone_times_flat) > 0:
             ])
             
             # Calculate mean and SEM for pupil diameter
-            aligned_time_pupil_puff = np.linspace(-window_puff, window_puff, max_pupil_puff_len)
+            aligned_time_pupil_puff = np.linspace(-window_puff_pupil, window_puff_pupil, max_pupil_puff_len)
             mean_pupil_puff = np.nanmean(pupil_puff_windows_padded, axis=0)
             sem_pupil_puff = np.nanstd(pupil_puff_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(pupil_puff_windows_padded), axis=0))
             n_puffs_pupil = pupil_puff_windows_padded.shape[0]
@@ -1292,7 +1298,7 @@ if len(puff_zone_times_flat) > 0:
                 if len(puff_event_times) > 0:
                     pupil_puff_event_windows = []
                     for puff_time in puff_event_times:
-                        mask = (cap_time >= puff_time - window_puff) & (cap_time <= puff_time + window_puff)
+                        mask = (cap_time >= puff_time - window_puff_pupil) & (cap_time <= puff_time + window_puff_pupil)
                         pupil_segment = pupil_val[mask]
                         pupil_puff_event_windows.append(pupil_segment)
                     
@@ -1303,7 +1309,7 @@ if len(puff_zone_times_flat) > 0:
                             for seg in pupil_puff_event_windows
                         ])
                         
-                        aligned_time_pupil_puff_event = np.linspace(-window_puff, window_puff, max_pupil_puff_event_len)
+                        aligned_time_pupil_puff_event = np.linspace(-window_puff_pupil, window_puff_pupil, max_pupil_puff_event_len)
                         n_puffs_pupil_event = pupil_puff_event_windows_padded.shape[0]
                         mean_pupil_puff_event = np.nanmean(pupil_puff_event_windows_padded, axis=0)
                         sem_pupil_puff_event = np.nanstd(pupil_puff_event_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(pupil_puff_event_windows_padded), axis=0))
@@ -1329,7 +1335,7 @@ if len(puff_zone_times_flat) > 0:
             axs[0].set_ylabel('Pupil Diameter (pixels)')
             axs[0].set_title('Pupil Diameter Aligned to Puff Zone Entry')
             axs[0].legend()
-            axs[0].set_xlim(-5, 5)
+            axs[0].set_xlim(-10, 10)
             axs[0].set_ylim(bottom=0)
             axs[0].spines['top'].set_visible(False)
             axs[0].spines['right'].set_visible(False)
@@ -1344,7 +1350,7 @@ if len(puff_zone_times_flat) > 0:
                 axs[1].set_ylabel('Pupil Diameter (pixels)')
                 axs[1].set_title('Pupil Diameter Aligned to Puff Events')
                 axs[1].legend()
-                axs[1].set_xlim(-5, 5)
+                axs[1].set_xlim(-10, 10)
                 axs[1].set_ylim(bottom=0)
                 axs[1].spines['top'].set_visible(False)
                 axs[1].spines['right'].set_visible(False)
@@ -1354,7 +1360,7 @@ if len(puff_zone_times_flat) > 0:
             
             # Set consistent x-axis formatting
             for ax in axs:
-                ax.set_xticks(np.arange(-5, 6, 1))
+                ax.set_xticks(np.arange(-10, 11, 2))
             
             plt.tight_layout()
             save_figure(fig, f"pupil_diameter_puff_combined_{'with_events' if pupil_puff_event_data is not None else 'zone_only'}")
