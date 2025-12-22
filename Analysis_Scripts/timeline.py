@@ -206,7 +206,7 @@ treadmill_interp = pd.Series(
 
 # Interpolate pupil diameter to match capacitive elapsed_time timeline (if pupil data is available)
 if has_pupil_data and pupil_df is not None and frame_log_df is not None:
-    print(f"\n=== EARLY PUPIL PROCESSING FOR TIMELINE PLOT ===")
+
     
     # Quick column renaming for early processing
     if pupil_df.columns[0] != 'frame_number':
@@ -221,9 +221,14 @@ if has_pupil_data and pupil_df is not None and frame_log_df is not None:
         pupil_df.columns = pupil_df_columns
     
     # Quick frame alignment and timestamp mapping
+    
     frame_to_time_mapping = dict(zip(frame_log_df['frame_number'], frame_log_df['time_seconds']))
     pupil_df['aligned_frame_number'] = pupil_df['frame_number'] + 1
     pupil_df['time_seconds'] = pupil_df['aligned_frame_number'].map(frame_to_time_mapping)
+    
+    # Check alignment success
+    successful_alignments = pupil_df['time_seconds'].notna().sum()
+    total_pupil_frames = len(pupil_df)
     
     # Quick pupil diameter calculation
     high_likelihood_mask = (pupil_df['point_3_likelihood'] >= 0.80) & (pupil_df['point_7_likelihood'] >= 0.80)
@@ -236,28 +241,114 @@ if has_pupil_data and pupil_df is not None and frame_log_df is not None:
     
     # Interpolate pupil diameter
     valid_data_mask = pupil_df['time_seconds'].notna() & pupil_df['pupil_diameter'].notna()
+    
     if valid_data_mask.sum() > 1:
         pupil_time_valid = pupil_df.loc[valid_data_mask, 'time_seconds'].values
         pupil_diameter_valid = pupil_df.loc[valid_data_mask, 'pupil_diameter'].values
         
+        # CRITICAL FIX: Sort pupil data by timestamp (required for np.interp)
+        sort_indices = np.argsort(pupil_time_valid)
+        pupil_time_valid = pupil_time_valid[sort_indices]
+        pupil_diameter_valid = pupil_diameter_valid[sort_indices]
+        
+
+        
+        # Create interpolated series (now with sorted data)
+        interpolated_values = np.interp(
+            capacitive_df['elapsed_time'],
+            pupil_time_valid,
+            pupil_diameter_valid,
+            left=np.nan,
+            right=np.nan
+        )
+        
+        # Check interpolation success
+        initial_valid_interpolations = np.sum(~np.isnan(interpolated_values))
+        
+        # DETAILED INTERPOLATION DEBUGGING
+        cap_times = capacitive_df['elapsed_time'].values
+        print(f"Capacitive sample times (first 10): {cap_times[:10]}")
+        print(f"Pupil sample times (first 10): {pupil_time_valid[:10]}")
+        print(f"Capacitive sample times (last 10): {cap_times[-10:]}")
+        print(f"Pupil sample times (last 10): {pupil_time_valid[-10:]}")
+        
+        # Check for any direct overlaps
+        cap_min, cap_max = cap_times.min(), cap_times.max()
+        pupil_min, pupil_max = pupil_time_valid.min(), pupil_time_valid.max()
+        print(f"Actual overlap range should be: {max(cap_min, pupil_min):.2f} to {min(cap_max, pupil_max):.2f}")
+        
+        # Check data types
+        print(f"Capacitive times dtype: {cap_times.dtype}, Pupil times dtype: {pupil_time_valid.dtype}")
+        
+        # Test interpolation on a small subset to see what happens
+        test_cap_times = cap_times[cap_times >= pupil_min][:100]  # First 100 cap times within pupil range
+        if len(test_cap_times) > 0:
+            test_interp = np.interp(test_cap_times, pupil_time_valid, pupil_diameter_valid, left=np.nan, right=np.nan)
+            test_valid = np.sum(~np.isnan(test_interp))
+            print(f"Test interpolation on {len(test_cap_times)} cap times within pupil range: {test_valid} successful")
+        else:
+            print("No capacitive times found within pupil range!")
+        
+        # Create interpolated series
+        interpolated_values = np.interp(
+            capacitive_df['elapsed_time'],
+            pupil_time_valid,
+            pupil_diameter_valid,
+            left=np.nan,
+            right=np.nan
+        )
+        
+        # Check interpolation success before gap removal
+        initial_valid_interpolations = np.sum(~np.isnan(interpolated_values))
+        print(f"Initial successful interpolations: {initial_valid_interpolations}/{len(capacitive_df)}")
+        
+        # Additional debugging: check which specific time ranges failed
+        if initial_valid_interpolations == 0:
+            print("DEBUGGING: Zero interpolations succeeded!")
+            print(f"Are pupil times sorted? {np.array_equal(pupil_time_valid, np.sort(pupil_time_valid))}")
+            print(f"Are capacitive times sorted? {np.array_equal(cap_times, np.sort(cap_times))}")
+            
+            # Check for NaN or infinite values
+            print(f"Pupil times contain NaN: {np.isnan(pupil_time_valid).any()}")
+            print(f"Pupil times contain inf: {np.isinf(pupil_time_valid).any()}")
+            print(f"Capacitive times contain NaN: {np.isnan(cap_times).any()}")
+            print(f"Capacitive times contain inf: {np.isinf(cap_times).any()}")
+            
+            # Try manual interpolation for a single point to diagnose
+            mid_cap_time = cap_times[len(cap_times)//2]
+            print(f"Testing manual interpolation for cap time {mid_cap_time:.2f}")
+            if pupil_min <= mid_cap_time <= pupil_max:
+                manual_interp = np.interp(mid_cap_time, pupil_time_valid, pupil_diameter_valid)
+                print(f"Manual interpolation result: {manual_interp}")
+            else:
+                print(f"Cap time {mid_cap_time:.2f} outside pupil range {pupil_min:.2f}-{pupil_max:.2f}")
+        
+        # Remove interpolation across any gap larger than 1 second
+        max_gap = 1.0  # More conservative gap threshold
+        for i in range(len(pupil_time_valid) - 1):
+            gap_size = pupil_time_valid[i + 1] - pupil_time_valid[i]
+            if gap_size > max_gap:
+                gap_start = pupil_time_valid[i]
+                gap_end = pupil_time_valid[i + 1]
+                gap_mask = (capacitive_df['elapsed_time'] > gap_start) & (capacitive_df['elapsed_time'] < gap_end)
+                interpolated_values[gap_mask] = np.nan
+        
         pupil_diameter_interp = pd.Series(
-            data=np.interp(
-                capacitive_df['elapsed_time'],
-                pupil_time_valid,
-                pupil_diameter_valid,
-                left=np.nan,
-                right=np.nan
-            ),
+            data=interpolated_values,
             index=capacitive_df['elapsed_time']
         )
-        print(f"Early pupil interpolation successful for timeline plot")
+
     else:
         pupil_diameter_interp = pd.Series(np.nan, index=capacitive_df['elapsed_time'])
-        print(f"Warning: Insufficient pupil data for early interpolation")
+        print(f"ERROR: Insufficient pupil data for interpolation. Valid mask sum: {valid_data_mask.sum()}")
+        if valid_data_mask.sum() == 0:
+            print("No frames have both valid timestamps and valid pupil diameter")
+        elif valid_data_mask.sum() == 1:
+            print("Only 1 frame has both valid timestamps and valid pupil diameter - need at least 2 for interpolation")
     
     # --- Correlation Analysis between Treadmill Speed and Pupil Diameter ---
     if pupil_diameter_interp is not None and not pupil_diameter_interp.isna().all():
-        print(f"\n=== TREADMILL SPEED vs PUPIL DIAMETER CORRELATION ===")
+
         
         # Get data where both measurements are valid (not NaN)
         treadmill_values = treadmill_interp.values
@@ -274,38 +365,13 @@ if has_pupil_data and pupil_df is not None and frame_log_df is not None:
             # Calculate Pearson correlation coefficient
             correlation_coeff = np.corrcoef(treadmill_valid, pupil_valid)[0, 1]
             
-            # Calculate p-value using scipy if available
+            # Calculate correlation using scipy if available
             try:
                 from scipy.stats import pearsonr
                 correlation_coeff_scipy, p_value = pearsonr(treadmill_valid, pupil_valid)
-                print(f"Pearson correlation coefficient: {correlation_coeff_scipy:.4f}")
-                print(f"P-value: {p_value:.6f}")
-                if p_value < 0.001:
-                    print("*** Highly significant correlation (p < 0.001)")
-                elif p_value < 0.01:
-                    print("** Significant correlation (p < 0.01)")
-                elif p_value < 0.05:
-                    print("* Significant correlation (p < 0.05)")
-                else:
-                    print("Not statistically significant (p ≥ 0.05)")
+                correlation_coeff = correlation_coeff_scipy
             except ImportError:
-                print(f"Pearson correlation coefficient: {correlation_coeff:.4f}")
-                print("(scipy not available for p-value calculation)")
-            
-            print(f"Number of valid data points: {n_valid_points:,}")
-            print(f"Correlation strength interpretation:")
-            abs_corr = abs(correlation_coeff)
-            if abs_corr >= 0.7:
-                strength = "Strong"
-            elif abs_corr >= 0.3:
-                strength = "Moderate" 
-            elif abs_corr >= 0.1:
-                strength = "Weak"
-            else:
-                strength = "Very weak"
-            
-            direction = "positive" if correlation_coeff > 0 else "negative"
-            print(f"  - {strength} {direction} correlation (r = {correlation_coeff:.4f})")
+                pass
             
             # Create correlation scatter plot
             plt.figure(figsize=(10, 8))
@@ -332,9 +398,7 @@ if has_pupil_data and pupil_df is not None and frame_log_df is not None:
             save_figure(plt.gcf(), "treadmill_pupil_correlation")
             plt.show()
             
-        else:
-            print(f"Insufficient valid data points for correlation analysis: {n_valid_points}")
-            print("Need at least 10 overlapping data points")
+
     
     else:
         print("Pupil diameter data not available for correlation analysis")
@@ -601,7 +665,7 @@ if has_pupil_data and pupil_diameter_interp is not None:
     pupil_val = pupil_diameter_interp.values
     
     # Use larger window for pupil analysis (10 seconds before and after)
-    window_pupil = 10
+    window_pupil = 5
     
     pupil_windows = []
     for rt in reward_times_flat:
@@ -637,7 +701,7 @@ reward_event_times_flat = pd.to_numeric(trial_log_df['reward_event'], errors='co
 reward_event_times_flat = reward_event_times_flat[~np.isnan(reward_event_times_flat)]
 
 window_event = 5  # seconds before and after for capacitive analysis
-window_event_pupil = 10  # seconds before and after for pupil analysis
+window_event_pupil = 5  # seconds before and after for pupil analysis
 
 # Ensure reward_event_times_flat is a numpy array of floats
 reward_event_times_flat = np.array(reward_event_times_flat, dtype=float)
@@ -727,7 +791,7 @@ plt.show()
 
 # --- Combined Pupil Diameter Analysis: Reward Zone and Reward Events ---
 if has_pupil_data and pupil_diameter_interp is not None:
-    print(f"\n=== COMBINED PUPIL DIAMETER REWARD ANALYSIS ===")
+
     
     # Get interpolated pupil diameter as numpy array
     pupil_val = pupil_diameter_interp.values
@@ -766,7 +830,7 @@ if has_pupil_data and pupil_diameter_interp is not None:
         axs[0].set_ylabel('Pupil Diameter (pixels)')
         axs[0].set_title('Pupil Diameter Aligned to Reward Zone Onset')
         axs[0].legend()
-        axs[0].set_xlim(-10, 10)
+        axs[0].set_xlim(-5, 5)
         axs[0].set_ylim(bottom=0)
         axs[0].spines['top'].set_visible(False)
         axs[0].spines['right'].set_visible(False)
@@ -780,7 +844,7 @@ if has_pupil_data and pupil_diameter_interp is not None:
     axs[1].set_ylabel('Pupil Diameter (pixels)')
     axs[1].set_title('Pupil Diameter Aligned to Reward Events')
     axs[1].legend()
-    axs[1].set_xlim(-10, 10)
+    axs[1].set_xlim(-5, 5)
     axs[1].set_ylim(bottom=0)
     axs[1].spines['top'].set_visible(False)
     axs[1].spines['right'].set_visible(False)
@@ -788,13 +852,13 @@ if has_pupil_data and pupil_diameter_interp is not None:
     
     # Set consistent x-axis formatting
     for ax in axs:
-        ax.set_xticks(np.arange(-10, 11, 2))
+        ax.set_xticks(np.arange(-5, 6, 1))
     
     plt.tight_layout()
     save_figure(fig, "pupil_diameter_reward_combined")
     plt.show()
     
-    print(f"Combined pupil reward analysis complete: {n_rewards_pupil} zone entries, {n_rewards_pupil_event} reward events")
+
 
 
 # --- Probe Event Analysis: Treadmill Speed and Capacitive Value aligned to probe events ---
@@ -1559,6 +1623,11 @@ if has_pupil_data and pupil_df is not None and frame_log_df is not None:
     if valid_data_mask.sum() > 1:  # Need at least 2 points for interpolation
         pupil_time_valid = pupil_df.loc[valid_data_mask, 'time_seconds'].values
         pupil_diameter_valid = pupil_df.loc[valid_data_mask, 'pupil_diameter'].values
+        
+        # CRITICAL FIX: Sort pupil data by timestamp (required for np.interp) - same as timeline plot section
+        sort_indices = np.argsort(pupil_time_valid)
+        pupil_time_valid = pupil_time_valid[sort_indices]
+        pupil_diameter_valid = pupil_diameter_valid[sort_indices]
         
         # Interpolate to capacitive timeline
         pupil_diameter_interp = pd.Series(
