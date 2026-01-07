@@ -56,7 +56,7 @@ class TCPDataServer:
         
         try:
             import json
-            level_path = os.path.join(os.getcwd(), 'Levels', level_file)
+            level_path = os.path.join(os.getcwd(), self.levels_folder, level_file)
             with open(level_path, 'r') as f:
                 level_data = json.load(f)
                 threshold = level_data.get('reward_threshold', float('inf'))
