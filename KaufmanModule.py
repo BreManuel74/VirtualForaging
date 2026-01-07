@@ -67,11 +67,9 @@ class Stopwatch:
         if self.running:
             return time.time() - self.start_time
         return self.elapsed_time
-
-
+    
 # Create a global stopwatch instance shared across the app
 global_stopwatch = Stopwatch()
-
 
 class TrialLogging:
     """
@@ -153,7 +151,6 @@ class TrialLogging:
     def log_reward_event(self, t: float) -> None:
         self._append_value('reward_event', float(t))
 
-
 class DataGenerator:
     """
     A class to generate Gaussian data based on configuration parameters.
@@ -192,7 +189,6 @@ class DataGenerator:
         else:
             data = np.random.normal(loc=loc, scale=scale, size=size)
             return np.round(data)
-
 
 class TextureSwapper:
     """
@@ -355,7 +351,6 @@ class TextureSwapper:
             # Schedule the next texture change
             self.schedule_texture_change()
 
-
 class RewardOrPuff(FSM):
     """
     FSM to manage the reward or puff state.
@@ -470,7 +465,6 @@ class RewardOrPuff(FSM):
             self.request('Neutral')
 
         return Task.done
-
 
 class RewardCalculator:
     """

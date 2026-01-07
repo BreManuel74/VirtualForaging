@@ -3,7 +3,8 @@ import cv2
 import numpy as np
 import pymmcore_plus
 import time
-from Phases.final import Stopwatch
+from pathlib import Path
+from final import Stopwatch
 
 def main():
     global_stopwatch = Stopwatch()
@@ -13,6 +14,9 @@ def main():
     video_dir = os.environ.get("OUTPUT_DIR")
     fps = 20
     stop_file = "stop_recording.flag"
+    
+    # MJPEG codec is used instead of H264 for reliability
+    # No external DLL dependencies needed
 
     # Initialize the Micro-Manager core
     mmc = pymmcore_plus.CMMCorePlus()
@@ -28,7 +32,9 @@ def main():
     out_filename = os.path.join(video_dir, f"{int(time.time())}pupil_cam.avi")
     frame_width = int(mmc.getImageWidth())
     frame_height = int(mmc.getImageHeight())
-    fourcc = cv2.VideoWriter_fourcc(*'XVID')
+    
+    # Use MJPEG - works reliably, no external dependencies, good quality
+    fourcc = cv2.VideoWriter_fourcc(*'MJPG')
     video_writer = cv2.VideoWriter(out_filename, fourcc, fps, (frame_width, frame_height), isColor=False)
 
     # Prepare text log file
