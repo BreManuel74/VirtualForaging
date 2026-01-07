@@ -2,7 +2,7 @@
 # Virtual Foraging Hallway
 
 
- Renders infinite corridor using Panda3D for behavioral neuroscience research
+ Renders infinite corridor using Panda3D for animal behavioral research
 
 # Current Features:
 - JSON parameterization for highly configurable level creation
