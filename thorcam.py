@@ -4,7 +4,7 @@ import numpy as np
 import pymmcore_plus
 import time
 from pathlib import Path
-from stopping_control import Stopwatch
+from global_stopwatch import Stopwatch
 
 def main():
     global_stopwatch = Stopwatch()
