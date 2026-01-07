@@ -510,6 +510,8 @@ class KaufmanGUI:
         self.reward_count = tk.StringVar(value="0")
         self.session_active = False  # Track if a session is active
         self.selected_progress_report = tk.StringVar()  # Track selected progress report
+        self.levels_folder = tk.StringVar(value="Levels")  # Default levels folder
+        self.phase_file = tk.StringVar()  # Selected phase file from hallway_types
         
         # Initialize list for session-sensitive widgets before creating frames
         self.session_sensitive_widgets = []
@@ -570,9 +572,26 @@ class KaufmanGUI:
         self.update_progress_report_list()
         self.session_sensitive_widgets.append(self.progress_report_combobox)
         
+        # Levels Folder
+        ttk.Label(setup_frame, text="Levels Folder:", style="Custom.TLabel").grid(row=5, column=0, sticky=tk.W)
+        levels_frame = ttk.Frame(setup_frame)
+        levels_frame.grid(row=5, column=1, sticky=(tk.W, tk.E))
+        levels_entry = ttk.Entry(levels_frame, textvariable=self.levels_folder, style="TEntry")
+        levels_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        browse_levels_btn = ttk.Button(levels_frame, text="Browse", command=self.browse_levels_folder)
+        browse_levels_btn.pack(side=tk.RIGHT)
+        self.session_sensitive_widgets.extend([levels_entry, browse_levels_btn])
+        
+        # Phase File Selection
+        ttk.Label(setup_frame, text="Phase File:", style="Custom.TLabel").grid(row=6, column=0, sticky=tk.W)
+        self.phase_file_combobox = ttk.Combobox(setup_frame, textvariable=self.phase_file, state="readonly")
+        self.phase_file_combobox.grid(row=6, column=1, sticky=(tk.W, tk.E))
+        self.update_phase_file_list()
+        self.session_sensitive_widgets.append(self.phase_file_combobox)
+        
         # Start Button
         self.start_button = ttk.Button(setup_frame, text="Start Session", command=self.start_session)
-        self.start_button.grid(row=5, column=0, columnspan=2, pady=10)
+        self.start_button.grid(row=7, column=0, columnspan=2, pady=10)
         self.session_sensitive_widgets.append(self.start_button)
         
         # Configure grid
@@ -751,6 +770,38 @@ class KaufmanGUI:
         dir_path = filedialog.askdirectory(initialdir=self.output_dir.get())
         if dir_path:
             self.output_dir.set(dir_path)
+    
+    def browse_levels_folder(self):
+        from tkinter import filedialog
+        dir_path = filedialog.askdirectory(initialdir=os.getcwd(), title="Select Levels Folder")
+        if dir_path:
+            # Convert to relative path if within current directory
+            try:
+                rel_path = os.path.relpath(dir_path, os.getcwd())
+                self.levels_folder.set(rel_path)
+            except ValueError:
+                # If on different drive, use absolute path
+                self.levels_folder.set(dir_path)
+    
+    def update_phase_file_list(self):
+        """Update the list of available phase files from local directory."""
+        try:
+            # Get all Python files in the current directory
+            phase_files = [f for f in os.listdir(os.getcwd()) if f.endswith('.py')]
+            
+            if phase_files:
+                self.phase_file_combobox['values'] = phase_files
+                if phase_files:
+                    # Try to select stopping_control.py by default if it exists
+                    if 'stopping_control.py' in phase_files:
+                        self.phase_file.set('stopping_control.py')
+                    else:
+                        self.phase_file.set(phase_files[0])
+            else:
+                self.phase_file_combobox['values'] = []
+                self.log_to_console("No phase files found in local directory")
+        except Exception as e:
+            self.log_to_console(f"Error loading phase files: {str(e)}")
     
     def log_to_console(self, message):
         """Log a message to the console with optimal performance."""
@@ -1101,14 +1152,20 @@ class KaufmanGUI:
             messagebox.showerror("Error", "Please fill in all required fields")
             return
         
+        # Validate phase file selection
+        if not self.phase_file.get():
+            messagebox.showerror("Error", "Please select a phase file")
+            return
+        
         # Determine the starting level from the progress report
         animal_name = self.animal_name.get()
         report_file = f"{animal_name}_log.csv"
         starting_level, starting_reward_count = self.get_starting_level_from_report(report_file)
         
-        # Get file paths
-        level_file = os.path.join(os.getcwd(), 'Levels', starting_level)
-        phase_file = os.path.join(os.getcwd(), 'stopping_control.py')
+        # Get file paths using selected folders
+        levels_folder = self.levels_folder.get()
+        level_file = os.path.join(os.getcwd(), levels_folder, starting_level)
+        phase_file = os.path.join(os.getcwd(), self.phase_file.get())
         
         # Log the run
         self.log_run(animal_name, level_file, self.batch_id.get())
@@ -1117,8 +1174,9 @@ class KaufmanGUI:
         level_file_path = level_file.replace(os.getcwd() + os.sep, '').replace('\\', '/')
         
         try:
-            # Start TCP server
-            self.tcp_server = TCPDataServer()
+            # Start TCP server with selected levels folder
+            levels_folder = self.levels_folder.get()
+            self.tcp_server = TCPDataServer(levels_folder=levels_folder)
             server_port = self.tcp_server.start_server()
             
             # Override the callback scheduler to use Tkinter's thread-safe after() method
