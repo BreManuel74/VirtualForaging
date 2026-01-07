@@ -78,8 +78,18 @@ class TCPDataServer:
         """Get list of available level files sorted by their numeric order."""
         try:
             levels_path = os.path.join(os.getcwd(), self.levels_folder)
+            if not os.path.exists(levels_path):
+                print(f"Warning: Levels folder '{self.levels_folder}' does not exist")
+                self.ordered_levels = []
+                return []
+            
             # Get all JSON files
             level_files = [f for f in os.listdir(levels_path) if f.endswith('.json')]
+            
+            if not level_files:
+                print(f"Warning: No level files found in '{self.levels_folder}'")
+                self.ordered_levels = []
+                return []
             
             #print(f"Found level files: {level_files}")  # Debug print
             
@@ -786,27 +796,34 @@ class KaufmanGUI:
     def update_phase_file_list(self):
         """Update the list of available phase files from local directory."""
         try:
-            # Get all Python files in the current directory
-            phase_files = [f for f in os.listdir(os.getcwd()) if f.endswith('.py')]
+            # Get all Python files in the current directory that start with 'hallway'
+            phase_files = [f for f in os.listdir(os.getcwd()) 
+                          if f.startswith('hallway') and f.endswith('.py')]
             
             if phase_files:
                 self.phase_file_combobox['values'] = phase_files
+                # Select the first phase file by default
                 if phase_files:
-                    # Try to select stopping_control.py by default if it exists
-                    if 'stopping_control.py' in phase_files:
-                        self.phase_file.set('stopping_control.py')
-                    else:
-                        self.phase_file.set(phase_files[0])
+                    self.phase_file.set(phase_files[0])
+                self.log_to_console(f"Found {len(phase_files)} phase file(s) in local directory")
             else:
                 self.phase_file_combobox['values'] = []
-                self.log_to_console("No phase files found in local directory")
+                self.phase_file.set('')
+                self.log_to_console("WARNING: No phase files (hallway*.py) found in local directory")
         except Exception as e:
             self.log_to_console(f"Error loading phase files: {str(e)}")
+            self.phase_file_combobox['values'] = []
+            self.phase_file.set('')
     
     def log_to_console(self, message):
         """Log a message to the console with optimal performance."""
-        self.console.insert(tk.END, f"{message}\n")
-        self.console.see(tk.END)
+        # Check if console exists (may not exist during initialization)
+        if hasattr(self, 'console'):
+            self.console.insert(tk.END, f"{message}\n")
+            self.console.see(tk.END)
+        else:
+            # During initialization, just print to stdout
+            print(message)
         # Don't force updates - let Tkinter handle it naturally during idle time
         # This prevents blocking the UI thread
     
@@ -1157,15 +1174,42 @@ class KaufmanGUI:
             messagebox.showerror("Error", "Please select a phase file")
             return
         
+        # Validate that phase file exists
+        phase_file = os.path.join(os.getcwd(), self.phase_file.get())
+        if not os.path.exists(phase_file):
+            messagebox.showerror("Error", f"Phase file '{self.phase_file.get()}' does not exist")
+            return
+        
+        # Validate that phase file is a Python file
+        if not phase_file.endswith('.py'):
+            messagebox.showerror("Error", "Phase file must be a Python (.py) file")
+            return
+        
+        # Validate levels folder
+        levels_folder = self.levels_folder.get()
+        levels_folder_path = os.path.join(os.getcwd(), levels_folder)
+        if not os.path.exists(levels_folder_path):
+            messagebox.showerror("Error", f"Levels folder '{levels_folder}' does not exist")
+            return
+        
+        # Check if levels folder has any JSON files
+        level_files = [f for f in os.listdir(levels_folder_path) if f.endswith('.json')]
+        if not level_files:
+            messagebox.showerror("Error", f"No level files (.json) found in '{levels_folder}' folder")
+            return
+        
         # Determine the starting level from the progress report
         animal_name = self.animal_name.get()
         report_file = f"{animal_name}_log.csv"
         starting_level, starting_reward_count = self.get_starting_level_from_report(report_file)
         
-        # Get file paths using selected folders
-        levels_folder = self.levels_folder.get()
+        # Validate that the starting level exists in the selected folder
         level_file = os.path.join(os.getcwd(), levels_folder, starting_level)
-        phase_file = os.path.join(os.getcwd(), self.phase_file.get())
+        if not os.path.exists(level_file):
+            messagebox.showerror("Error", 
+                f"Starting level '{starting_level}' not found in '{levels_folder}' folder.\n"
+                f"Available levels: {', '.join(sorted(level_files)[:5])}{'...' if len(level_files) > 5 else ''}")
+            return
         
         # Log the run
         self.log_run(animal_name, level_file, self.batch_id.get())
