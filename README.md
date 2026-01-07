@@ -5,7 +5,7 @@
  Renders infinite corridor using Panda3D for behavioral neuroscience research
 
 # Current Features:
-- JSON parameterization for level creation
+- JSON parameterization for highly configurable level creation
 - Treadmill, capacitive sensor, and trial log data logging to CSV
 - Customizable textures for corridor walls
 - Both segment recycling and infinite rendering hallway options
@@ -20,4 +20,5 @@
 - Live GUI for dynamic level control and monitoring
 - Automatic level progression via configurable level parameters
 - Analysis scripts for output CSV data files
+- GUI allows for mixed and matched hallway-level combinations
 
