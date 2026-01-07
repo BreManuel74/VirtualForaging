@@ -951,6 +951,11 @@ class KaufmanGUI:
             self.log_to_console(f"Error killing process tree: {str(e)}")
 
     def stop_session(self):
+        # Prevent stopping if no session is active
+        if not self.session_active:
+            messagebox.showwarning("No Active Session", "There is no active session to stop.")
+            return
+        
         if messagebox.askyesno("Confirm Stop", "Are you sure you want to stop the current session?"):
             self.log_to_console("\nShutting down...")
             
@@ -1103,7 +1108,7 @@ class KaufmanGUI:
         
         # Get file paths
         level_file = os.path.join(os.getcwd(), 'Levels', starting_level)
-        phase_file = os.path.join(os.getcwd(), 'final.py')
+        phase_file = os.path.join(os.getcwd(), 'stopping_control.py')
         
         # Log the run
         self.log_run(animal_name, level_file, self.batch_id.get())
