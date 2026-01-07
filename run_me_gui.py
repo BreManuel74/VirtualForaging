@@ -741,7 +741,7 @@ class KaufmanGUI:
                         reward_count = 0
                     
                     # Validate that the level file exists
-                    level_path = os.path.join(os.getcwd(), 'Levels', level_name)
+                    level_path = os.path.join(os.getcwd(), self.levels_folder.get(), level_name)
                     if os.path.exists(level_path):
                         self.log_to_console(f"Resuming from last level: {level_name} with {reward_count} rewards")
                         return (level_name, reward_count)
@@ -1253,6 +1253,7 @@ class KaufmanGUI:
             env["OUTPUT_DIR"] = self.output_dir.get()
             env["BATCH_ID"] = self.batch_id.get()
             env["TEENSY_PORT"] = self.teensy_port.get()
+            env["LEVELS_FOLDER"] = levels_folder  # Pass the selected levels folder to the game
             
             # Start the Panda3D game as a subprocess
             self.process = subprocess.Popen([sys.executable, phase_file], env=env)
