@@ -4,11 +4,20 @@ import numpy as np
 import pymmcore_plus
 import time
 from pathlib import Path
-from final import Stopwatch
+from stopping_control import Stopwatch
 
 def main():
     global_stopwatch = Stopwatch()
-    global_stopwatch.start()
+    
+    # Use the start time from the main process if available
+    start_time_str = os.environ.get("STOPWATCH_START_TIME")
+    if start_time_str:
+        global_stopwatch.start_time = float(start_time_str)
+        global_stopwatch.running = True
+        print(f"Synchronized with main process stopwatch (start time: {global_stopwatch.start_time})")
+    else:
+        global_stopwatch.start()
+        print("Warning: No shared stopwatch time found, starting independent stopwatch")
 
     camera_device = "ThorCam"
     video_dir = os.environ.get("OUTPUT_DIR")

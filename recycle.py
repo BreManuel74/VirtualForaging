@@ -1523,6 +1523,9 @@ class MousePortal(ShowBase):
 
         # Start the stopwatch
         global_stopwatch.start()
+        
+        # Pass the stopwatch start time to the subprocess via environment variable
+        os.environ["STOPWATCH_START_TIME"] = str(global_stopwatch.start_time)
 
         # Start the video recording subprocess
         recorder_script = self.cfg.get("recorder_script_path", "thorcam.py")
