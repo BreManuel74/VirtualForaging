@@ -226,6 +226,9 @@ class Corridor:
 
         self.current_segment_flag = self.get_segment_flag(self.right_segments[0])
 
+        self.reward_zone_active = False
+        self.stay_zone_reward_probability = config.get("stay_zone_reward_probability", 1)  # Default to 100% if not specified
+
     def build_initial_segments(self) -> None:
         """ 
         Build the initial corridor segments centered around the camera.
@@ -1445,14 +1448,15 @@ class MousePortal(ShowBase):
             meets_time_requirement = current_time >= self.enter_stay_time + (self.reward_time * self.zone_length)
             
             if (self.segments_with_stay_texture <= self.zone_length and 
-                self.fsm.state != 'Reward' and 
+                self.fsm.state != 'Reward' and
+                self.corridor.reward_zone_active == True and 
                 (speed_zero_duration or meets_time_requirement)):  # Either condition can trigger reward
                 #print("Requesting Reward state")
                 self.fsm.request('Reward')
                 self.active_stay_zone = False  # Reset stay zone flag after requesting reward
 
         elif self.current_texture == self.corridor.go_texture and self.active_puff_zone == True:
-            print(self.zone_length)
+            #print(self.zone_length)
             # Check if speed has been 0 for set time
             speed_zero_duration = (self.speed_zero_start_time is not None and 
                                        current_time >= self.speed_zero_start_time + self.puff_zero_speed_time)
@@ -1462,7 +1466,7 @@ class MousePortal(ShowBase):
             if (self.segments_with_go_texture <= self.zone_length and 
                 self.fsm.state != 'Puff' and 
                 (speed_zero_duration or meets_time_requirement)):
-                print("Requesting Puff state")
+                #print("Requesting Puff state")
                 self.fsm.request('Puff')
                 self.active_puff_zone = False  # Reset puff zone flag after requesting puff
 

@@ -1,5 +1,5 @@
 """
-KaufmanModule: Shared classes for MousePortal
+KaufmanModule: Shared classes for Virtual Foraging Task
 
 Contains:
 - TrialLogging
@@ -164,6 +164,12 @@ class TextureSwapper:
         # Log selected texture
         c.texture_history = np.append(c.texture_history, str(selected_texture))
         c.trial_logger.log_texture_history(str(selected_texture))
+
+        if selected_texture == c.stop_texture:
+            c.reward_zone_active = True if random.random() < c.stay_zone_reward_probability else False
+            print(f"Reward Zone Active: {c.reward_zone_active}")
+
+        # Log if reward probability was true or false
 
     # Choose distribution based on selected texture
         stay_or_go_data = c.rounded_go_data if selected_texture == c.go_texture else c.rounded_stay_data
