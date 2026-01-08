@@ -175,7 +175,7 @@ class TextureSwapper:
             # Log if reward probability was true or false
             c.trial_logger.log_stay_zone_active_state(c.reward_zone_active)
 
-    # Choose distribution based on selected texture
+        # Choose distribution based on selected texture
         stay_or_go_data = c.rounded_go_data if selected_texture == c.go_texture else c.rounded_stay_data
 
         # Determine length of special zone and side effects
@@ -202,6 +202,17 @@ class TextureSwapper:
                 c.apply_texture(middle_left[i], selected_texture)
                 c.apply_texture(middle_right[i], selected_texture)
                 c.set_segment_flag(middle_right[i], True)
+            if c.cave is True:
+                # Add cave texture to end of go zone
+                cave_segments = 13 - c.segments_until_revert
+                cave_left, cave_right = c.get_forward_segments_far(cave_segments)
+                for i in range(min(len(cave_left), len(cave_right))):
+                    c.apply_texture(cave_left[i], c.cave_texture)
+                    c.apply_texture(cave_right[i], c.cave_texture)
+                cave_floor, cave_ceiling = c.get_forward_segments_far_floor_and_ceiling(cave_segments)
+                for i in range(min(len(cave_floor), len(cave_ceiling))):
+                    c.apply_texture(cave_floor[i], c.cave_texture)
+                    c.apply_texture(cave_ceiling[i], c.cave_texture)
 
         return Task.done
     
@@ -247,6 +258,8 @@ class TextureSwapper:
             c.apply_texture(probe_left[i], selected_temporary_texture)
             c.apply_texture(probe_right[i], selected_temporary_texture)
 
+        #print(f"Applied probe texture: {selected_temporary_texture}")
+
         # Log probe texture and time
         c.probe_texture_history = np.append(c.probe_texture_history, str(selected_temporary_texture))
         c.trial_logger.log_probe_texture(str(selected_temporary_texture))
@@ -267,6 +280,11 @@ class TextureSwapper:
         for i in range(probe_segments):
             c.apply_texture(probe_left[i], c.right_wall_texture)
             c.apply_texture(probe_right[i], c.right_wall_texture)
+        floor, ceiling = c.get_forward_segments_far_floor_and_ceiling(24)
+        number_of_segments = min(len(floor), len(ceiling))
+        for i in range(number_of_segments):
+            c.apply_texture(floor[i], c.floor_texture)
+            c.apply_texture(ceiling[i], c.ceiling_texture)
         return Task.done
 
     def exit_special_zones(self, task=None):

@@ -192,6 +192,7 @@ class Corridor:
         self.ceiling_texture: str = config["ceiling_texture"]
         self.floor_texture: str = config["floor_texture"]
         self.go_texture: str = config["go_texture"]
+        self.cave_texture: str = config.get("cave_texture", "assets/black.png")  # Default cave texture
         self.neutral_stim_1 = config["neutral_stim_1"]
         self.neutral_stim_2 = config["neutral_stim_2"]
         self.neutral_stim_3 = config["neutral_stim_3"]
@@ -239,6 +240,8 @@ class Corridor:
         ]
         if self.probe_lock == True:
             self.locked_probe = random.choice(probe_textures)
+
+        self.cave = config.get("cave", False)  # Default to False if not specified
 
     def build_initial_segments(self) -> None:
         """ 
@@ -438,6 +441,18 @@ class Corridor:
         # print("Right wall segments:", [round(seg.getY(), 2) for seg in selected_right])
         
         return selected_left, selected_right
+    
+    def get_forward_segments_far_floor_and_ceiling(self, count: int) -> tuple[list[NodePath], list[NodePath]]:
+        """Get the specified number of floor and ceiling segments ahead of the camera."""
+        # Sort both floor and ceiling segments
+        sorted_floor = sorted(self.floor_segments, key=lambda x: x.getY())
+        sorted_ceiling = sorted(self.ceiling_segments, key=lambda x: x.getY())
+        
+        # Take the furthest count floor and ceiling segments normally
+        selected_floor = sorted_floor[-count:]
+        selected_ceiling = sorted_ceiling[-count:]
+        
+        return selected_floor, selected_ceiling
     
     def get_middle_segments(self, count: int) -> tuple[list[NodePath], list[NodePath]]:
         """Get segments centered around the player, using left wall Y positions as reference."""
@@ -1371,7 +1386,7 @@ class MousePortal(ShowBase):
                     self.corridor.set_segment_flag(node, False)
 
             # If we re-enter a special zone (GO or STOP) from neutral, allow a new exit log later
-            if (self.prev_current_texture == self.corridor.right_wall_texture
+            if ((self.prev_current_texture == self.corridor.right_wall_texture or self.prev_current_texture == self.corridor.cave_texture)
                 and (self.current_texture == self.corridor.go_texture or self.current_texture == self.corridor.stop_texture)
                 and self.exit == False):
                 self.exit = True
@@ -1386,8 +1401,9 @@ class MousePortal(ShowBase):
                 
 
             if ((self.prev_current_texture == self.corridor.go_texture or self.prev_current_texture == self.corridor.stop_texture)
-                and self.current_texture == self.corridor.right_wall_texture and self.exit == True):
+                and (self.current_texture == self.corridor.right_wall_texture or self.current_texture == self.corridor.cave_texture) and self.exit == True):
                 if self.reentry_pending:
+                    print("self.reentry pending is true")
                     # Log revert time locally without triggering probe again
                     elapsed_time = global_stopwatch.get_elapsed_time()
                     self.texture_revert_history = np.append(self.texture_revert_history, round(elapsed_time, 2))
@@ -1399,6 +1415,7 @@ class MousePortal(ShowBase):
                 else:
                     # First exit for this zone: use centralized handler (may schedule probe)
                     self.corridor.texture_swapper.exit_special_zones()
+                    #print("called exit_special_zones()")
                 #print("Exited a zone")
                 self.reentry_pending = False
                 self.exit = False
