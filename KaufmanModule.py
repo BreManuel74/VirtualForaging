@@ -460,6 +460,7 @@ class RewardOrPuff(FSM):
                     if current_tex == self.base.corridor.go_texture:
                         signal = int(f"1{self.puff_duration}")
                         self.base.serial_output.send_signal(signal)
+                        self.trial_logger.log_puff_event(round(global_stopwatch.get_elapsed_time(), 2))
                         #print("puff!")
                         self.base.doMethodLaterStopwatch(self.puff_to_neutral_time, self._transitionToNeutral, 'return-to-neutral')
                         return Task.done
