@@ -44,6 +44,7 @@ class TrialLogging:
             'texture_history': np.full(max_trials, np.nan, dtype=object),
             'go_texture_change_time': np.full(max_trials, np.nan),
             'stay_texture_change_time': np.full(max_trials, np.nan),
+            'stay_zone_active_state': pd.array([pd.NA] * max_trials, dtype='boolean'),
             'segments_until_revert': np.full(max_trials, np.nan),
             'go_texture_revert_time': np.full(max_trials, np.nan),
             'stay_texture_revert_time': np.full(max_trials, np.nan),
@@ -107,6 +108,9 @@ class TrialLogging:
     def log_reward_event(self, t: float) -> None:
         self._append_value('reward_event', float(t))
 
+    def log_stay_zone_active_state(self, state: bool) -> None:
+        self._append_value('stay_zone_active_state', state)
+
 class DataGenerator:
     """
     A class to generate Gaussian data based on configuration parameters.
@@ -168,8 +172,8 @@ class TextureSwapper:
         if selected_texture == c.stop_texture:
             c.reward_zone_active = True if random.random() < c.stay_zone_reward_probability else False
             print(f"Reward Zone Active: {c.reward_zone_active}")
-
-        # Log if reward probability was true or false
+            # Log if reward probability was true or false
+            c.trial_logger.log_stay_zone_active_state(c.reward_zone_active)
 
     # Choose distribution based on selected texture
         stay_or_go_data = c.rounded_go_data if selected_texture == c.go_texture else c.rounded_stay_data
