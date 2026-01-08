@@ -229,6 +229,17 @@ class Corridor:
         self.reward_zone_active = False
         self.stay_zone_reward_probability = config.get("stay_zone_reward_probability", 1)  # Default to 100% if not specified
 
+        self.probe_lock = config.get("probe_lock", False)  # Default to False if not specified
+        self.locked_probe = None
+        probe_textures = [
+        self.neutral_stim_1,
+            self.neutral_stim_2,
+            self.neutral_stim_3,
+            self.neutral_stim_4,
+        ]
+        if self.probe_lock == True:
+            self.locked_probe = random.choice(probe_textures)
+
     def build_initial_segments(self) -> None:
         """ 
         Build the initial corridor segments centered around the camera.

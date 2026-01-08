@@ -171,7 +171,7 @@ class TextureSwapper:
 
         if selected_texture == c.stop_texture:
             c.reward_zone_active = True if random.random() < c.stay_zone_reward_probability else False
-            print(f"Reward Zone Active: {c.reward_zone_active}")
+            #print(f"Reward Zone Active: {c.reward_zone_active}")
             # Log if reward probability was true or false
             c.trial_logger.log_stay_zone_active_state(c.reward_zone_active)
 
@@ -204,6 +204,30 @@ class TextureSwapper:
                 c.set_segment_flag(middle_right[i], True)
 
         return Task.done
+    
+    def apply_probe_locked_texture(self, task=None):
+        """Temporarily change both walls to a single/non-random probe texture, then revert later"""
+        c= self.corridor
+
+        selected_temporary_texture = c.locked_probe
+         # Apply temporary texture to forward segments
+        probe_left, probe_right = c.get_forward_segments_far(12)
+        probe_segments = min(len(probe_left), len(probe_right))
+        for i in range(probe_segments):
+            c.apply_texture(probe_left[i], selected_temporary_texture)
+            c.apply_texture(probe_right[i], selected_temporary_texture)
+
+        # Log probe texture and time
+        c.probe_texture_history = np.append(c.probe_texture_history, str(selected_temporary_texture))
+        c.trial_logger.log_probe_texture(str(selected_temporary_texture))
+
+        elapsed_time = global_stopwatch.get_elapsed_time()
+        c.probe_time_history = np.append(c.probe_time_history, round(elapsed_time, 2))
+        c.trial_logger.log_probe_time(round(elapsed_time, 2))
+
+        # Schedule revert
+        c.base.doMethodLaterStopwatch(c.probe_duration, self.revert_probe_texture, "RevertProbeTexture")
+        return Task.done
 
     def apply_probe_texture(self, task=None):
         """Temporarily change both walls to a neutral/probe texture, then revert later."""
@@ -216,6 +240,13 @@ class TextureSwapper:
         ]
         selected_temporary_texture = random.choice(temporary_wall_textures)
 
+        # Apply temporary texture to forward segments
+        probe_left, probe_right = c.get_forward_segments_far(12)
+        probe_segments = min(len(probe_left), len(probe_right))
+        for i in range(probe_segments):
+            c.apply_texture(probe_left[i], selected_temporary_texture)
+            c.apply_texture(probe_right[i], selected_temporary_texture)
+
         # Log probe texture and time
         c.probe_texture_history = np.append(c.probe_texture_history, str(selected_temporary_texture))
         c.trial_logger.log_probe_texture(str(selected_temporary_texture))
@@ -223,13 +254,6 @@ class TextureSwapper:
         elapsed_time = global_stopwatch.get_elapsed_time()
         c.probe_time_history = np.append(c.probe_time_history, round(elapsed_time, 2))
         c.trial_logger.log_probe_time(round(elapsed_time, 2))
-
-        # Apply temporary texture to forward segments
-        probe_left, probe_right = c.get_forward_segments_far(12)
-        probe_segments = min(len(probe_left), len(probe_right))
-        for i in range(probe_segments):
-            c.apply_texture(probe_left[i], selected_temporary_texture)
-            c.apply_texture(probe_right[i], selected_temporary_texture)
 
         # Schedule revert
         c.base.doMethodLaterStopwatch(c.probe_duration, self.revert_probe_texture, "RevertProbeTexture")
@@ -275,8 +299,10 @@ class TextureSwapper:
         except Exception:
             c.trial_logger.log_go_texture_revert_time(round(elapsed_time, 2))
 
-        if c.probe and random.random() < c.probe_probability:
+        if c.probe and random.random() < c.probe_probability and c.probe_lock is False:
             c.base.doMethodLaterStopwatch(c.probe_onset, self.apply_probe_texture, "ApplyProbeTexture")
+        if c.probe and random.random() < c.probe_probability and c.probe_lock is True:
+            c.base.doMethodLaterStopwatch(c.probe_onset, self.apply_probe_locked_texture, "ApplyProbeTexture")
         return Task.done
 
     def schedule_texture_change(self) -> None:
