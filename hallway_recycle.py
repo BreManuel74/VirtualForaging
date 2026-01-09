@@ -392,8 +392,13 @@ class Corridor:
 
         if selected_texture == self.stop_texture:
             self.reward_zone_active = True if random.random() < self.stay_zone_reward_probability else False
-            print(f"Stay zone reward active: {self.reward_zone_active}")
-        
+            
+            # Find the next empty slot in the stay_zone_active_state column
+            current_idx = pd.notna(self.trial_df['stay_zone_active_state']).sum()
+            if current_idx < len(self.trial_df):
+                self.trial_df.at[current_idx, 'stay_zone_active_state'] = self.reward_zone_active
+            self.trial_df.to_csv(self.trial_csv_path, index=False)
+
         # Append to numpy array
         self.texture_history = np.append(self.texture_history, str(selected_texture))
 
@@ -1490,6 +1495,7 @@ class MousePortal(ShowBase):
             'segments_to_wait': np.full(max_trials, np.nan),
             'texture_history': np.full(max_trials, np.nan, dtype=object),
             'texture_change_time': np.full(max_trials, np.nan),
+            'stay_zone_active_state': pd.array([pd.NA] * max_trials, dtype='boolean'),
             'segments_until_revert': np.full(max_trials, np.nan),
             'texture_revert': np.full(max_trials, np.nan),
             'probe_texture_history': np.full(max_trials, np.nan, dtype=object),
