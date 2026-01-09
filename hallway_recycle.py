@@ -1572,11 +1572,12 @@ class MousePortal(ShowBase):
         wp.setUndecorated(True)
         self.win.requestProperties(wp)
         
-        # Initialize camera parameters
+        # Initialize camera parameters (cache config lookups)
+        cfg = self.cfg  # Local reference for faster access
         self.camera_position: float = 0.0
         self.camera_velocity: float = 0.0
-        self.speed_scaling: float = self.cfg.get("speed_scaling", 5.0)
-        self.camera_height: float = self.cfg.get("camera_height", 2.0)  
+        self.speed_scaling: float = cfg.get("speed_scaling", 5.0)
+        self.camera_height: float = cfg.get("camera_height", 2.0)  
         self.camera.setPos(0, self.camera_position, self.camera_height)
         self.camera.setHpr(0, 0, 0)
         
@@ -1590,18 +1591,18 @@ class MousePortal(ShowBase):
 
         # Set up shared Arduino serial connection
         self.arduino_serial = serial.Serial(
-            self.cfg["arduino_port"],
-            self.cfg["arduino_baudrate"],
+            cfg["arduino_port"],
+            cfg["arduino_baudrate"],
             timeout=1
         )
 
         # Set up treadmill input
         self.treadmill = SerialInputManager(
             os.environ.get("TEENSY_PORT"),
-            teensy_baudrate=self.cfg["teensy_baudrate"],
+            teensy_baudrate=cfg["teensy_baudrate"],
             arduino_serial=self.arduino_serial,  # Pass the shared instance
             messenger=self.messenger,
-            test_mode=self.cfg.get("test_mode", False),
+            test_mode=cfg.get("test_mode", False),
             test_csv_path= r'Kaufman_Project/BM15/Session 28/beh/1754413096treadmill.csv'
         )
 
@@ -1613,12 +1614,12 @@ class MousePortal(ShowBase):
         # Create corridor geometry and pass Gaussian data
         self.corridor: Corridor = Corridor(
             base=self,
-            config=self.cfg,
+            config=cfg,
             rounded_base_hallway_data=self.rounded_base_hallway_data,
             rounded_stay_data=self.rounded_stay_data,
             rounded_go_data=self.rounded_go_data
         )
-        self.segment_length: float = self.cfg["segment_length"]
+        self.segment_length: float = cfg["segment_length"]
         
         # Initialize the RewardOrPuff FSM
         self.fsm = RewardOrPuff(self, self.cfg)
@@ -1639,11 +1640,11 @@ class MousePortal(ShowBase):
         # Add the update task
         self.taskMgr.add(self.update, "updateTask")
 
-        self.fog_color = tuple(self.cfg["fog_color"])
+        self.fog_color = tuple(cfg["fog_color"])
         # Initialize fog effect
         self.fog_effect = FogEffect(
             self,
-            density=self.cfg["fog_density"],
+            density=cfg["fog_density"],
             fog_color=self.fog_color)
         
         # Set up task chain for serial input
@@ -1683,9 +1684,14 @@ class MousePortal(ShowBase):
         # Initialize TCP client for dynamic level changing
         self.tcp_client = TCPStreamClient(self)
 
-        # Puff and reward 0-speed times
-        self.time_spent_at_zero_speed = self.cfg["time_spent_at_zero_speed"]
-        self.puff_zero_speed_time = self.cfg["puff_zero_speed_time"]
+        # Puff and reward 0-speed times (cached for performance)
+        self.time_spent_at_zero_speed = cfg["time_spent_at_zero_speed"]
+        self.puff_zero_speed_time = cfg["puff_zero_speed_time"]
+        
+        # Cache timing values for update loop to avoid repeated config lookups
+        self.treadmill_speed_scaling = cfg["treadmill_speed_scaling"]
+        self.reward_time = cfg["reward_time"]
+        self.puff_time = cfg["puff_time"]
 
     def _signal_handler(self, signum, frame):
         """Handle system signals for graceful shutdown."""
@@ -1742,7 +1748,7 @@ class MousePortal(ShowBase):
         else:
             self.camera_velocity = 0.0
         
-        self.camera_velocity = (int(treadmill_speed) / self.cfg["treadmill_speed_scaling"])
+        self.camera_velocity = (int(treadmill_speed) / self.treadmill_speed_scaling)
 
         # Update camera position (movement along the Y axis)
         self.camera_position += self.camera_velocity * dt
@@ -1784,8 +1790,13 @@ class MousePortal(ShowBase):
         # FSM state transition logic
         # Dynamically get the current texture of the left wall
         selected_texture = corridor.left_segments[0].getTexture().getFilename()
-        self.reward_time = self.cfg["reward_time"]
-        self.puff_time = self.cfg["puff_time"]
+        
+        # Cache FSM state to avoid repeated attribute lookup
+        fsm_state = self.fsm.state
+        
+        # Cache timing values (assigned once per frame instead of per condition)
+        reward_time = self.reward_time
+        puff_time = self.puff_time
 
         # Get the elapsed time from the global stopwatch
         current_time = global_stopwatch.get_elapsed_time()
@@ -1806,10 +1817,10 @@ class MousePortal(ShowBase):
                                        current_time >= self.speed_zero_start_time + self.time_spent_at_zero_speed)
             
             # Check if enough time has been spent in the zone
-            meets_time_requirement = current_time >= self.enter_stay_time + (self.reward_time * self.zone_length)
+            meets_time_requirement = current_time >= self.enter_stay_time + (reward_time * self.zone_length)
             
             if (self.segments_with_stay_texture <= self.zone_length and 
-                self.fsm.state != 'Reward' and
+                fsm_state != 'Reward' and
                 corridor.reward_zone_active ==True and 
                 (speed_zero_duration or meets_time_requirement)):  # Either condition can trigger reward
                 #print("Requesting Reward state")
@@ -1821,10 +1832,10 @@ class MousePortal(ShowBase):
             speed_zero_duration = (self.speed_zero_start_time is not None and 
                                        current_time >= self.speed_zero_start_time + self.puff_zero_speed_time)
             # Check if enough time has been spent in the zone
-            meets_time_requirement = current_time >= self.enter_go_time + (self.puff_time * self.zone_length)
+            meets_time_requirement = current_time >= self.enter_go_time + (puff_time * self.zone_length)
 
             if (self.segments_with_go_texture <= self.zone_length and 
-                self.fsm.state != 'Puff' and 
+                fsm_state != 'Puff' and 
                 (speed_zero_duration or meets_time_requirement)):
                 #print("Requesting Puff state")
                 self.fsm.request('Puff')
@@ -1832,7 +1843,7 @@ class MousePortal(ShowBase):
         else:
             self.segments_with_go_texture = 0 
             self.segments_with_stay_texture = 0
-            if self.fsm.state != 'Neutral':
+            if fsm_state != 'Neutral':
                 #print("Requesting Neutral state")
                 self.fsm.request('Neutral')
         
