@@ -1729,6 +1729,11 @@ class MousePortal(ShowBase):
         dt: float = globalClock.getDt()
         move_distance: float = 0.0
         
+        # Cache frequently accessed attributes to reduce lookups
+        corridor = self.corridor
+        segment_length = self.segment_length
+        treadmill_speed = self.treadmill.data.speed
+        
         # Update camera velocity based on key input
         if self.key_map["forward"]:
             self.camera_velocity = self.speed_scaling
@@ -1737,44 +1742,48 @@ class MousePortal(ShowBase):
         else:
             self.camera_velocity = 0.0
         
-        self.camera_velocity = (int(self.treadmill.data.speed) / self.cfg["treadmill_speed_scaling"])
+        self.camera_velocity = (int(treadmill_speed) / self.cfg["treadmill_speed_scaling"])
 
         # Update camera position (movement along the Y axis)
         self.camera_position += self.camera_velocity * dt
         move_distance = self.camera_velocity * dt
         self.camera.setPos(0, self.camera_position, self.camera_height)
         
+        # Cache texture constants for comparisons
+        stop_texture = corridor.stop_texture
+        go_texture = corridor.go_texture
+        
         # Recycle corridor segments when the camera moves beyond one segment length
         if move_distance > 0:
             self.distance_since_recycle += move_distance
-            while self.distance_since_recycle >= self.segment_length:
+            while self.distance_since_recycle >= segment_length:
                 # Recycle the segment in the forward direction
-                self.corridor.recycle_segment(direction="forward")
-                self.distance_since_recycle -= self.segment_length
-                self.corridor.segments_until_texture_change -= 1
-                self.corridor.update_texture_change()
+                corridor.recycle_segment(direction="forward")
+                self.distance_since_recycle -= segment_length
+                corridor.segments_until_texture_change -= 1
+                corridor.update_texture_change()
 
                 # Check if the new front segment has the stay or go textures
-                new_front_texture = self.corridor.left_segments[0].getTexture().getFilename()
-                if new_front_texture == self.corridor.go_texture:
+                new_front_texture = corridor.left_segments[0].getTexture().getFilename()
+                if new_front_texture == go_texture:
                     self.segments_with_go_texture += 1
                     #print(f"New segment with go texture counted: {self.segments_with_go_texture}")
-                elif new_front_texture == self.corridor.stop_texture:
+                elif new_front_texture == stop_texture:
                     self.segments_with_stay_texture += 1
                     #print(f"New segment with stay texture counted: {self.segments_with_stay_texture}")
         
         elif move_distance < 0:
             self.distance_since_recycle += move_distance
-            while self.distance_since_recycle <= -self.segment_length:
-                self.corridor.recycle_segment(direction="backward")
-                self.distance_since_recycle += self.segment_length
+            while self.distance_since_recycle <= -segment_length:
+                corridor.recycle_segment(direction="backward")
+                self.distance_since_recycle += segment_length
 
         # Log movement data (timestamp, distance, speed)
         self.treadmill_logger.log(self.treadmill.data)
 
         # FSM state transition logic
         # Dynamically get the current texture of the left wall
-        selected_texture = self.corridor.left_segments[0].getTexture().getFilename()
+        selected_texture = corridor.left_segments[0].getTexture().getFilename()
         self.reward_time = self.cfg["reward_time"]
         self.puff_time = self.cfg["puff_time"]
 
@@ -1782,15 +1791,15 @@ class MousePortal(ShowBase):
         current_time = global_stopwatch.get_elapsed_time()
 
         # Track when treadmill speed becomes 0 and reset if speed is not 0
-        if self.treadmill.data.speed == 0:
+        if treadmill_speed == 0:
             if self.speed_zero_start_time is None:
                 self.speed_zero_start_time = current_time
         else:
             self.speed_zero_start_time = None
 
-        #print(self.treadmill.data.speed)
+        #print(treadmill_speed)
 
-        if selected_texture == self.corridor.stop_texture:
+        if selected_texture == stop_texture:
             #print(self.zone_length)
             # Check if speed has been 0 for set time
             speed_zero_duration = (self.speed_zero_start_time is not None and 
@@ -1801,12 +1810,12 @@ class MousePortal(ShowBase):
             
             if (self.segments_with_stay_texture <= self.zone_length and 
                 self.fsm.state != 'Reward' and
-                self.corridor.reward_zone_active ==True and 
+                corridor.reward_zone_active ==True and 
                 (speed_zero_duration or meets_time_requirement)):  # Either condition can trigger reward
                 #print("Requesting Reward state")
                 self.fsm.request('Reward')
 
-        elif selected_texture == self.corridor.go_texture:
+        elif selected_texture == go_texture:
             #print(self.zone_length)
             # Check if speed has been 0  for set time
             speed_zero_duration = (self.speed_zero_start_time is not None and 
