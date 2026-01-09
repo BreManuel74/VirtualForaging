@@ -1,3 +1,7 @@
+"""Longitudinal analysis of behavioral data across multiple mice.
+Original Author: Brenna Manuel
+"""
+
 import pandas as pd
 import os
 import tkinter as tk

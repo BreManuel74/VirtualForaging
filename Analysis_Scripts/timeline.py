@@ -1,3 +1,8 @@
+"""
+Timeline analysis script for behavioral data. Allows for the reconstruction and visualization of multiple data streams over time, including capacitive sensor data, treadmill speed, and pupil diameter (if available). Generates plots and saves them as SVG files for high-quality visualization.
+Original Author: Brenna Manuel
+"""
+
 import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np

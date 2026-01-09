@@ -1,3 +1,8 @@
+"""
+Correlational analysis with behavioral data within a cohort. Examines relationahips between weight loss, rewards, lick counts, and speed.
+Original Author: Brenna Manuel
+"""
+
 import pandas as pd
 import os
 import tkinter as tk

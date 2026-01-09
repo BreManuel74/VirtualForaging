@@ -1,3 +1,7 @@
+"""
+A simple stopwatch utility to measure elapsed time as a global timing resource across modules
+Original Author: Brenna Manuel
+"""
 import time
 
 class Stopwatch:
