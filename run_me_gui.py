@@ -1,3 +1,9 @@
+"""
+A GUI application to control and monitor a Panda3D game application for behavioral experiments.
+Implements a TCP server for communication, process management, and real-time updates.
+Original Author: Brenna Manuel
+"""
+
 import os
 import subprocess
 import sys

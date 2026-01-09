@@ -1,3 +1,9 @@
+"""
+A script to record video from a ThorCam camera using Micro-Manager and OpenCV.
+The script captures frames at a specified FPS, saves them to an AVI file using the MJPEG codec,
+and logs the timestamp and frame number to a text file. It supports hardware-triggered acquisition.
+Original Author: Brenna Manuel
+"""
 import os
 import cv2
 import numpy as np
