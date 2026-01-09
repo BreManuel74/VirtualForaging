@@ -1622,7 +1622,10 @@ class MousePortal(ShowBase):
 
         # Initialize TCP client for dynamic level changing
         self.tcp_client = TCPStreamClient(self)
+
+        # Puff and reward 0-speed times
         self.time_spent_at_zero_speed = self.cfg["time_spent_at_zero_speed"]
+        self.puff_zero_speed_time = self.cfg["puff_zero_speed_time"]
 
     def _signal_handler(self, signum, frame):
         """Handle system signals for graceful shutdown."""
@@ -1741,11 +1744,21 @@ class MousePortal(ShowBase):
                 (speed_zero_duration or meets_time_requirement)):  # Either condition can trigger reward
                 #print("Requesting Reward state")
                 self.fsm.request('Reward')
+
         elif selected_texture == self.corridor.go_texture:
             #print(self.zone_length)
-            if self.segments_with_go_texture <= self.zone_length and self.fsm.state != 'Puff' and current_time >= self.enter_go_time + (self.puff_time * self.zone_length):
+            # Check if speed has been 0  for set time
+            speed_zero_duration = (self.speed_zero_start_time is not None and 
+                                       current_time >= self.speed_zero_start_time + self.puff_zero_speed_time)
+            # Check if enough time has been spent in the zone
+            meets_time_requirement = current_time >= self.enter_go_time + (self.puff_time * self.zone_length)
+
+            if (self.segments_with_go_texture <= self.zone_length and 
+                self.fsm.state != 'Puff' and 
+                (speed_zero_duration or meets_time_requirement)):
                 #print("Requesting Puff state")
                 self.fsm.request('Puff')
+
         else:
             self.segments_with_go_texture = 0 
             self.segments_with_stay_texture = 0
