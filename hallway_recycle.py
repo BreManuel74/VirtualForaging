@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+
+"""
+Infinite Corridor using Panda3D that constantly recycles original wall segments as the user moves forward or backward.
+Original Author: Jake Gronemeyer
+Modified and upgraded by: Brenna Manuel
+
+"""
+
 import json
 import sys
 import csv

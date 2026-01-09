@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
-Infinite Corridor using Panda3D
+Infinite Corridor using Panda3D that constantly generates and pops new segments as the user moves forward or backward.
+Currently supports a stop/don't stop mouse behavioral task loaded from KaufmanModule.
+Original Author: Jake Gronemeyer
+Modified and upgraded by: Brenna Manuel
 
 """
 
@@ -166,8 +169,9 @@ class Corridor:
         self.rounded_stay_data = rounded_stay_data
         self.rounded_go_data = rounded_go_data
 
-        # Initialize flag to track wall segments
+        # Initialize flags to track wall segments
         self.segment_flag_key = "segment_flag"
+        self.probe_flag_key = "probe_flag"
 
         self.texture_history = self.base.texture_history
         self.texture_time_history = self.base.texture_time_history
@@ -267,6 +271,7 @@ class Corridor:
         left_node.setHpr(90, 0, 0)
         self.apply_texture(left_node, self.left_wall_texture)
         left_node.setPythonTag(self.segment_flag_key, False)
+        left_node.setPythonTag(self.probe_flag_key, False)
         self.left_segments.append(left_node)
         
         # Create right wall
@@ -277,6 +282,7 @@ class Corridor:
         right_node.setHpr(-90, 0, 0)
         self.apply_texture(right_node, self.right_wall_texture)
         right_node.setPythonTag(self.segment_flag_key, False)
+        right_node.setPythonTag(self.probe_flag_key, False)
         self.right_segments.append(right_node)
         
         # Create ceiling
@@ -317,6 +323,12 @@ class Corridor:
 
     def set_segment_flag(self, node: NodePath, value: bool) -> None:
         node.setPythonTag(self.segment_flag_key, bool(value))
+
+    def set_probe_flag(self, node: NodePath, value: bool) -> None:
+        node.setPythonTag(self.probe_flag_key, bool(value))
+
+    def get_probe_flag(self, node: NodePath) -> bool:
+        return bool(node.getPythonTag(self.probe_flag_key) or False)
 
     def get_segment_flag(self, node: NodePath) -> bool:
         return bool(node.getPythonTag(self.segment_flag_key) or False)
