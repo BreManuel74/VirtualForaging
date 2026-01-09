@@ -264,6 +264,9 @@ class Corridor:
         if self.probe_lock == True:
             self.locked_probe = random.choice(probe_textures)
 
+        self.reward_zone_active = False  # Initialize reward zone flag
+        self.stay_zone_reward_probability = config.get("stay_zone_reward_probability", 1)  # Default to 100% if not specified
+
     def build_segments(self) -> None:
         """ 
         Build the initial corridor segments using CardMaker.
@@ -386,6 +389,10 @@ class Corridor:
             selected_texture = self.stop_texture
         else:
             selected_texture = self.go_texture
+
+        if selected_texture == self.stop_texture:
+            self.reward_zone_active = True if random.random() < self.stay_zone_reward_probability else False
+            print(f"Stay zone reward active: {self.reward_zone_active}")
         
         # Append to numpy array
         self.texture_history = np.append(self.texture_history, str(selected_texture))
@@ -1787,7 +1794,8 @@ class MousePortal(ShowBase):
             meets_time_requirement = current_time >= self.enter_stay_time + (self.reward_time * self.zone_length)
             
             if (self.segments_with_stay_texture <= self.zone_length and 
-                self.fsm.state != 'Reward' and 
+                self.fsm.state != 'Reward' and
+                self.corridor.reward_zone_active ==True and 
                 (speed_zero_duration or meets_time_requirement)):  # Either condition can trigger reward
                 #print("Requesting Reward state")
                 self.fsm.request('Reward')
