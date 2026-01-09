@@ -253,6 +253,17 @@ class Corridor:
         self.segments_until_revert = 0  # Ensure this attribute exists
         self.texture_change_scheduled = False  # Flag to track texture change scheduling
 
+        self.probe_lock = config.get("probe_lock", False)  # Default to False if not specified
+        self.locked_probe = None
+        probe_textures = [
+        self.neutral_stim_1,
+            self.neutral_stim_2,
+            self.neutral_stim_3,
+            self.neutral_stim_4,
+        ]
+        if self.probe_lock == True:
+            self.locked_probe = random.choice(probe_textures)
+
     def build_segments(self) -> None:
         """ 
         Build the initial corridor segments using CardMaker.
@@ -418,6 +429,39 @@ class Corridor:
         # Return Task.done if task is None
         return Task.done if task is None else task.done
 
+    def apply_probe_locked_texture(self, task=None):
+        """Temporarily change both walls to a single/non-random probe texture, then revert later"""
+
+        selected_temporary_texture = self.locked_probe
+
+        self.probe_texture_history = np.append(self.probe_texture_history, str(selected_temporary_texture))
+
+        probe_textures = np.full(len(self.trial_df), np.nan, dtype=object)
+        probe_textures[:len(self.probe_texture_history)] = self.probe_texture_history
+        self.trial_df['probe_texture_history'] = probe_textures
+        self.trial_df.to_csv(self.trial_csv_path, index=False)
+
+        ## Print the elapsed time since the corridor was initialized
+        elapsed_time = global_stopwatch.get_elapsed_time() 
+        self.probe_time_history = np.append(self.probe_time_history, round(elapsed_time, 2))
+        
+        probe_times = np.full(len(self.trial_df), np.nan)
+        probe_times[:len(self.probe_time_history)] = self.probe_time_history
+        self.trial_df['probe_time'] = probe_times
+        self.trial_df.to_csv(self.trial_csv_path, index=False)
+
+        # Apply the selected texture to the walls
+        for left_node in self.left_segments:
+            self.apply_texture(left_node, selected_temporary_texture)
+        for right_node in self.right_segments:
+            self.apply_texture(right_node, selected_temporary_texture)
+        
+        # Schedule a task to revert the textures back after 1 second
+        self.base.doMethodLaterStopwatch(self.probe_duration, self.revert_temporary_textures, "RevertWallTextures")
+        
+        # Do not reset the texture_change_scheduled flag here to prevent repeated scheduling
+        return Task.done if task is None else task.done
+
     def change_wall_textures_temporarily_once(self, task: Task = None) -> Task:
         """
         Temporarily change the wall textures for 1 second and then revert them back.
@@ -514,9 +558,12 @@ class Corridor:
         # Conditional to make probe optional
         if self.probe:
             # Configurable chance of calling the probe function
-            if random.random() < self.probe_probability:
+            if random.random() < self.probe_probability and self.probe_lock == False:
                 # Schedule a task to change the wall textures temporarily after reverting
                 self.base.doMethodLaterStopwatch(self.probe_onset, self.change_wall_textures_temporarily_once, "ChangeWallTexturesTemporarilyOnce")
+            if random.random() < self.probe_probability and self.probe_lock == True:
+                # Schedule a task to change the wall textures temporarily after reverting
+                self.base.doMethodLaterStopwatch(self.probe_onset, self.apply_probe_locked_texture, "ChangeWallTexturesTemporarilyOnce")
         
         # Return Task.done if task is None
         return Task.done if task is None else task.done
