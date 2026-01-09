@@ -454,6 +454,20 @@ class Corridor:
         
         return selected_left, selected_right
     
+    def get_forward_segments_far_probe_revert(self, count: int) -> tuple[list[NodePath], list[NodePath]]:
+        """Get the specified number of segments ahead of the camera for probe revert."""
+        # Sort both left and right segments
+        sorted_left = sorted(self.left_segments, key=lambda x: x.getY())
+        sorted_right = sorted(self.right_segments, key=lambda x: x.getY())
+        
+        # Take the furthest count right segments normally
+        selected_right = sorted_right[-count:]
+        
+        # Take left segments one position closer
+        selected_left = sorted_left[-(count+1):]  # Skip last segment
+        
+        return selected_left, selected_right
+    
     def get_forward_segments_far_floor_and_ceiling(self, count: int) -> tuple[list[NodePath], list[NodePath]]:
         """Get the specified number of floor and ceiling segments ahead of the camera."""
         # Sort both floor and ceiling segments

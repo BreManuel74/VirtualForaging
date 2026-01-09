@@ -256,7 +256,10 @@ class TextureSwapper:
         probe_segments = min(len(probe_left), len(probe_right))
         for i in range(probe_segments):
             c.apply_texture(probe_left[i], selected_temporary_texture)
+            c.set_probe_flag(probe_left[i], True)
             c.apply_texture(probe_right[i], selected_temporary_texture)
+            c.set_probe_flag(probe_right[i], True)
+
 
         #print(f"Applied probe texture: {selected_temporary_texture}")
 
@@ -275,11 +278,14 @@ class TextureSwapper:
     def revert_probe_texture(self, task=None):
         """Revert temporary probe textures back to corridor's right_wall_texture."""
         c = self.corridor
-        probe_left, probe_right = c.get_forward_segments_far(12)
+        probe_left, probe_right = c.get_forward_segments_far_probe_revert(20)
         probe_segments = min(len(probe_left), len(probe_right))
         for i in range(probe_segments):
-            c.apply_texture(probe_left[i], c.right_wall_texture)
-            c.apply_texture(probe_right[i], c.right_wall_texture)
+            if c.get_probe_flag(probe_right[i]) and c.get_probe_flag(probe_left[i]):
+                c.apply_texture(probe_left[i], c.right_wall_texture)
+                c.apply_texture(probe_right[i], c.right_wall_texture)
+                c.set_probe_flag(probe_left[i], False)
+                c.set_probe_flag(probe_right[i], False)
         floor, ceiling = c.get_forward_segments_far_floor_and_ceiling(24)
         number_of_segments = min(len(floor), len(ceiling))
         for i in range(number_of_segments):
