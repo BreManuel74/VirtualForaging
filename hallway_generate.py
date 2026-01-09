@@ -187,6 +187,7 @@ class Corridor:
 
         self.zone_gap = 0  # Initialize zone_gap
         
+        # Cache config values to avoid repeated dictionary lookups
         self.segment_length: float = config["segment_length"]
         self.corridor_width: float = config["corridor_width"]
         self.wall_height: float = config["wall_height"]
@@ -211,6 +212,12 @@ class Corridor:
         # Create a parent node for all corridor segments.
         self.parent: NodePath = base.render.attachNewNode("corridor")
         self.view_distance: float = self.segment_length * self.num_segments
+        
+        # Pre-compute half view distance to avoid division in update_corridor
+        self.half_view_distance: float = self.view_distance / 2
+        
+        # Cache the sorting key function to avoid recreating lambdas
+        self._get_y_pos = lambda x: x.getY()
         
         # Separate lists for each face.
         self.left_segments: list[NodePath] = []
@@ -390,8 +397,10 @@ class Corridor:
             self.floor_segments = [s[3] for s in segments]
         
         # Ensure we don't exceed the maximum number of segments
-        while len(self.left_segments) > self.num_segments:
-            if abs(self.left_segments[0].getY() - camera_pos) > abs(self.left_segments[-1].getY() - camera_pos):
+        num_segs = self.num_segments
+        left_segments = self.left_segments
+        while len(left_segments) > num_segs:
+            if abs(left_segments[0].getY() - camera_pos) > abs(left_segments[-1].getY() - camera_pos):
                 self._delete_segment(0)
             else:
                 self._delete_segment(-1)
@@ -438,8 +447,10 @@ class Corridor:
     def get_forward_segments_far(self, count: int) -> tuple[list[NodePath], list[NodePath]]:
         """Get the specified number of segments ahead of the camera."""
         # Sort both left and right segments
-        sorted_left = sorted(self.left_segments, key=lambda x: x.getY())
-        sorted_right = sorted(self.right_segments, key=lambda x: x.getY())
+        # Use cached sorting key function
+        get_y = self._get_y_pos
+        sorted_left = sorted(self.left_segments, key=get_y)
+        sorted_right = sorted(self.right_segments, key=get_y)
         
         # Take the furthest count right segments normally
         selected_right = sorted_right[-count:]
@@ -457,8 +468,10 @@ class Corridor:
     def get_forward_segments_far_probe_revert(self, count: int) -> tuple[list[NodePath], list[NodePath]]:
         """Get the specified number of segments ahead of the camera for probe revert."""
         # Sort both left and right segments
-        sorted_left = sorted(self.left_segments, key=lambda x: x.getY())
-        sorted_right = sorted(self.right_segments, key=lambda x: x.getY())
+        # Use cached sorting key function
+        get_y = self._get_y_pos
+        sorted_left = sorted(self.left_segments, key=get_y)
+        sorted_right = sorted(self.right_segments, key=get_y)
         
         # Take the furthest count right segments normally
         selected_right = sorted_right[-count:]
@@ -471,8 +484,10 @@ class Corridor:
     def get_forward_segments_far_floor_and_ceiling(self, count: int) -> tuple[list[NodePath], list[NodePath]]:
         """Get the specified number of floor and ceiling segments ahead of the camera."""
         # Sort both floor and ceiling segments
-        sorted_floor = sorted(self.floor_segments, key=lambda x: x.getY())
-        sorted_ceiling = sorted(self.ceiling_segments, key=lambda x: x.getY())
+        # Use cached sorting key function
+        get_y = self._get_y_pos
+        sorted_floor = sorted(self.floor_segments, key=get_y)
+        sorted_ceiling = sorted(self.ceiling_segments, key=get_y)
         
         # Take the furthest count floor and ceiling segments normally
         selected_floor = sorted_floor[-count:]
@@ -483,17 +498,20 @@ class Corridor:
     def get_middle_segments(self, count: int) -> tuple[list[NodePath], list[NodePath]]:
         """Get segments centered around the player, using left wall Y positions as reference."""
         # Sort both left and right segments
-        sorted_left = sorted(self.left_segments, key=lambda x: x.getY())
-        sorted_right = sorted(self.right_segments, key=lambda x: x.getY())
+        # Use cached sorting key function
+        get_y = self._get_y_pos
+        sorted_left = sorted(self.left_segments, key=get_y)
+        sorted_right = sorted(self.right_segments, key=get_y)
 
-        # Calculate middle index
-        middle_left_idx = len(sorted_left) // 2
-        middle_right_idx = len(sorted_right) // 2
+        # Calculate middle index (use bit shift for faster division by 2)
+        middle_left_idx = len(sorted_left) >> 1
+        middle_right_idx = len(sorted_right) >> 1
 
         # Calculate start and end indices to get segments centered around the middle
-        start_left = max(0, middle_left_idx - count // 2)
+        half_count = count >> 1  # count // 2
+        start_left = max(0, middle_left_idx - half_count)
         end_left = start_left + count
-        start_right = max(0, middle_right_idx - count // 2)
+        start_right = max(0, middle_right_idx - half_count)
         end_right = start_right + count
 
         selected_left = sorted_left[start_left:end_left]
@@ -1448,7 +1466,7 @@ class MousePortal(ShowBase):
             if ((self.prev_current_texture == go_texture or self.prev_current_texture == stop_texture)
                 and (self.current_texture == right_wall_texture or self.current_texture == cave_texture) and self.exit == True):
                 if self.reentry_pending:
-                    print("self.reentry pending is true")
+                    #print("self.reentry pending is true")
                     # Log revert time locally without triggering probe again
                     elapsed_time = global_stopwatch.get_elapsed_time()
                     self.texture_revert_history = np.append(self.texture_revert_history, round(elapsed_time, 2))

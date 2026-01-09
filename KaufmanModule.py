@@ -162,33 +162,38 @@ class TextureSwapper:
         Change the textures of the left and right walls to a randomly selected texture.
         """
         c = self.corridor
+        # Cache frequently accessed textures
+        stop_texture = c.stop_texture
+        go_texture = c.go_texture
+        
         # Choose stop or go based on configured probability
-        selected_texture = c.stop_texture if random.random() < c.stop_texture_probability else c.go_texture
+        selected_texture = stop_texture if random.random() < c.stop_texture_probability else go_texture
         
         # Log selected texture
         c.texture_history = np.append(c.texture_history, str(selected_texture))
         c.trial_logger.log_texture_history(str(selected_texture))
 
-        if selected_texture == c.stop_texture:
+        if selected_texture == stop_texture:
             c.reward_zone_active = True if random.random() < c.stay_zone_reward_probability else False
             #print(f"Reward Zone Active: {c.reward_zone_active}")
             # Log if reward probability was true or false
             c.trial_logger.log_stay_zone_active_state(c.reward_zone_active)
 
         # Choose distribution based on selected texture
-        stay_or_go_data = c.rounded_go_data if selected_texture == c.go_texture else c.rounded_stay_data
+        stay_or_go_data = c.rounded_go_data if selected_texture == go_texture else c.rounded_stay_data
 
         # Determine length of special zone and side effects
-        c.segments_until_revert = int(random.choice(stay_or_go_data))
-        c.zone_gap = (12 - c.segments_until_revert) if selected_texture == c.stop_texture else 0
-        c.base.zone_length = c.segments_until_revert
+        segments_until_revert = int(random.choice(stay_or_go_data))
+        c.segments_until_revert = segments_until_revert
+        c.zone_gap = (12 - segments_until_revert) if selected_texture == stop_texture else 0
+        c.base.zone_length = segments_until_revert
         
         # Log length
-        c.segments_until_revert_history = np.append(c.segments_until_revert_history, int(c.segments_until_revert))
-        c.trial_logger.log_segments_until_revert(int(c.segments_until_revert))
+        c.segments_until_revert_history = np.append(c.segments_until_revert_history, segments_until_revert)
+        c.trial_logger.log_segments_until_revert(segments_until_revert)
 
         # Apply textures to appropriate segments
-        if selected_texture == c.stop_texture:
+        if selected_texture == stop_texture:
             forward_left, forward_right = c.get_forward_segments_far(c.segments_until_revert)
             num_segments = min(len(forward_left), len(forward_right))
             for i in range(num_segments):
@@ -204,39 +209,43 @@ class TextureSwapper:
                 c.set_segment_flag(middle_right[i], True)
             if c.cave is True:
                 # Add cave texture to end of go zone
-                cave_segments = 13 - c.segments_until_revert
+                cave_segments = 13 - segments_until_revert
+                cave_texture = c.cave_texture
                 cave_left, cave_right = c.get_forward_segments_far(cave_segments)
                 for i in range(min(len(cave_left), len(cave_right))):
-                    c.apply_texture(cave_left[i], c.cave_texture)
-                    c.apply_texture(cave_right[i], c.cave_texture)
+                    c.apply_texture(cave_left[i], cave_texture)
+                    c.apply_texture(cave_right[i], cave_texture)
                 cave_floor, cave_ceiling = c.get_forward_segments_far_floor_and_ceiling(cave_segments)
                 for i in range(min(len(cave_floor), len(cave_ceiling))):
-                    c.apply_texture(cave_floor[i], c.cave_texture)
-                    c.apply_texture(cave_ceiling[i], c.cave_texture)
+                    c.apply_texture(cave_floor[i], cave_texture)
+                    c.apply_texture(cave_ceiling[i], cave_texture)
 
         return Task.done
     
     def apply_probe_locked_texture(self, task=None):
         """Temporarily change both walls to a single/non-random probe texture, then revert later"""
-        c= self.corridor
-
+        c = self.corridor
         selected_temporary_texture = c.locked_probe
-         # Apply temporary texture to forward segments
+        
+        # Apply temporary texture to forward segments
         probe_left, probe_right = c.get_forward_segments_far(12)
         probe_segments = min(len(probe_left), len(probe_right))
+        apply_texture = c.apply_texture
+        set_probe_flag = c.set_probe_flag
         for i in range(probe_segments):
-            c.apply_texture(probe_left[i], selected_temporary_texture)
-            c.set_probe_flag(probe_left[i], True)
-            c.apply_texture(probe_right[i], selected_temporary_texture)
-            c.set_probe_flag(probe_right[i], True)
+            apply_texture(probe_left[i], selected_temporary_texture)
+            set_probe_flag(probe_left[i], True)
+            apply_texture(probe_right[i], selected_temporary_texture)
+            set_probe_flag(probe_right[i], True)
 
         # Log probe texture and time
         c.probe_texture_history = np.append(c.probe_texture_history, str(selected_temporary_texture))
         c.trial_logger.log_probe_texture(str(selected_temporary_texture))
 
         elapsed_time = global_stopwatch.get_elapsed_time()
-        c.probe_time_history = np.append(c.probe_time_history, round(elapsed_time, 2))
-        c.trial_logger.log_probe_time(round(elapsed_time, 2))
+        elapsed_rounded = round(elapsed_time, 2)
+        c.probe_time_history = np.append(c.probe_time_history, elapsed_rounded)
+        c.trial_logger.log_probe_time(elapsed_rounded)
 
         # Schedule revert
         c.base.doMethodLaterStopwatch(c.probe_duration, self.revert_probe_texture, "RevertProbeTexture")
@@ -256,11 +265,13 @@ class TextureSwapper:
         # Apply temporary texture to forward segments
         probe_left, probe_right = c.get_forward_segments_far(12)
         probe_segments = min(len(probe_left), len(probe_right))
+        apply_texture = c.apply_texture
+        set_probe_flag = c.set_probe_flag
         for i in range(probe_segments):
-            c.apply_texture(probe_left[i], selected_temporary_texture)
-            c.set_probe_flag(probe_left[i], True)
-            c.apply_texture(probe_right[i], selected_temporary_texture)
-            c.set_probe_flag(probe_right[i], True)
+            apply_texture(probe_left[i], selected_temporary_texture)
+            set_probe_flag(probe_left[i], True)
+            apply_texture(probe_right[i], selected_temporary_texture)
+            set_probe_flag(probe_right[i], True)
 
 
         #print(f"Applied probe texture: {selected_temporary_texture}")
@@ -270,8 +281,9 @@ class TextureSwapper:
         c.trial_logger.log_probe_texture(str(selected_temporary_texture))
 
         elapsed_time = global_stopwatch.get_elapsed_time()
-        c.probe_time_history = np.append(c.probe_time_history, round(elapsed_time, 2))
-        c.trial_logger.log_probe_time(round(elapsed_time, 2))
+        elapsed_rounded = round(elapsed_time, 2)
+        c.probe_time_history = np.append(c.probe_time_history, elapsed_rounded)
+        c.trial_logger.log_probe_time(elapsed_rounded)
 
         # Schedule revert
         c.base.doMethodLaterStopwatch(c.probe_duration, self.revert_probe_texture, "RevertProbeTexture")
@@ -282,31 +294,44 @@ class TextureSwapper:
         c = self.corridor
         probe_left, probe_right = c.get_forward_segments_far_probe_revert(20)
         probe_segments = min(len(probe_left), len(probe_right))
+        right_wall_texture = c.right_wall_texture
+        apply_texture = c.apply_texture
+        get_probe_flag = c.get_probe_flag
+        set_probe_flag = c.set_probe_flag
         for i in range(probe_segments):
-            if c.get_probe_flag(probe_right[i]) and c.get_probe_flag(probe_left[i]):
-                c.apply_texture(probe_left[i], c.right_wall_texture)
-                c.apply_texture(probe_right[i], c.right_wall_texture)
-                c.set_probe_flag(probe_left[i], False)
-                c.set_probe_flag(probe_right[i], False)
+            if get_probe_flag(probe_right[i]) and get_probe_flag(probe_left[i]):
+                apply_texture(probe_left[i], right_wall_texture)
+                apply_texture(probe_right[i], right_wall_texture)
+                set_probe_flag(probe_left[i], False)
+                set_probe_flag(probe_right[i], False)
         floor, ceiling = c.get_forward_segments_far_floor_and_ceiling(24)
         number_of_segments = min(len(floor), len(ceiling))
+        floor_texture = c.floor_texture
+        ceiling_texture = c.ceiling_texture
         for i in range(number_of_segments):
-            c.apply_texture(floor[i], c.floor_texture)
-            c.apply_texture(ceiling[i], c.ceiling_texture)
+            apply_texture(floor[i], floor_texture)
+            apply_texture(ceiling[i], ceiling_texture)
         return Task.done
 
     def exit_special_zones(self, task=None):
         """Log zone exit and optionally schedule a probe texture swap."""
         c = self.corridor
         elapsed_time = global_stopwatch.get_elapsed_time()
-        c.texture_revert_history = np.append(c.texture_revert_history, round(elapsed_time, 2))
+        elapsed_rounded = round(elapsed_time, 2)
+        c.texture_revert_history = np.append(c.texture_revert_history, elapsed_rounded)
+        
+        # Cache textures for comparison
+        go_texture = c.go_texture
+        stop_texture = c.stop_texture
+        trial_logger = c.trial_logger
+        
         # Determine last special texture type just exited by inspecting previous frame info from base
         try:
             last_tex = getattr(c.base, 'prev_current_texture', None)
-            if last_tex == c.go_texture:
-                c.trial_logger.log_go_texture_revert_time(round(elapsed_time, 2))
-            elif last_tex == c.stop_texture:
-                c.trial_logger.log_stay_texture_revert_time(round(elapsed_time, 2))
+            if last_tex == go_texture:
+                trial_logger.log_go_texture_revert_time(elapsed_rounded)
+            elif last_tex == stop_texture:
+                trial_logger.log_stay_texture_revert_time(elapsed_rounded)
             else:
                 # Fallback: if base doesn't have prev_current_texture, try current flag context
                 middle_left, middle_right = c.get_middle_segments(4)
@@ -314,21 +339,25 @@ class TextureSwapper:
                     # If we are now neutral, we assume we exited whatever was active in base flags
                     # Use active zone flags from base
                     if getattr(c.base, 'active_puff_zone', False):
-                        c.trial_logger.log_go_texture_revert_time(round(elapsed_time, 2))
+                        trial_logger.log_go_texture_revert_time(elapsed_rounded)
                     elif getattr(c.base, 'active_stay_zone', False):
-                        c.trial_logger.log_stay_texture_revert_time(round(elapsed_time, 2))
+                        trial_logger.log_stay_texture_revert_time(elapsed_rounded)
                     else:
                         # Unknown; default to GO to avoid missing data
-                        c.trial_logger.log_go_texture_revert_time(round(elapsed_time, 2))
+                        trial_logger.log_go_texture_revert_time(elapsed_rounded)
                 else:
-                    c.trial_logger.log_go_texture_revert_time(round(elapsed_time, 2))
+                    trial_logger.log_go_texture_revert_time(elapsed_rounded)
         except Exception:
-            c.trial_logger.log_go_texture_revert_time(round(elapsed_time, 2))
+            trial_logger.log_go_texture_revert_time(elapsed_rounded)
 
-        if c.probe and random.random() < c.probe_probability and c.probe_lock is False:
-            c.base.doMethodLaterStopwatch(c.probe_onset, self.apply_probe_texture, "ApplyProbeTexture")
-        if c.probe and random.random() < c.probe_probability and c.probe_lock is True:
-            c.base.doMethodLaterStopwatch(c.probe_onset, self.apply_probe_locked_texture, "ApplyProbeTexture")
+        # Cache probe flags and base for conditional checks
+        if c.probe and random.random() < c.probe_probability:
+            base = c.base
+            probe_onset = c.probe_onset
+            if c.probe_lock is False:
+                base.doMethodLaterStopwatch(probe_onset, self.apply_probe_texture, "ApplyProbeTexture")
+            else:
+                base.doMethodLaterStopwatch(probe_onset, self.apply_probe_locked_texture, "ApplyProbeTexture")
         return Task.done
 
     def schedule_texture_change(self) -> None:
@@ -337,9 +366,9 @@ class TextureSwapper:
         if not hasattr(c, 'segments_until_revert'):
             c.segments_until_revert = 0
 
-        segments_to_wait = random.choice(c.rounded_base_hallway_data)
-        c.segments_to_wait_history = np.append(c.segments_to_wait_history, int(segments_to_wait))
-        c.trial_logger.log_segments_to_wait(int(segments_to_wait))
+        segments_to_wait = int(random.choice(c.rounded_base_hallway_data))
+        c.segments_to_wait_history = np.append(c.segments_to_wait_history, segments_to_wait)
+        c.trial_logger.log_segments_to_wait(segments_to_wait)
 
         c.segments_until_texture_change = segments_to_wait + c.segments_until_revert + c.zone_gap
 
@@ -354,17 +383,22 @@ class TextureSwapper:
             middle_left, middle_right = c.get_middle_segments(4)
             if middle_right and len(middle_right) >= 3:
                 new_front_texture = middle_right[2].getTexture().getFilename()
-                c.current_segment_flag = c.get_segment_flag(middle_right[2])
+                current_segment_flag = c.get_segment_flag(middle_right[2])
+                c.current_segment_flag = current_segment_flag
 
-                if new_front_texture == c.go_texture and c.current_segment_flag is True:
-                    c.base.enter_go_time = global_stopwatch.get_elapsed_time()
+                if new_front_texture == c.go_texture and current_segment_flag is True:
+                    base = c.base
+                    enter_go_time = global_stopwatch.get_elapsed_time()
+                    base.enter_go_time = enter_go_time
                     # Log GO change time
-                    c.texture_time_history = np.append(c.texture_time_history, round(c.base.enter_go_time, 2))
-                    c.trial_logger.log_go_texture_change_time(round(c.base.enter_go_time, 2))
-                    c.base.active_puff_zone = True
-                    c.base.exit = True
+                    enter_go_rounded = round(enter_go_time, 2)
+                    c.texture_time_history = np.append(c.texture_time_history, enter_go_rounded)
+                    c.trial_logger.log_go_texture_change_time(enter_go_rounded)
+                    base.active_puff_zone = True
+                    base.exit = True
+                    set_segment_flag = c.set_segment_flag
                     for node in c.right_segments:
-                        c.set_segment_flag(node, False)
+                        set_segment_flag(node, False)
 
             # Schedule the next texture change
             self.schedule_texture_change()

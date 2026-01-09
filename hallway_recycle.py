@@ -215,6 +215,7 @@ class Corridor:
         self.trial_df.to_csv = self.base.trial_df.to_csv 
         self.trial_csv_path = self.base.trial_csv_path
 
+        # Cache config values to avoid repeated dictionary lookups
         self.segment_length: float = config["segment_length"]
         self.corridor_width: float = config["corridor_width"]
         self.wall_height: float = config["wall_height"]
@@ -402,12 +403,15 @@ class Corridor:
         # Append to numpy array
         self.texture_history = np.append(self.texture_history, str(selected_texture))
 
-        textures = np.full(len(self.trial_df), np.nan, dtype=object)
+        # Cache trial_df length for faster array creation
+        df_len = len(self.trial_df)
+        textures = np.full(df_len, np.nan, dtype=object)
         textures[:len(self.texture_history)] = self.texture_history
         self.trial_df['texture_history'] = textures
         self.trial_df.to_csv(self.trial_csv_path, index=False)
         
         # Apply the selected texture to the walls
+        # Cache segment lists for faster iteration
         for left_node in self.left_segments:
             self.apply_texture(left_node, selected_texture)
         for right_node in self.right_segments:
@@ -416,7 +420,7 @@ class Corridor:
         # Print the elapsed time since the corridor was initialized
         elapsed_time = global_stopwatch.get_elapsed_time()
         self.texture_time_history = np.append(self.texture_time_history, round(elapsed_time, 2))
-        times = np.full(len(self.trial_df), np.nan)
+        times = np.full(df_len, np.nan)
         times[:len(self.texture_time_history)] = self.texture_time_history
         self.trial_df['texture_change_time'] = times
         self.trial_df.to_csv(self.trial_csv_path, index=False)
@@ -433,7 +437,7 @@ class Corridor:
         
         # Write the segments_until_revert value to the trial_data file
         self.segments_until_revert_history = np.append(self.segments_until_revert_history, int(self.segments_until_revert))
-        length = np.full(len(self.trial_df), np.nan, dtype=float)
+        length = np.full(df_len, np.nan, dtype=float)
         length[:len(self.segments_until_revert_history)] = self.segments_until_revert_history
         self.trial_df['segments_until_revert'] = length
         self.trial_df.to_csv(self.trial_csv_path, index=False)
@@ -448,7 +452,9 @@ class Corridor:
 
         self.probe_texture_history = np.append(self.probe_texture_history, str(selected_temporary_texture))
 
-        probe_textures = np.full(len(self.trial_df), np.nan, dtype=object)
+        # Cache trial_df length for faster array creation
+        df_len = len(self.trial_df)
+        probe_textures = np.full(df_len, np.nan, dtype=object)
         probe_textures[:len(self.probe_texture_history)] = self.probe_texture_history
         self.trial_df['probe_texture_history'] = probe_textures
         self.trial_df.to_csv(self.trial_csv_path, index=False)
@@ -457,7 +463,7 @@ class Corridor:
         elapsed_time = global_stopwatch.get_elapsed_time() 
         self.probe_time_history = np.append(self.probe_time_history, round(elapsed_time, 2))
         
-        probe_times = np.full(len(self.trial_df), np.nan)
+        probe_times = np.full(df_len, np.nan)
         probe_times[:len(self.probe_time_history)] = self.probe_time_history
         self.trial_df['probe_time'] = probe_times
         self.trial_df.to_csv(self.trial_csv_path, index=False)
@@ -498,7 +504,9 @@ class Corridor:
 
         self.probe_texture_history = np.append(self.probe_texture_history, str(selected_temporary_texture))
 
-        probe_textures = np.full(len(self.trial_df), np.nan, dtype=object)
+        # Cache trial_df length for faster array creation
+        df_len = len(self.trial_df)
+        probe_textures = np.full(df_len, np.nan, dtype=object)
         probe_textures[:len(self.probe_texture_history)] = self.probe_texture_history
         self.trial_df['probe_texture_history'] = probe_textures
         self.trial_df.to_csv(self.trial_csv_path, index=False)
@@ -507,7 +515,7 @@ class Corridor:
         elapsed_time = global_stopwatch.get_elapsed_time() 
         self.probe_time_history = np.append(self.probe_time_history, round(elapsed_time, 2))
         
-        probe_times = np.full(len(self.trial_df), np.nan)
+        probe_times = np.full(df_len, np.nan)
         probe_times[:len(self.probe_time_history)] = self.probe_time_history
         self.trial_df['probe_time'] = probe_times
         self.trial_df.to_csv(self.trial_csv_path, index=False)
@@ -556,7 +564,9 @@ class Corridor:
         elapsed_time = global_stopwatch.get_elapsed_time()
         self.texture_revert_history = np.append(self.texture_revert_history, round(elapsed_time, 2))
 
-        revert_times = np.full(len(self.trial_df), np.nan)
+        # Cache trial_df length for faster array creation
+        df_len = len(self.trial_df)
+        revert_times = np.full(df_len, np.nan)
         revert_times[:len(self.texture_revert_history)] = self.texture_revert_history
         self.trial_df['texture_revert'] = revert_times
         self.trial_df.to_csv(self.trial_csv_path, index=False)
