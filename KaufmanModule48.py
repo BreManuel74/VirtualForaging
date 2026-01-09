@@ -222,13 +222,14 @@ class TextureSwapper:
             if c.cave is True:
                 # Add cave texture to end of go zone
                 cave_segments =  4
+                start_index = c.segments_until_revert + 24
                 cave_texture = c.cave_texture
-                cave_left, cave_right = c.get_forward_segments_far(cave_segments)
+                cave_left, cave_right = c.get_forward_segments_near_cave(cave_segments, start_index)
                 #print(len(cave_left), len(cave_right))
                 for i in range(min(len(cave_left), len(cave_right))):
                     c.apply_texture(cave_left[i], cave_texture)
                     c.apply_texture(cave_right[i], cave_texture)
-                cave_floor, cave_ceiling = c.get_forward_segments_far_floor_and_ceiling(cave_segments)
+                cave_floor, cave_ceiling = c.get_puff_zone_cave_ceiling_floor(cave_segments, start_index)
                 for i in range(min(len(cave_floor), len(cave_ceiling))):
                     c.apply_texture(cave_floor[i], cave_texture)
                     c.apply_texture(cave_ceiling[i], cave_texture)

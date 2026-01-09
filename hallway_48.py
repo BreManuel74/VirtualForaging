@@ -444,6 +444,35 @@ class Corridor:
 
         return selected_left, selected_right
     
+    def get_forward_segments_near_cave(self, count: int, start_index: int) -> tuple[list[NodePath], list[NodePath]]:
+        """
+        Get segments starting from the one behind the camera and then
+        moving forward for the specified count.
+        Camera is between segments 12 and 13 in a 24-segment hallway.
+        
+        Parameters:
+            count (int): Number of segments to return
+            start_index (int): Starting index for segments
+            
+        Returns:
+            tuple[list[NodePath], list[NodePath]]: Selected left and right wall segments
+        """
+        # Sort both left and right segments by Y position (front to back)
+        sorted_left = sorted(self.left_segments, key=lambda x: x.getY())
+        sorted_right = sorted(self.right_segments, key=lambda x: x.getY())
+        
+        # Camera is between segments 12 and 13
+        # Start from segment 12 (behind camera) and take 'count' segments forward
+        end_index = min(start_index + count, len(sorted_left))
+        
+        # Get segments from behind camera forward
+        selected_right = sorted_right[start_index:end_index]
+        
+        # Offset left segments forward by 1 (same as get_forward_segments_far)
+        selected_left = sorted_left[start_index-1:end_index-1]
+
+        return selected_left, selected_right
+
     def get_forward_segments_far_reward(self, count: int) -> tuple[list[NodePath], list[NodePath]]:
         """Get the specified number of segments ahead of the camera for reward texture."""
         # Sort both left and right segments
@@ -488,8 +517,7 @@ class Corridor:
         selected_floor = sorted_floor[-(count+1):-1]
         selected_ceiling = sorted_ceiling[-(count+1):-1]
         
-        return selected_floor, selected_ceiling
-    
+        return selected_floor, selected_ceiling  
 
     def get_forward_segments_far(self, count: int) -> tuple[list[NodePath], list[NodePath]]:
         """Get the specified number of segments ahead of the camera."""
@@ -553,8 +581,24 @@ class Corridor:
         sorted_ceiling = sorted(self.ceiling_segments, key=get_y)
         
         # Take the furthest count floor and ceiling segments normally
-        selected_floor = sorted_floor[-(count+16):-16]
-        selected_ceiling = sorted_ceiling[-(count+16):-16]
+        selected_floor = sorted_floor[-(count):]
+        selected_ceiling = sorted_ceiling[-(count):]
+        
+        return selected_floor, selected_ceiling
+    
+    def get_puff_zone_cave_ceiling_floor(self, count: int, start_index: int) -> tuple[list[NodePath], list[NodePath]]:
+        """Get the specified number of floor and ceiling segments ahead of the camera."""
+        # Sort both floor and ceiling segments
+        # Use cached sorting key function
+        get_y = self._get_y_pos
+        sorted_floor = sorted(self.floor_segments, key=get_y)
+        sorted_ceiling = sorted(self.ceiling_segments, key=get_y)
+
+        end_index = min(start_index + count, len(sorted_floor))
+        
+        # Take the furthest count floor and ceiling segments normally
+        selected_floor = sorted_floor[start_index:end_index]
+        selected_ceiling = sorted_ceiling[start_index:end_index]
         
         return selected_floor, selected_ceiling
     
