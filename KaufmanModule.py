@@ -226,7 +226,9 @@ class TextureSwapper:
         probe_segments = min(len(probe_left), len(probe_right))
         for i in range(probe_segments):
             c.apply_texture(probe_left[i], selected_temporary_texture)
+            c.set_probe_flag(probe_left[i], True)
             c.apply_texture(probe_right[i], selected_temporary_texture)
+            c.set_probe_flag(probe_right[i], True)
 
         # Log probe texture and time
         c.probe_texture_history = np.append(c.probe_texture_history, str(selected_temporary_texture))
