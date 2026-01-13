@@ -2,19 +2,56 @@ import pandas as pd
 import glob
 import os
 import argparse
+from tkinter import filedialog
+import tkinter as tk
 
-def create_dataframe(mouse_id=None, save_csv=True, output_file=None):
-    # Define the root directory where the BM* folders are located
-    root_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'Kaufman_Project')
+def create_dataframe(mouse_id=None, save_csv=True, output_file=None, selected_folder=None):
+    # Hide the main tkinter window
+    root = tk.Tk()
+    root.withdraw()
+    
+    # Define the default root directory where the BM* folders are located
+    default_root_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'Kaufman_Project')
+    
+    # Use selected folder if provided, otherwise use file dialog
+    if selected_folder:
+        root_dir = selected_folder
+    else:
+        # Browse for the folder containing your data files
+        root_dir = filedialog.askdirectory(
+            title="Select folder containing behavioral data files (VF* or BM* folders)",
+            initialdir=default_root_dir
+        )
+        
+        if not root_dir:
+            print("No folder selected. Exiting...")
+            return None
+    
+    print(f"Selected folder: {root_dir}")
     
     # Get CSV files based on mouse_id
     if mouse_id:
-        all_files = glob.glob(os.path.join(root_dir, f'BM{mouse_id}', '*.csv'))
-        if not all_files:
-            raise ValueError(f"No CSV files found for BM{mouse_id}")
+        # Check if the selected folder itself contains the files, or if we need to look in subdirectories
+        direct_files = glob.glob(os.path.join(root_dir, '*.csv'))
+        subfolder_files = glob.glob(os.path.join(root_dir, f'VF{mouse_id}', '*.csv'))
+        
+        if direct_files:
+            all_files = direct_files
+        elif subfolder_files:
+            all_files = subfolder_files
+        else:
+            raise ValueError(f"No CSV files found for VF{mouse_id} in selected folder")
     else:
-        all_files = glob.glob(os.path.join(root_dir, 'BM*', '*.csv'))
-
+        # Look for files in VF* subfolders or directly in the selected folder
+        subfolder_files = glob.glob(os.path.join(root_dir, 'VF*', '*.csv'))
+        direct_files = glob.glob(os.path.join(root_dir, '*.csv'))
+        
+        if subfolder_files:
+            all_files = subfolder_files
+        elif direct_files:
+            all_files = direct_files
+        else:
+            all_files = []
     # Create a dictionary to store data for each date
     data_by_date = {}
 
@@ -73,7 +110,7 @@ def create_dataframe(mouse_id=None, save_csv=True, output_file=None):
     # Save DataFrame to CSV if requested
     if save_csv:
         if output_file is None and mouse_id:
-            output_file = f"BM{mouse_id}_data.csv"
+            output_file = f"VF{mouse_id}_data.csv"
         elif output_file is None:
             output_file = "all_mice_data.csv"
             
@@ -90,7 +127,8 @@ if __name__ == "__main__":
     parser.add_argument('--mouse', type=str, help='Mouse ID (e.g., "12" for BM12)')
     parser.add_argument('--output', type=str, help='Output CSV file name (optional)')
     parser.add_argument('--no-save', action='store_true', help='Do not save the DataFrame to CSV')
+    parser.add_argument('--folder', type=str, help='Folder path (skip dialog if provided)')
     args = parser.parse_args()
     
-    df = create_dataframe(args.mouse, save_csv=not args.no_save, output_file=args.output)
+    df = create_dataframe(args.mouse, save_csv=not args.no_save, output_file=args.output, selected_folder=args.folder)
 

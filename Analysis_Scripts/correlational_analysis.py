@@ -685,11 +685,17 @@ def calculate_correlations(all_results):
         cohort_metrics = result['cohort_metrics']
         
         if cohort_metrics is not None:
-            # print(f"\nAnalyzing correlations for mouse {mouse}:")
+            print(f"\n=== DATA ALIGNMENT CHECK FOR MOUSE {mouse} ===")
             
-            # print("\nDetailed data points before merging:")
-            # print("Behavioral data days:", daily_metrics['day'].tolist())
-            # print("Weight data days:", cohort_metrics['Day'].tolist())
+            print("\nBehavioral data days:", daily_metrics['day'].tolist())
+            print("Weight data days:", cohort_metrics['Day'].tolist())
+            
+            # Show the first few rows of each dataset for verification
+            print("\nFirst 5 rows of behavioral data:")
+            print(daily_metrics[['day', 'reward_count', 'avg_speed', 'lick_count']].head().to_string())
+            
+            print("\nFirst 5 rows of weight data:")
+            print(cohort_metrics[['Day', 'Value']].head().to_string())
             
             # Match days between behavioral and cohort data
             merged_data = pd.merge(
@@ -700,8 +706,16 @@ def calculate_correlations(all_results):
                 how='inner'
             )
             
-            # print(f"\nNumber of days with both behavioral and weight data: {len(merged_data)}")
-            # print("Days that have both behavioral and weight data:", merged_data['day'].tolist())
+            print(f"\nNumber of days with both behavioral and weight data: {len(merged_data)}")
+            print("Days that have both behavioral and weight data:", merged_data['day'].tolist())
+            
+            if len(merged_data) > 0:
+                print("\nMERGED DATA (showing all matched days):")
+                print(merged_data[['day', 'Day', 'reward_count', 'Value', 'avg_speed', 'lick_count']].to_string())
+            else:
+                print("\nWARNING: No matching days found between behavioral and weight data!")
+            
+            print("=" * 60)
             
             if not merged_data.empty:
                 # print("\nDetailed matched data:")

@@ -59,7 +59,8 @@ def analyze_levels(data_files):
     
     # Create bar plot
     level_fig = plt.figure(figsize=(15, 8))  # Larger figure size
-    levels = list(level_stats.keys())
+    # Sort levels in ascending numerical order
+    levels = sorted(level_stats.keys(), key=lambda x: int(x.split('_')[1].split('.')[0]) if '_' in x and '.' in x else 0)
     means = [level_stats[level]['mean'] for level in levels]
     sems = [level_stats[level]['sem'] for level in levels]
     
