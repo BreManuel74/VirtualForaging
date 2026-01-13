@@ -1,3 +1,9 @@
+"""
+A GUI application to control and monitor a Panda3D game application for behavioral experiments.
+Implements a TCP server for communication, process management, and real-time updates.
+Original Author: Brenna Manuel
+"""
+
 import os
 import subprocess
 import sys
@@ -56,7 +62,7 @@ class TCPDataServer:
         
         try:
             import json
-            level_path = os.path.join(os.getcwd(), 'Levels', level_file)
+            level_path = os.path.join(os.getcwd(), self.levels_folder, level_file)
             with open(level_path, 'r') as f:
                 level_data = json.load(f)
                 threshold = level_data.get('reward_threshold', float('inf'))
@@ -78,8 +84,18 @@ class TCPDataServer:
         """Get list of available level files sorted by their numeric order."""
         try:
             levels_path = os.path.join(os.getcwd(), self.levels_folder)
+            if not os.path.exists(levels_path):
+                print(f"Warning: Levels folder '{self.levels_folder}' does not exist")
+                self.ordered_levels = []
+                return []
+            
             # Get all JSON files
             level_files = [f for f in os.listdir(levels_path) if f.endswith('.json')]
+            
+            if not level_files:
+                print(f"Warning: No level files found in '{self.levels_folder}'")
+                self.ordered_levels = []
+                return []
             
             #print(f"Found level files: {level_files}")  # Debug print
             
@@ -510,6 +526,8 @@ class KaufmanGUI:
         self.reward_count = tk.StringVar(value="0")
         self.session_active = False  # Track if a session is active
         self.selected_progress_report = tk.StringVar()  # Track selected progress report
+        self.levels_folder = tk.StringVar(value="Levels")  # Default levels folder
+        self.phase_file = tk.StringVar()  # Selected phase file from hallway_types
         
         # Initialize list for session-sensitive widgets before creating frames
         self.session_sensitive_widgets = []
@@ -570,9 +588,26 @@ class KaufmanGUI:
         self.update_progress_report_list()
         self.session_sensitive_widgets.append(self.progress_report_combobox)
         
+        # Levels Folder
+        ttk.Label(setup_frame, text="Levels Folder:", style="Custom.TLabel").grid(row=5, column=0, sticky=tk.W)
+        levels_frame = ttk.Frame(setup_frame)
+        levels_frame.grid(row=5, column=1, sticky=(tk.W, tk.E))
+        levels_entry = ttk.Entry(levels_frame, textvariable=self.levels_folder, style="TEntry")
+        levels_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        browse_levels_btn = ttk.Button(levels_frame, text="Browse", command=self.browse_levels_folder)
+        browse_levels_btn.pack(side=tk.RIGHT)
+        self.session_sensitive_widgets.extend([levels_entry, browse_levels_btn])
+        
+        # Phase File Selection
+        ttk.Label(setup_frame, text="Phase File:", style="Custom.TLabel").grid(row=6, column=0, sticky=tk.W)
+        self.phase_file_combobox = ttk.Combobox(setup_frame, textvariable=self.phase_file, state="readonly")
+        self.phase_file_combobox.grid(row=6, column=1, sticky=(tk.W, tk.E))
+        self.update_phase_file_list()
+        self.session_sensitive_widgets.append(self.phase_file_combobox)
+        
         # Start Button
         self.start_button = ttk.Button(setup_frame, text="Start Session", command=self.start_session)
-        self.start_button.grid(row=5, column=0, columnspan=2, pady=10)
+        self.start_button.grid(row=7, column=0, columnspan=2, pady=10)
         self.session_sensitive_widgets.append(self.start_button)
         
         # Configure grid
@@ -712,7 +747,7 @@ class KaufmanGUI:
                         reward_count = 0
                     
                     # Validate that the level file exists
-                    level_path = os.path.join(os.getcwd(), 'Levels', level_name)
+                    level_path = os.path.join(os.getcwd(), self.levels_folder.get(), level_name)
                     if os.path.exists(level_path):
                         self.log_to_console(f"Resuming from last level: {level_name} with {reward_count} rewards")
                         return (level_name, reward_count)
@@ -752,10 +787,49 @@ class KaufmanGUI:
         if dir_path:
             self.output_dir.set(dir_path)
     
+    def browse_levels_folder(self):
+        from tkinter import filedialog
+        dir_path = filedialog.askdirectory(initialdir=os.getcwd(), title="Select Levels Folder")
+        if dir_path:
+            # Convert to relative path if within current directory
+            try:
+                rel_path = os.path.relpath(dir_path, os.getcwd())
+                self.levels_folder.set(rel_path)
+            except ValueError:
+                # If on different drive, use absolute path
+                self.levels_folder.set(dir_path)
+    
+    def update_phase_file_list(self):
+        """Update the list of available phase files from local directory."""
+        try:
+            # Get all Python files in the current directory that start with 'hallway'
+            phase_files = [f for f in os.listdir(os.getcwd()) 
+                          if f.startswith('hallway') and f.endswith('.py')]
+            
+            if phase_files:
+                self.phase_file_combobox['values'] = phase_files
+                # Select the first phase file by default
+                if phase_files:
+                    self.phase_file.set(phase_files[0])
+                self.log_to_console(f"Found {len(phase_files)} phase file(s) in local directory")
+            else:
+                self.phase_file_combobox['values'] = []
+                self.phase_file.set('')
+                self.log_to_console("WARNING: No phase files (hallway*.py) found in local directory")
+        except Exception as e:
+            self.log_to_console(f"Error loading phase files: {str(e)}")
+            self.phase_file_combobox['values'] = []
+            self.phase_file.set('')
+    
     def log_to_console(self, message):
         """Log a message to the console with optimal performance."""
-        self.console.insert(tk.END, f"{message}\n")
-        self.console.see(tk.END)
+        # Check if console exists (may not exist during initialization)
+        if hasattr(self, 'console'):
+            self.console.insert(tk.END, f"{message}\n")
+            self.console.see(tk.END)
+        else:
+            # During initialization, just print to stdout
+            print(message)
         # Don't force updates - let Tkinter handle it naturally during idle time
         # This prevents blocking the UI thread
     
@@ -951,6 +1025,11 @@ class KaufmanGUI:
             self.log_to_console(f"Error killing process tree: {str(e)}")
 
     def stop_session(self):
+        # Prevent stopping if no session is active
+        if not self.session_active:
+            messagebox.showwarning("No Active Session", "There is no active session to stop.")
+            return
+        
         if messagebox.askyesno("Confirm Stop", "Are you sure you want to stop the current session?"):
             self.log_to_console("\nShutting down...")
             
@@ -1096,14 +1175,47 @@ class KaufmanGUI:
             messagebox.showerror("Error", "Please fill in all required fields")
             return
         
+        # Validate phase file selection
+        if not self.phase_file.get():
+            messagebox.showerror("Error", "Please select a phase file")
+            return
+        
+        # Validate that phase file exists
+        phase_file = os.path.join(os.getcwd(), self.phase_file.get())
+        if not os.path.exists(phase_file):
+            messagebox.showerror("Error", f"Phase file '{self.phase_file.get()}' does not exist")
+            return
+        
+        # Validate that phase file is a Python file
+        if not phase_file.endswith('.py'):
+            messagebox.showerror("Error", "Phase file must be a Python (.py) file")
+            return
+        
+        # Validate levels folder
+        levels_folder = self.levels_folder.get()
+        levels_folder_path = os.path.join(os.getcwd(), levels_folder)
+        if not os.path.exists(levels_folder_path):
+            messagebox.showerror("Error", f"Levels folder '{levels_folder}' does not exist")
+            return
+        
+        # Check if levels folder has any JSON files
+        level_files = [f for f in os.listdir(levels_folder_path) if f.endswith('.json')]
+        if not level_files:
+            messagebox.showerror("Error", f"No level files (.json) found in '{levels_folder}' folder")
+            return
+        
         # Determine the starting level from the progress report
         animal_name = self.animal_name.get()
         report_file = f"{animal_name}_log.csv"
         starting_level, starting_reward_count = self.get_starting_level_from_report(report_file)
         
-        # Get file paths
-        level_file = os.path.join(os.getcwd(), 'Levels', starting_level)
-        phase_file = os.path.join(os.getcwd(), 'final.py')
+        # Validate that the starting level exists in the selected folder
+        level_file = os.path.join(os.getcwd(), levels_folder, starting_level)
+        if not os.path.exists(level_file):
+            messagebox.showerror("Error", 
+                f"Starting level '{starting_level}' not found in '{levels_folder}' folder.\n"
+                f"Available levels: {', '.join(sorted(level_files)[:5])}{'...' if len(level_files) > 5 else ''}")
+            return
         
         # Log the run
         self.log_run(animal_name, level_file, self.batch_id.get())
@@ -1112,8 +1224,9 @@ class KaufmanGUI:
         level_file_path = level_file.replace(os.getcwd() + os.sep, '').replace('\\', '/')
         
         try:
-            # Start TCP server
-            self.tcp_server = TCPDataServer()
+            # Start TCP server with selected levels folder
+            levels_folder = self.levels_folder.get()
+            self.tcp_server = TCPDataServer(levels_folder=levels_folder)
             server_port = self.tcp_server.start_server()
             
             # Override the callback scheduler to use Tkinter's thread-safe after() method
@@ -1146,6 +1259,7 @@ class KaufmanGUI:
             env["OUTPUT_DIR"] = self.output_dir.get()
             env["BATCH_ID"] = self.batch_id.get()
             env["TEENSY_PORT"] = self.teensy_port.get()
+            env["LEVELS_FOLDER"] = levels_folder  # Pass the selected levels folder to the game
             
             # Start the Panda3D game as a subprocess
             self.process = subprocess.Popen([sys.executable, phase_file], env=env)

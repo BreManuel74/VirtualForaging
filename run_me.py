@@ -1,3 +1,8 @@
+"""
+A script to run a Panda3D game application with dynamic level changing via TCP.
+Provides an interactive command interface to send commands to the game.
+Original Author: Brenna Manuel
+"""
 import os
 import subprocess
 import sys

@@ -1,3 +1,8 @@
+"""
+Lick and Speed Analysis Classes for daily analysis of behavioral data. Contains metrics used to determine mouse learning progress.
+Original Author: Brenna Manuel
+"""
+
 import pandas as pd
 import ast
 import numpy as np

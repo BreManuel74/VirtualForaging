@@ -1,18 +1,37 @@
+"""
+A script to record video from a ThorCam camera using Micro-Manager and OpenCV.
+The script captures frames at a specified FPS, saves them to an AVI file using the MJPEG codec,
+and logs the timestamp and frame number to a text file. It supports hardware-triggered acquisition.
+Original Author: Brenna Manuel
+"""
 import os
 import cv2
 import numpy as np
 import pymmcore_plus
 import time
-from Phases.final import Stopwatch
+from pathlib import Path
+from global_stopwatch import Stopwatch
 
 def main():
     global_stopwatch = Stopwatch()
-    global_stopwatch.start()
+    
+    # Use the start time from the main process if available
+    start_time_str = os.environ.get("STOPWATCH_START_TIME")
+    if start_time_str:
+        global_stopwatch.start_time = float(start_time_str)
+        global_stopwatch.running = True
+        print(f"Synchronized with main process stopwatch (start time: {global_stopwatch.start_time})")
+    else:
+        global_stopwatch.start()
+        print("Warning: No shared stopwatch time found, starting independent stopwatch")
 
     camera_device = "ThorCam"
     video_dir = os.environ.get("OUTPUT_DIR")
     fps = 20
     stop_file = "stop_recording.flag"
+    
+    # MJPEG codec is used instead of H264 for reliability
+    # No external DLL dependencies needed
 
     # Initialize the Micro-Manager core
     mmc = pymmcore_plus.CMMCorePlus()
@@ -28,7 +47,9 @@ def main():
     out_filename = os.path.join(video_dir, f"{int(time.time())}pupil_cam.avi")
     frame_width = int(mmc.getImageWidth())
     frame_height = int(mmc.getImageHeight())
-    fourcc = cv2.VideoWriter_fourcc(*'XVID')
+    
+    # Use MJPEG - works reliably, no external dependencies, good quality
+    fourcc = cv2.VideoWriter_fourcc(*'MJPG')
     video_writer = cv2.VideoWriter(out_filename, fourcc, fps, (frame_width, frame_height), isColor=False)
 
     # Prepare text log file

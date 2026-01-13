@@ -185,7 +185,7 @@ class TextureSwapper:
         # Determine length of special zone and side effects
         segments_until_revert = int(random.choice(stay_or_go_data))
         c.segments_until_revert = segments_until_revert
-        c.zone_gap = (12 - segments_until_revert) if selected_texture == stop_texture else 0
+        c.zone_gap = (19 - segments_until_revert) if selected_texture == stop_texture else 0
         c.base.zone_length = segments_until_revert
         
         # Log length
@@ -194,12 +194,24 @@ class TextureSwapper:
 
         # Apply textures to appropriate segments
         if selected_texture == stop_texture:
-            forward_left, forward_right = c.get_forward_segments_far(c.segments_until_revert)
+            forward_left, forward_right = c.get_forward_segments_far_reward(c.segments_until_revert)
             num_segments = min(len(forward_left), len(forward_right))
             for i in range(num_segments):
                 c.apply_texture(forward_left[i], selected_texture)
                 c.apply_texture(forward_right[i], selected_texture)
                 c.set_segment_flag(forward_right[i], True)
+            if c.cave is True:
+            # Add cave texture to end of stay zone
+                cave_segments = 4
+                cave_texture = c.cave_texture
+                cave_left, cave_right = c.get_forward_segments_far_reward_cave(cave_segments)
+                for i in range(min(len(cave_left), len(cave_right))):
+                    c.apply_texture(cave_left[i], cave_texture)
+                    c.apply_texture(cave_right[i], cave_texture)
+                cave_floor, cave_ceiling = c.get_forward_segments_far_reward_floor_and_ceiling(cave_segments)
+                for i in range(min(len(cave_floor), len(cave_ceiling))):
+                    c.apply_texture(cave_floor[i], cave_texture)
+                    c.apply_texture(cave_ceiling[i], cave_texture)
         else:
             middle_left, middle_right = c.get_forward_segments_near(c.segments_until_revert)
             num_segments = min(len(middle_left), len(middle_right))
@@ -209,13 +221,15 @@ class TextureSwapper:
                 c.set_segment_flag(middle_right[i], True)
             if c.cave is True:
                 # Add cave texture to end of go zone
-                cave_segments = 13 - segments_until_revert
+                cave_segments =  4
+                start_index = c.segments_until_revert + 24
                 cave_texture = c.cave_texture
-                cave_left, cave_right = c.get_forward_segments_far(cave_segments)
+                cave_left, cave_right = c.get_forward_segments_near_cave(cave_segments, start_index)
+                #print(len(cave_left), len(cave_right))
                 for i in range(min(len(cave_left), len(cave_right))):
                     c.apply_texture(cave_left[i], cave_texture)
                     c.apply_texture(cave_right[i], cave_texture)
-                cave_floor, cave_ceiling = c.get_forward_segments_far_floor_and_ceiling(cave_segments)
+                cave_floor, cave_ceiling = c.get_puff_zone_cave_ceiling_floor(cave_segments, start_index)
                 for i in range(min(len(cave_floor), len(cave_ceiling))):
                     c.apply_texture(cave_floor[i], cave_texture)
                     c.apply_texture(cave_ceiling[i], cave_texture)
@@ -228,7 +242,7 @@ class TextureSwapper:
         selected_temporary_texture = c.locked_probe
         
         # Apply temporary texture to forward segments
-        probe_left, probe_right = c.get_forward_segments_far(12)
+        probe_left, probe_right = c.get_forward_segments_far_reward_cave(24)
         probe_segments = min(len(probe_left), len(probe_right))
         apply_texture = c.apply_texture
         set_probe_flag = c.set_probe_flag
@@ -263,7 +277,7 @@ class TextureSwapper:
         selected_temporary_texture = random.choice(temporary_wall_textures)
 
         # Apply temporary texture to forward segments
-        probe_left, probe_right = c.get_forward_segments_far(12)
+        probe_left, probe_right = c.get_forward_segments_far(18)
         probe_segments = min(len(probe_left), len(probe_right))
         apply_texture = c.apply_texture
         set_probe_flag = c.set_probe_flag
@@ -292,7 +306,7 @@ class TextureSwapper:
     def revert_probe_texture(self, task=None):
         """Revert temporary probe textures back to corridor's right_wall_texture."""
         c = self.corridor
-        probe_left, probe_right = c.get_forward_segments_far_probe_revert(20)
+        probe_left, probe_right = c.get_forward_segments_far_probe_revert(44)
         probe_segments = min(len(probe_left), len(probe_right))
         right_wall_texture = c.right_wall_texture
         apply_texture = c.apply_texture
@@ -304,7 +318,7 @@ class TextureSwapper:
                 apply_texture(probe_right[i], right_wall_texture)
                 set_probe_flag(probe_left[i], False)
                 set_probe_flag(probe_right[i], False)
-        floor, ceiling = c.get_forward_segments_far_floor_and_ceiling(24)
+        floor, ceiling = c.get_forward_segments_far_floor_and_ceiling(48)
         number_of_segments = min(len(floor), len(ceiling))
         floor_texture = c.floor_texture
         ceiling_texture = c.ceiling_texture
