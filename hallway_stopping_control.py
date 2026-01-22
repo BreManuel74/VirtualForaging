@@ -909,11 +909,8 @@ class RewardOrPuff(FSM):
         current_texture = self.base.corridor.left_segments[0].getTexture().getFilename()
 
         if self.state == 'Reward':
-            # Transition to Neutral only if the wall texture matches the original wall texture
-            if current_texture == self.base.corridor.left_wall_texture:
-                self.request('Neutral')
+            self.request('Neutral')
         elif self.state == 'Puff':
-            # Transition to Neutral directly without checking the wall texture
             self.request('Neutral')
 
         return Task.done
@@ -1628,6 +1625,8 @@ class MousePortal(ShowBase):
         self.tcp_client = TCPStreamClient(self)
         self.time_spent_at_zero_speed = self.cfg["time_spent_at_zero_speed"]
 
+        self.reward_requested = False
+
     def _signal_handler(self, signum, frame):
         """Handle system signals for graceful shutdown."""
         print(f"\nReceived signal {signum}, shutting down gracefully...")
@@ -1722,35 +1721,18 @@ class MousePortal(ShowBase):
         # Get the elapsed time from the global stopwatch
         current_time = global_stopwatch.get_elapsed_time()
 
-        # # Track when treadmill speed becomes 0 and reset if speed is not 0
-        # if self.treadmill.data.speed == 0:
-        #     if self.speed_zero_start_time is None:
-        #         self.speed_zero_start_time = current_time
-        # else:
-        #     self.speed_zero_start_time = None
-
-        #print(self.treadmill.data.speed)
-
         if selected_texture == self.corridor.stop_texture:
-            #print(self.zone_length)
-            # Check if speed has been 0 for set time
-            # speed_zero_duration = (self.speed_zero_start_time is not None and 
-            #                            current_time >= self.speed_zero_start_time + self.time_spent_at_zero_speed)
-            
-            # Check if enough time has been spent in the zone
-            meets_time_requirement = current_time >= self.enter_stay_time + self.reward_time
-            
-            if (self.fsm.state != 'Reward' and meets_time_requirement):  # Either condition can trigger reward
-                #print("Requesting Reward state")
-                self.fsm.request('Reward')
+            if self.fsm.state != 'Reward' and not self.reward_requested:
+                #print(self.zone_length)
+                self.reward_requested = True
+                self.doMethodLaterStopwatch(0.6, self.reward_summoner, 'Reward')
         elif selected_texture == self.corridor.go_texture:
-            #print(self.zone_length)
-            if self.segments_with_go_texture <= self.zone_length and self.fsm.state != 'Puff' and current_time >= self.enter_go_time + (self.puff_time * self.zone_length):
-                #print("Requesting Puff state")
-                self.fsm.request('Puff')
+            self.reward_requested = False  # Reset if we enter go texture
         else:
+            # Only reset when we're truly in neutral zone (not stop or go)
             self.segments_with_go_texture = 0 
             self.segments_with_stay_texture = 0
+            self.reward_requested = False  # Reset when leaving stop texture zone
             if self.fsm.state != 'Neutral':
                 #print("Requesting Neutral state")
                 self.fsm.request('Neutral')
@@ -1791,6 +1773,11 @@ class MousePortal(ShowBase):
             self.treadmill.close()
         if self.serial_output:
             self.serial_output.close()
+
+    def reward_summoner(self, task=None):
+        """Trigger a reward event."""
+        self.fsm.request('Reward')
+        return Task.done
 
 if __name__ == "__main__":
     config_path = os.environ.get("LEVEL_CONFIG_PATH")
