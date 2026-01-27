@@ -155,49 +155,81 @@ texture_history = trial_log_df['texture_history'].apply(safe_literal_eval)
 texture_change_time = trial_log_df['texture_change_time'].apply(safe_literal_eval)
 revert_time = trial_log_df['texture_revert'].apply(safe_literal_eval)
 
-max_len = max(
-    texture_history.apply(len).max(),
-    texture_change_time.apply(len).max(),
-    revert_time.apply(len).max()
+# Check if there are any texture changes in the data
+has_texture_data = (
+    texture_history.apply(len).max() > 0 or
+    texture_change_time.apply(len).max() > 0 or
+    revert_time.apply(len).max() > 0
 )
 
-def pad_list(lst, length):
-    return lst + [np.nan] * (length - len(lst))
+if has_texture_data:
+    max_len = max(
+        texture_history.apply(len).max(),
+        texture_change_time.apply(len).max(),
+        revert_time.apply(len).max()
+    )
 
-texture_history_padded = np.array(texture_history.apply(lambda x: pad_list(x, max_len)).tolist())
-texture_change_time_padded = np.array(texture_change_time.apply(lambda x: pad_list(x, max_len)).tolist())
-revert_time_padded = np.array(revert_time.apply(lambda x: pad_list(x, max_len)).tolist())
+    def pad_list(lst, length):
+        return lst + [np.nan] * (length - len(lst))
 
-combined_array = np.stack(
-    [texture_history_padded, texture_change_time_padded, revert_time_padded],
-    axis=1
-)
+    texture_history_padded = np.array(texture_history.apply(lambda x: pad_list(x, max_len)).tolist())
+    texture_change_time_padded = np.array(texture_change_time.apply(lambda x: pad_list(x, max_len)).tolist())
+    revert_time_padded = np.array(revert_time.apply(lambda x: pad_list(x, max_len)).tolist())
 
-# combined_array now has shape (num_rows, 3, max_len)
-# combined_array[:, 0, :] = texture_history
-# combined_array[:, 1, :] = texture_change_time
-# combined_array[:, 2, :] = revert_time
+    combined_array = np.stack(
+        [texture_history_padded, texture_change_time_padded, revert_time_padded],
+        axis=1
+    )
 
-# Create boolean masks for each asset type
-is_punish = texture_history_padded[:, 0] == "assets/punish_mean100.jpg"
-is_reward = texture_history_padded[:, 0] == "assets/reward_mean100.jpg"
+    # combined_array now has shape (num_rows, 3, max_len)
+    # combined_array[:, 0, :] = texture_history
+    # combined_array[:, 1, :] = texture_change_time
+    # combined_array[:, 2, :] = revert_time
 
-# Select rows for each type
-punish_array = combined_array[is_punish]
-reward_array = combined_array[is_reward]
+    # Create boolean masks for each asset type
+    is_punish = texture_history_padded[:, 0] == "assets/punish_mean100.jpg"
+    is_reward = texture_history_padded[:, 0] == "assets/reward_mean100.jpg"
 
-# Now punish_array and reward_array contain only rows starting with the respective asset
-# For punish:
-punish_texture_change_time = punish_array[:, 1, :]
-punish_revert_time = punish_array[:, 2, :]
+    # Select rows for each type
+    punish_array = combined_array[is_punish]
+    reward_array = combined_array[is_reward]
 
-# Create versions that only use the first puff per zone (for calculations)
-punish_texture_change_time_first = punish_texture_change_time[:, 0]
-punish_revert_time_first = punish_revert_time[:, 0]
+    # Now punish_array and reward_array contain only rows starting with the respective asset
+    # For punish:
+    punish_texture_change_time = punish_array[:, 1, :]
+    punish_revert_time = punish_array[:, 2, :]
 
-# And for reward:
-reward_texture_change_time = reward_array[:, 1, :]
-reward_revert_time = reward_array[:, 2, :]
+    # Create versions that only use the first puff per zone (for calculations)
+    if punish_array.shape[0] > 0 and punish_array.shape[2] > 0:
+        punish_texture_change_time_first = punish_texture_change_time[:, 0]
+        punish_revert_time_first = punish_revert_time[:, 0]
+    else:
+        punish_texture_change_time_first = np.array([])
+        punish_revert_time_first = np.array([])
+
+    # And for reward:
+    reward_texture_change_time = reward_array[:, 1, :]
+    reward_revert_time = reward_array[:, 2, :]
+    
+else:
+    print("Warning: No texture change data found. Creating empty arrays for texture-related analysis.")
+    # Create empty arrays for when no texture data is present
+    max_len = 1  # Set a default value to avoid issues
+    texture_history_padded = np.empty((0, 1))
+    texture_change_time_padded = np.empty((0, 1))
+    revert_time_padded = np.empty((0, 1))
+    
+    # Create empty arrays for punish and reward data
+    punish_array = np.empty((0, 3, 1))
+    reward_array = np.empty((0, 3, 1))
+    
+    punish_texture_change_time = np.empty((0, 1))
+    punish_revert_time = np.empty((0, 1))
+    punish_texture_change_time_first = np.array([])
+    punish_revert_time_first = np.array([])
+    
+    reward_texture_change_time = np.empty((0, 1))
+    reward_revert_time = np.empty((0, 1))
 
 # Interpolate treadmill distance to match capacitive elapsed_time
 treadmill_interp = pd.Series(
@@ -443,25 +475,27 @@ if 'probe_time' in trial_log_df.columns:
         axs[0].axvline(x=pt, color='black', linestyle='-', alpha=0.7, linewidth=2, label='Probe Event' if i == 0 else "")
 
 # Highlight reward intervals
-for trial_idx in range(reward_texture_change_time.shape[0]):
-    for seg_idx in range(reward_texture_change_time.shape[1]):
-        try:
-            start = float(reward_texture_change_time[trial_idx, seg_idx])
-            end = float(reward_revert_time[trial_idx, seg_idx])
-            if not np.isnan(start) and not np.isnan(end):
-                axs[0].axvspan(start, end, color='green', alpha=0.15)
-        except (ValueError, TypeError):
-            continue
+if reward_texture_change_time.shape[0] > 0 and reward_texture_change_time.shape[1] > 0:
+    for trial_idx in range(reward_texture_change_time.shape[0]):
+        for seg_idx in range(reward_texture_change_time.shape[1]):
+            try:
+                start = float(reward_texture_change_time[trial_idx, seg_idx])
+                end = float(reward_revert_time[trial_idx, seg_idx])
+                if not np.isnan(start) and not np.isnan(end):
+                    axs[0].axvspan(start, end, color='green', alpha=0.15)
+            except (ValueError, TypeError):
+                continue
 
 # Highlight punish intervals - only using first puff per zone
-for trial_idx in range(punish_texture_change_time_first.shape[0]):
-    try:
-        start = float(punish_texture_change_time_first[trial_idx])
-        end = float(punish_revert_time_first[trial_idx])
-        if not np.isnan(start) and not np.isnan(end):
-            axs[0].axvspan(start, end, color='red', alpha=0.15)
-    except (ValueError, TypeError):
-        continue
+if punish_texture_change_time_first.shape[0] > 0:
+    for trial_idx in range(punish_texture_change_time_first.shape[0]):
+        try:
+            start = float(punish_texture_change_time_first[trial_idx])
+            end = float(punish_revert_time_first[trial_idx])
+            if not np.isnan(start) and not np.isnan(end):
+                axs[0].axvspan(start, end, color='red', alpha=0.15)
+        except (ValueError, TypeError):
+            continue
 
 axs[0].set_ylabel('Capacitive Value')
 axs[0].set_title('Capacitive Sensor Over Time with Reward and Puff Events')
@@ -496,25 +530,27 @@ if 'probe_time' in trial_log_df.columns:
         axs[1].axvline(x=pt, color='black', linestyle='-', alpha=0.7, linewidth=2, label='Probe Event' if i == 0 else "")
 
 # Highlight reward intervals
-for trial_idx in range(reward_texture_change_time.shape[0]):
-    for seg_idx in range(reward_texture_change_time.shape[1]):
-        try:
-            start = float(reward_texture_change_time[trial_idx, seg_idx])
-            end = float(reward_revert_time[trial_idx, seg_idx])
-            if not np.isnan(start) and not np.isnan(end):
-                axs[1].axvspan(start, end, color='green', alpha=0.15)
-        except (ValueError, TypeError):
-            continue
+if reward_texture_change_time.shape[0] > 0 and reward_texture_change_time.shape[1] > 0:
+    for trial_idx in range(reward_texture_change_time.shape[0]):
+        for seg_idx in range(reward_texture_change_time.shape[1]):
+            try:
+                start = float(reward_texture_change_time[trial_idx, seg_idx])
+                end = float(reward_revert_time[trial_idx, seg_idx])
+                if not np.isnan(start) and not np.isnan(end):
+                    axs[1].axvspan(start, end, color='green', alpha=0.15)
+            except (ValueError, TypeError):
+                continue
 
 # Highlight punish intervals - only using first puff per zone
-for trial_idx in range(punish_texture_change_time_first.shape[0]):
-    try:
-        start = float(punish_texture_change_time_first[trial_idx])
-        end = float(punish_revert_time_first[trial_idx])
-        if not np.isnan(start) and not np.isnan(end):
-            axs[1].axvspan(start, end, color='red', alpha=0.15)
-    except (ValueError, TypeError):
-        continue
+if punish_texture_change_time_first.shape[0] > 0:
+    for trial_idx in range(punish_texture_change_time_first.shape[0]):
+        try:
+            start = float(punish_texture_change_time_first[trial_idx])
+            end = float(punish_revert_time_first[trial_idx])
+            if not np.isnan(start) and not np.isnan(end):
+                axs[1].axvspan(start, end, color='red', alpha=0.15)
+        except (ValueError, TypeError):
+            continue
 
 axs[1].set_xlabel('Elapsed Time (s)' if not has_pupil_data else '')
 axs[1].set_ylabel('Speed')
@@ -545,25 +581,27 @@ if has_pupil_data and pupil_diameter_interp is not None:
             axs[2].axvline(x=pt, color='black', linestyle='-', alpha=0.7, linewidth=2, label='Probe Event' if i == 0 else "")
 
     # Highlight reward intervals
-    for trial_idx in range(reward_texture_change_time.shape[0]):
-        for seg_idx in range(reward_texture_change_time.shape[1]):
-            try:
-                start = float(reward_texture_change_time[trial_idx, seg_idx])
-                end = float(reward_revert_time[trial_idx, seg_idx])
-                if not np.isnan(start) and not np.isnan(end):
-                    axs[2].axvspan(start, end, color='green', alpha=0.15)
-            except (ValueError, TypeError):
-                continue
+    if reward_texture_change_time.shape[0] > 0 and reward_texture_change_time.shape[1] > 0:
+        for trial_idx in range(reward_texture_change_time.shape[0]):
+            for seg_idx in range(reward_texture_change_time.shape[1]):
+                try:
+                    start = float(reward_texture_change_time[trial_idx, seg_idx])
+                    end = float(reward_revert_time[trial_idx, seg_idx])
+                    if not np.isnan(start) and not np.isnan(end):
+                        axs[2].axvspan(start, end, color='green', alpha=0.15)
+                except (ValueError, TypeError):
+                    continue
 
     # Highlight punish intervals - only using first puff per zone
-    for trial_idx in range(punish_texture_change_time_first.shape[0]):
-        try:
-            start = float(punish_texture_change_time_first[trial_idx])
-            end = float(punish_revert_time_first[trial_idx])
-            if not np.isnan(start) and not np.isnan(end):
-                axs[2].axvspan(start, end, color='red', alpha=0.15)
-        except (ValueError, TypeError):
-            continue
+    if punish_texture_change_time_first.shape[0] > 0:
+        for trial_idx in range(punish_texture_change_time_first.shape[0]):
+            try:
+                start = float(punish_texture_change_time_first[trial_idx])
+                end = float(punish_revert_time_first[trial_idx])
+                if not np.isnan(start) and not np.isnan(end):
+                    axs[2].axvspan(start, end, color='red', alpha=0.15)
+            except (ValueError, TypeError):
+                continue
 
     axs[2].set_xlabel('Elapsed Time (s)')
     axs[2].set_ylabel('Pupil Diameter (pixels)')
@@ -582,118 +620,140 @@ save_figure(fig, f"timeline_{'capacitive_treadmill_pupil' if has_pupil_data else
 plt.show()
 
 window = 5  # seconds before and after
-reward_times_flat = reward_texture_change_time.flatten()
-reward_times_flat = pd.to_numeric(reward_times_flat, errors='coerce')
-reward_times_flat = reward_times_flat[~np.isnan(reward_times_flat)]
+if reward_texture_change_time.size > 0:
+    reward_times_flat = reward_texture_change_time.flatten()
+    reward_times_flat = pd.to_numeric(reward_times_flat, errors='coerce')
+    reward_times_flat = reward_times_flat[~np.isnan(reward_times_flat)]
+else:
+    reward_times_flat = np.array([])
 
 cap_time = capacitive_df['elapsed_time'].values
 cap_val = capacitive_df['capacitive_value'].values
 
-cap_windows = []
-for rt in reward_times_flat:
-    mask = (cap_time >= rt - window) & (cap_time <= rt + window)
-    cap_segment = cap_val[mask]
-    cap_windows.append(cap_segment)
-
-# Pad all segments to the same length (max found)
-max_len = max(len(seg) for seg in cap_windows)
-cap_windows_padded = np.array([
-    np.pad(seg.astype(float), (0, max_len - len(seg)), constant_values=np.nan)
-    for seg in cap_windows
-])
-
-# cap_windows_padded is your 2D array: shape (num_reward_events, num_timepoints)
-# Each row: capacitive values from 5s before to 5s after each reward_texture_change_time
-
-# Example: print shape
-#print("Shape of cap_windows_padded:", cap_windows_padded.shape)
-
-# Create a common time axis centered at 0
-dt = np.median(np.diff(cap_time))  # Estimate sampling interval
-window_len = cap_windows_padded.shape[1]
-aligned_time = np.linspace(-window, window, window_len)
-
-# plt.figure(figsize=(10, 6))
-
-n_rewards = cap_windows_padded.shape[0]  # Number of reward events
-
-# Plot mean and SEM
-# mean_vals = np.nanmean(cap_windows_padded, axis=0)
-# sem_vals = np.nanstd(cap_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(cap_windows_padded), axis=0))
-# plt.plot(aligned_time, mean_vals, color='blue', label=f'Mean (n={n_rewards})')
-# plt.fill_between(aligned_time, mean_vals - sem_vals, mean_vals + sem_vals, color='blue', alpha=0.2, label='SEM')
-
-# plt.axvline(0, color='red', linestyle='--', label='Reward Onset (t=0)')
-# plt.xlabel('Time from Reward Zone Onset (s)')
-# plt.ylabel('Capacitive Value')
-# plt.title('Capacitive Value Aligned to Reward Zone Onset')
-# plt.legend()
-# plt.xticks(np.arange(-5, 6, 1))  # Set x-axis ticks from -5 to 5 with step 1
-# plt.xlim(-5, 5)   
-# ax = plt.gca()
-# ax.spines['top'].set_visible(False)
-# ax.spines['right'].set_visible(False)
-# ax.tick_params(axis='both', direction='out')
-# plt.tight_layout()
-# #plt.show()
-
-# --- Interpolated Treadmill Speed aligned to reward_times_flat ---
-
-# Get interpolated speed as numpy array
-speed_val = treadmill_interp.values
-
-speed_windows = []
-for rt in reward_times_flat:
-    mask = (cap_time >= rt - window) & (cap_time <= rt + window)
-    speed_segment = speed_val[mask]
-    speed_windows.append(speed_segment)
-
-# Pad all segments to the same length (max found)
-max_speed_len = max(len(seg) for seg in speed_windows)
-speed_windows_padded = np.array([
-    np.pad(seg.astype(float), (0, max_speed_len - len(seg)), constant_values=np.nan)
-    for seg in speed_windows
-])
-
-# Create a common time axis centered at 0 for speed
-aligned_time_speed = np.linspace(-window, window, max_speed_len)
-
-n_rewards_speed = speed_windows_padded.shape[0]
-
-# Plot mean and SEM for speed
-mean_speed = np.nanmean(speed_windows_padded, axis=0)
-sem_speed = np.nanstd(speed_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(speed_windows_padded), axis=0))
-
-# --- Interpolated Pupil Diameter aligned to reward_times_flat ---
-if has_pupil_data and pupil_diameter_interp is not None:
-    # Get interpolated pupil diameter as numpy array
-    pupil_val = pupil_diameter_interp.values
-    
-    # Use larger window for pupil analysis (10 seconds before and after)
-    window_pupil = 5
-    
-    pupil_windows = []
+# Only perform reward-based analysis if there are reward times available
+if len(reward_times_flat) > 0:
+    cap_windows = []
     for rt in reward_times_flat:
-        mask = (cap_time >= rt - window_pupil) & (cap_time <= rt + window_pupil)
-        pupil_segment = pupil_val[mask]
-        pupil_windows.append(pupil_segment)
-    
+        mask = (cap_time >= rt - window) & (cap_time <= rt + window)
+        cap_segment = cap_val[mask]
+        cap_windows.append(cap_segment)
+
     # Pad all segments to the same length (max found)
-    max_pupil_len = max(len(seg) for seg in pupil_windows)
-    pupil_windows_padded = np.array([
-        np.pad(seg.astype(float), (0, max_pupil_len - len(seg)), constant_values=np.nan)
-        for seg in pupil_windows
+    max_len = max(len(seg) for seg in cap_windows)
+    cap_windows_padded = np.array([
+        np.pad(seg.astype(float), (0, max_len - len(seg)), constant_values=np.nan)
+        for seg in cap_windows
     ])
-    
-    # Create a common time axis centered at 0 for pupil
-    aligned_time_pupil = np.linspace(-window_pupil, window_pupil, max_pupil_len)
-    
-    n_rewards_pupil = pupil_windows_padded.shape[0]
-    
-    # Plot mean and SEM for pupil diameter
-    mean_pupil = np.nanmean(pupil_windows_padded, axis=0)
-    sem_pupil = np.nanstd(pupil_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(pupil_windows_padded), axis=0))
+
+    # cap_windows_padded is your 2D array: shape (num_reward_events, num_timepoints)
+    # Each row: capacitive values from 5s before to 5s after each reward_texture_change_time
+
+    # Example: print shape
+    #print("Shape of cap_windows_padded:", cap_windows_padded.shape)
+
+    # Create a common time axis centered at 0
+    dt = np.median(np.diff(cap_time))  # Estimate sampling interval
+    window_len = cap_windows_padded.shape[1]
+    aligned_time = np.linspace(-window, window, window_len)
+
+    # plt.figure(figsize=(10, 6))
+
+    n_rewards = cap_windows_padded.shape[0]  # Number of reward events
+
+    # Plot mean and SEM
+    # mean_vals = np.nanmean(cap_windows_padded, axis=0)
+    # sem_vals = np.nanstd(cap_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(cap_windows_padded), axis=0))
+    # plt.plot(aligned_time, mean_vals, color='blue', label=f'Mean (n={n_rewards})')
+    # plt.fill_between(aligned_time, mean_vals - sem_vals, mean_vals + sem_vals, color='blue', alpha=0.2, label='SEM')
+
+    # plt.axvline(0, color='red', linestyle='--', label='Reward Onset (t=0)')
+    # plt.xlabel('Time from Reward Zone Onset (s)')
+    # plt.ylabel('Capacitive Value')
+    # plt.title('Capacitive Value Aligned to Reward Zone Onset')
+    # plt.legend()
+    # plt.xticks(np.arange(-5, 6, 1))  # Set x-axis ticks from -5 to 5 with step 1
+    # plt.xlim(-5, 5)   
+    # ax = plt.gca()
+    # ax.spines['top'].set_visible(False)
+    # ax.spines['right'].set_visible(False)
+    # ax.tick_params(axis='both', direction='out')
+    # plt.tight_layout()
+    # #plt.show()
+
+    # --- Interpolated Treadmill Speed aligned to reward_times_flat ---
+
+    # Get interpolated speed as numpy array
+    speed_val = treadmill_interp.values
+
+    speed_windows = []
+    for rt in reward_times_flat:
+        mask = (cap_time >= rt - window) & (cap_time <= rt + window)
+        speed_segment = speed_val[mask]
+        speed_windows.append(speed_segment)
+
+    # Pad all segments to the same length (max found)
+    max_speed_len = max(len(seg) for seg in speed_windows)
+    speed_windows_padded = np.array([
+        np.pad(seg.astype(float), (0, max_speed_len - len(seg)), constant_values=np.nan)
+        for seg in speed_windows
+    ])
+
+    # Create a common time axis centered at 0 for speed
+    aligned_time_speed = np.linspace(-window, window, max_speed_len)
+
+    n_rewards_speed = speed_windows_padded.shape[0]
+
+    # Plot mean and SEM for speed
+    mean_speed = np.nanmean(speed_windows_padded, axis=0)
+    sem_speed = np.nanstd(speed_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(speed_windows_padded), axis=0))
+
+    # --- Interpolated Pupil Diameter aligned to reward_times_flat ---
+    if has_pupil_data and pupil_diameter_interp is not None:
+        # Get interpolated pupil diameter as numpy array
+        pupil_val = pupil_diameter_interp.values
+        
+        # Use larger window for pupil analysis (10 seconds before and after)
+        window_pupil = 5
+        
+        pupil_windows = []
+        for rt in reward_times_flat:
+            mask = (cap_time >= rt - window_pupil) & (cap_time <= rt + window_pupil)
+            pupil_segment = pupil_val[mask]
+            pupil_windows.append(pupil_segment)
+        
+        # Pad all segments to the same length (max found)
+        max_pupil_len = max(len(seg) for seg in pupil_windows)
+        pupil_windows_padded = np.array([
+            np.pad(seg.astype(float), (0, max_pupil_len - len(seg)), constant_values=np.nan)
+            for seg in pupil_windows
+        ])
+        
+        # Create a common time axis centered at 0 for pupil
+        aligned_time_pupil = np.linspace(-window_pupil, window_pupil, max_pupil_len)
+        
+        n_rewards_pupil = pupil_windows_padded.shape[0]
+        
+        # Plot mean and SEM for pupil diameter
+        mean_pupil = np.nanmean(pupil_windows_padded, axis=0)
+        sem_pupil = np.nanstd(pupil_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(pupil_windows_padded), axis=0))
+    else:
+        pupil_windows_padded = None
+        aligned_time_pupil = None
+        mean_pupil = None
+        sem_pupil = None
+        n_rewards_pupil = 0
+
 else:
+    print("No reward zones found in the data. Skipping reward-based analysis.")
+    # Set default values for when no reward data is available
+    cap_windows_padded = None
+    aligned_time = None
+    n_rewards = 0
+    speed_windows_padded = None
+    aligned_time_speed = None
+    n_rewards_speed = 0
+    mean_speed = None
+    sem_speed = None
     pupil_windows_padded = None
     aligned_time_pupil = None
     mean_pupil = None
@@ -705,93 +765,108 @@ else:
 reward_event_times_flat = pd.to_numeric(trial_log_df['reward_event'], errors='coerce').dropna()
 reward_event_times_flat = reward_event_times_flat[~np.isnan(reward_event_times_flat)]
 
-window_event = 5  # seconds before and after for capacitive analysis
-window_event_pupil = 5  # seconds before and after for pupil analysis
+# Only proceed if there are reward events
+if len(reward_event_times_flat) > 0:
+    window_event = 5  # seconds before and after for capacitive analysis
+    window_event_pupil = 5  # seconds before and after for pupil analysis
 
-# Ensure reward_event_times_flat is a numpy array of floats
-reward_event_times_flat = np.array(reward_event_times_flat, dtype=float)
+    # Ensure reward_event_times_flat is a numpy array of floats
+    reward_event_times_flat = np.array(reward_event_times_flat, dtype=float)
 
-cap_event_windows = []
-for rt in reward_event_times_flat:
-    mask = (cap_time >= rt - window_event) & (cap_time <= rt + window_event)
-    cap_segment = cap_val[mask]
-    cap_event_windows.append(cap_segment)
+    cap_event_windows = []
+    for rt in reward_event_times_flat:
+        mask = (cap_time >= rt - window_event) & (cap_time <= rt + window_event)
+        cap_segment = cap_val[mask]
+        cap_event_windows.append(cap_segment)
 
-#print(len(cap_event_windows))
+    #print(len(cap_event_windows))
 
-# Pad all segments to the same length (max found)
-max_event_len = max(len(seg) for seg in cap_event_windows)
-cap_event_windows_padded = np.array([
-    np.pad(seg.astype(float), (0, max_event_len - len(seg)), constant_values=np.nan)
-    for seg in cap_event_windows
-])
+    # Pad all segments to the same length (max found)
+    max_event_len = max(len(seg) for seg in cap_event_windows)
+    cap_event_windows_padded = np.array([
+        np.pad(seg.astype(float), (0, max_event_len - len(seg)), constant_values=np.nan)
+        for seg in cap_event_windows
+    ])
 
-# Apply moving median filter (15-point window) to each row before averaging
-def apply_moving_median_15point(data):
-    """Apply 15-point moving median filter to 2D array along axis 1"""
-    filtered = np.copy(data)
-    half_window = 7  # 7 points before + current + 7 points after = 15 total
-    
-    for i in range(data.shape[0]):
-        row = data[i, :]
-        for j in range(half_window, len(row) - half_window):
-            window = row[j-half_window:j+half_window+1]  # +1 to include current point
-            if not np.isnan(window).any():
-                filtered[i, j] = np.median(window)
-    return filtered
+    # Apply moving median filter (15-point window) to each row before averaging
+    def apply_moving_median_15point(data):
+        """Apply 15-point moving median filter to 2D array along axis 1"""
+        filtered = np.copy(data)
+        half_window = 7  # 7 points before + current + 7 points after = 15 total
+        
+        for i in range(data.shape[0]):
+            row = data[i, :]
+            for j in range(half_window, len(row) - half_window):
+                window = row[j-half_window:j+half_window+1]  # +1 to include current point
+                if not np.isnan(window).any():
+                    filtered[i, j] = np.median(window)
+        return filtered
 
-cap_event_windows_filtered = apply_moving_median_15point(cap_event_windows_padded)
+    cap_event_windows_filtered = apply_moving_median_15point(cap_event_windows_padded)
 
-# Create a common time axis centered at 0
-aligned_time_event = np.linspace(-window_event, window_event, max_event_len)
+    # Create a common time axis centered at 0
+    aligned_time_event = np.linspace(-window_event, window_event, max_event_len)
 
-n_rewards_event = cap_event_windows_filtered.shape[0]
+    n_rewards_event = cap_event_windows_filtered.shape[0]
 
-# Plot mean and SEM using filtered data
-mean_event_vals = np.nanmean(cap_event_windows_filtered, axis=0)
-sem_event_vals = np.nanstd(cap_event_windows_filtered, axis=0) / np.sqrt(np.sum(~np.isnan(cap_event_windows_filtered), axis=0))
+    # Plot mean and SEM using filtered data
+    mean_event_vals = np.nanmean(cap_event_windows_filtered, axis=0)
+    sem_event_vals = np.nanstd(cap_event_windows_filtered, axis=0) / np.sqrt(np.sum(~np.isnan(cap_event_windows_filtered), axis=0))
+else:
+    print("No reward events found in the data. Skipping reward event analysis.")
+    # Set default values when no reward events are available
+    cap_event_windows_padded = None
+    cap_event_windows_filtered = None
+    aligned_time_event = None
+    n_rewards_event = 0
+    mean_event_vals = None
+    sem_event_vals = None
 
 # --- Combined Subplots: Treadmill Speed and Capacitive Value aligned to reward_zone_times_flat ---
 
-fig, axs = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
+# Only create plots if we have both reward zone and reward event data
+if len(reward_times_flat) > 0 and n_rewards_event > 0:
+    fig, axs = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
 
-# Make sure axs is always a list for consistent indexing
-axs = [axs[0], axs[1]]
+    # Make sure axs is always a list for consistent indexing
+    axs = [axs[0], axs[1]]
 
-# --- Plot 1: Treadmill Speed aligned to reward_times_flat ---
-axs[0].plot(aligned_time_speed, mean_speed, color='purple', label=f'Mean Speed (n={n_rewards_speed})')
-axs[0].fill_between(aligned_time_speed, mean_speed - sem_speed, mean_speed + sem_speed, color='purple', alpha=0.2, label='SEM')
-axs[0].axvline(0, color='red', linestyle='--', label='Reward Zone Onset (t=0)')
-axs[0].set_ylabel('Treadmill Speed (interpolated)')
-axs[0].set_title('Treadmill Speed Aligned to Reward Zone Onset')
-axs[0].legend()
-axs[0].set_xlim(-5, 5)
-axs[0].spines['top'].set_visible(False)
-axs[0].spines['right'].set_visible(False)
-axs[0].tick_params(axis='both', direction='out')
+    # --- Plot 1: Treadmill Speed aligned to reward_times_flat ---
+    axs[0].plot(aligned_time_speed, mean_speed, color='purple', label=f'Mean Speed (n={n_rewards_speed})')
+    axs[0].fill_between(aligned_time_speed, mean_speed - sem_speed, mean_speed + sem_speed, color='purple', alpha=0.2, label='SEM')
+    axs[0].axvline(0, color='red', linestyle='--', label='Reward Zone Onset (t=0)')
+    axs[0].set_ylabel('Treadmill Speed (interpolated)')
+    axs[0].set_title('Treadmill Speed Aligned to Reward Zone Onset')
+    axs[0].legend()
+    axs[0].set_xlim(-5, 5)
+    axs[0].spines['top'].set_visible(False)
+    axs[0].spines['right'].set_visible(False)
+    axs[0].tick_params(axis='both', direction='out')
 
-# --- Plot 2: Capacitive Value aligned to reward_event_times_flat (5s window) ---
-axs[1].plot(aligned_time_event, mean_event_vals, color='green', label=f'Mean (n={n_rewards_event})')
-axs[1].fill_between(aligned_time_event, mean_event_vals - sem_event_vals, mean_event_vals + sem_event_vals, color='green', alpha=0.2, label='SEM')
-axs[1].axvline(0, color='red', linestyle='--', label='Reward Event (t=0)')
-axs[1].set_xlabel('Time from Reward Event (s)')
-axs[1].set_ylabel('Capacitive Value')
-axs[1].set_title('Capacitive Value Aligned to Reward Event')
-axs[1].legend()
-axs[1].set_xlim(-5, 5)
-axs[1].set_ylim(bottom=0)
-axs[1].spines['top'].set_visible(False)
-axs[1].spines['right'].set_visible(False)
-axs[1].tick_params(axis='both', direction='out')
+    # --- Plot 2: Capacitive Value aligned to reward_event_times_flat (5s window) ---
+    axs[1].plot(aligned_time_event, mean_event_vals, color='green', label=f'Mean (n={n_rewards_event})')
+    axs[1].fill_between(aligned_time_event, mean_event_vals - sem_event_vals, mean_event_vals + sem_event_vals, color='green', alpha=0.2, label='SEM')
+    axs[1].axvline(0, color='red', linestyle='--', label='Reward Event (t=0)')
+    axs[1].set_xlabel('Time from Reward Event (s)')
+    axs[1].set_ylabel('Capacitive Value')
+    axs[1].set_title('Capacitive Value Aligned to Reward Event')
+    axs[1].legend()
+    axs[1].set_xlim(-5, 5)
+    axs[1].set_ylim(bottom=0)
+    axs[1].spines['top'].set_visible(False)
+    axs[1].spines['right'].set_visible(False)
+    axs[1].tick_params(axis='both', direction='out')
 
+    # Set consistent x-axis formatting
+    for ax in axs:
+        ax.set_xticks(np.arange(-5, 6, 1))
 
+    plt.tight_layout()
+    save_figure(fig, "reward_zone_analysis_capacitive_treadmill")
+    plt.show()
 
-# Set consistent x-axis formatting
-for ax in axs:
-    ax.set_xticks(np.arange(-5, 6, 1))
-
-plt.tight_layout()
-save_figure(fig, "reward_zone_analysis_capacitive_treadmill")
+else:
+    print("Skipping combined reward zone/event analysis plots due to missing data.")
 plt.show()
 
 # --- Combined Pupil Diameter Analysis: Reward Zone and Reward Events ---
@@ -962,57 +1037,61 @@ else:
 
 plt.tight_layout()
 
-# --- Prepare data for heatmap with 2-second window ---
-window_heatmap = 5  # seconds before and after for heatmap
+# --- Prepare data for heatmap with 5-second window ---
+# Only create heatmap if there are reward events
+if n_rewards_event > 0:
+    window_heatmap = 5  # seconds before and after for heatmap
 
-cap_event_windows_heatmap = []
-for rt in reward_event_times_flat:
-    mask = (cap_time >= rt - window_heatmap) & (cap_time <= rt + window_heatmap)
-    cap_segment = cap_val[mask]
-    cap_event_windows_heatmap.append(cap_segment)
+    cap_event_windows_heatmap = []
+    for rt in reward_event_times_flat:
+        mask = (cap_time >= rt - window_heatmap) & (cap_time <= rt + window_heatmap)
+        cap_segment = cap_val[mask]
+        cap_event_windows_heatmap.append(cap_segment)
 
-# Pad all segments to the same length (max found)
-max_event_len_heatmap = max(len(seg) for seg in cap_event_windows_heatmap)
-cap_event_windows_padded_heatmap = np.array([
-    np.pad(seg.astype(float), (0, max_event_len_heatmap - len(seg)), constant_values=np.nan)
-    for seg in cap_event_windows_heatmap
-])
+    # Pad all segments to the same length (max found)
+    max_event_len_heatmap = max(len(seg) for seg in cap_event_windows_heatmap)
+    cap_event_windows_padded_heatmap = np.array([
+        np.pad(seg.astype(float), (0, max_event_len_heatmap - len(seg)), constant_values=np.nan)
+        for seg in cap_event_windows_heatmap
+    ])
 
-# --- Heatmap of cap_event_windows (2s window) ---
+    # --- Heatmap of cap_event_windows (5s window) ---
 
-plt.figure(figsize=(12, 8))
+    plt.figure(figsize=(12, 8))
 
-# Create the heatmap using 2-second window data
-im = plt.imshow(cap_event_windows_padded_heatmap, aspect='auto', cmap='gray_r', interpolation='nearest')
+    # Create the heatmap using 5-second window data
+    im = plt.imshow(cap_event_windows_padded_heatmap, aspect='auto', cmap='gray_r', interpolation='nearest')
 
-# Set up the time axis labels for 2-second window
-n_timepoints = cap_event_windows_padded_heatmap.shape[1]
-#print("Number of timepoints:", n_timepoints)
-time_labels = np.linspace(-window_heatmap, window_heatmap, n_timepoints)
-tick_indices = np.linspace(0, n_timepoints-1, 11, dtype=int)  # 11 ticks 
-tick_labels = [f'{time_labels[i]:.1f}' for i in tick_indices]
+    # Set up the time axis labels for 5-second window
+    n_timepoints = cap_event_windows_padded_heatmap.shape[1]
+    #print("Number of timepoints:", n_timepoints)
+    time_labels = np.linspace(-window_heatmap, window_heatmap, n_timepoints)
+    tick_indices = np.linspace(0, n_timepoints-1, 11, dtype=int)  # 11 ticks 
+    tick_labels = [f'{time_labels[i]:.1f}' for i in tick_indices]
 
-plt.xticks(tick_indices, tick_labels)
-plt.xlabel('Time from Reward Event (s)')
-plt.ylabel('Reward Event #')
-plt.title(f'Heatmap: Capacitive Value Across All Reward Events (5s window, n={n_rewards_event})')
+    plt.xticks(tick_indices, tick_labels)
+    plt.xlabel('Time from Reward Event (s)')
+    plt.ylabel('Reward Event #')
+    plt.title(f'Heatmap: Capacitive Value Across All Reward Events (5s window, n={n_rewards_event})')
 
-# Add colorbar
-cbar = plt.colorbar(im)
-cbar.set_label('Capacitive Value')
+    # Add colorbar
+    cbar = plt.colorbar(im)
+    cbar.set_label('Capacitive Value')
 
-# Add vertical line at t=0
-plt.axvline(x=n_timepoints//2, color='red', linestyle='--', alpha=0.8, linewidth=2)
+    # Add vertical line at t=0
+    plt.axvline(x=n_timepoints//2, color='red', linestyle='--', alpha=0.8, linewidth=2)
 
-# Remove top and right spines
-ax = plt.gca()
-ax.spines['top'].set_visible(False)
-ax.spines['right'].set_visible(False)
+    # Remove top and right spines
+    ax = plt.gca()
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
 
-plt.tight_layout()
-current_fig = plt.gcf()
-save_figure(current_fig, "reward_events_heatmap")
-plt.show()
+    plt.tight_layout()
+    current_fig = plt.gcf()
+    save_figure(current_fig, "reward_events_heatmap")
+    plt.show()
+else:
+    print("Skipping reward events heatmap - no reward events found.")
 
 # --- Match probe_time with texture_revert_time (approximately 1 second before) ---
 
