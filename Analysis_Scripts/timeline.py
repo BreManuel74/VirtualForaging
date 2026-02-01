@@ -620,10 +620,26 @@ save_figure(fig, f"timeline_{'capacitive_treadmill_pupil' if has_pupil_data else
 plt.show()
 
 window = 5  # seconds before and after
+
+# Restructure reward zone analysis to maintain trial indexing
+reward_zone_trials = []  # List to store (trial_idx, zone_entry_time, reward_event_time) tuples
 if reward_texture_change_time.size > 0:
-    reward_times_flat = reward_texture_change_time.flatten()
-    reward_times_flat = pd.to_numeric(reward_times_flat, errors='coerce')
-    reward_times_flat = reward_times_flat[~np.isnan(reward_times_flat)]
+    # Get reward events as a Series for easy indexing
+    reward_events = pd.to_numeric(trial_log_df['reward_event'], errors='coerce')
+    
+    # Process each trial individually to maintain indexing
+    for trial_idx in range(reward_texture_change_time.shape[0]):
+        for zone_idx in range(reward_texture_change_time.shape[1]):
+            zone_entry_time = reward_texture_change_time[trial_idx, zone_idx]
+            # Convert to numeric and check validity
+            zone_entry_time_numeric = pd.to_numeric(zone_entry_time, errors='coerce')
+            if pd.notna(zone_entry_time_numeric) and zone_entry_time_numeric > 0:
+                # Get corresponding reward event time for this trial
+                reward_event_time = reward_events.iloc[trial_idx] if trial_idx < len(reward_events) else np.nan
+                reward_zone_trials.append((trial_idx, zone_entry_time_numeric, reward_event_time))
+    
+    # Extract just the zone entry times for backward compatibility
+    reward_times_flat = np.array([entry[1] for entry in reward_zone_trials])
 else:
     reward_times_flat = np.array([])
 
@@ -788,35 +804,18 @@ if len(reward_event_times_flat) > 0:
         for seg in cap_event_windows
     ])
 
-    # Apply moving median filter (15-point window) to each row before averaging
-    def apply_moving_median_15point(data):
-        """Apply 15-point moving median filter to 2D array along axis 1"""
-        filtered = np.copy(data)
-        half_window = 7  # 7 points before + current + 7 points after = 15 total
-        
-        for i in range(data.shape[0]):
-            row = data[i, :]
-            for j in range(half_window, len(row) - half_window):
-                window = row[j-half_window:j+half_window+1]  # +1 to include current point
-                if not np.isnan(window).any():
-                    filtered[i, j] = np.median(window)
-        return filtered
-
-    cap_event_windows_filtered = apply_moving_median_15point(cap_event_windows_padded)
-
     # Create a common time axis centered at 0
     aligned_time_event = np.linspace(-window_event, window_event, max_event_len)
 
-    n_rewards_event = cap_event_windows_filtered.shape[0]
+    n_rewards_event = cap_event_windows_padded.shape[0]
 
-    # Plot mean and SEM using filtered data
-    mean_event_vals = np.nanmean(cap_event_windows_filtered, axis=0)
-    sem_event_vals = np.nanstd(cap_event_windows_filtered, axis=0) / np.sqrt(np.sum(~np.isnan(cap_event_windows_filtered), axis=0))
+    # Plot mean and SEM using raw data (no filtering)
+    mean_event_vals = np.nanmean(cap_event_windows_padded, axis=0)
+    sem_event_vals = np.nanstd(cap_event_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(cap_event_windows_padded), axis=0))
 else:
     print("No reward events found in the data. Skipping reward event analysis.")
     # Set default values when no reward events are available
     cap_event_windows_padded = None
-    cap_event_windows_filtered = None
     aligned_time_event = None
     n_rewards_event = 0
     mean_event_vals = None
@@ -867,7 +866,101 @@ if len(reward_times_flat) > 0 and n_rewards_event > 0:
 
 else:
     print("Skipping combined reward zone/event analysis plots due to missing data.")
-plt.show()
+
+# --- Treadmill Speed Raster Plot: Individual Trials aligned to Reward Zone Entry ---
+# Only create raster plot if we have reward zone data
+if len(reward_times_flat) > 0 and speed_windows_padded is not None:
+    plt.figure(figsize=(14, 8))
+    
+    # Create the heatmap using speed data
+    # Use a colormap that goes from blue (low speeds) to red (high speeds)
+    im = plt.imshow(speed_windows_padded, aspect='auto', cmap='coolwarm', interpolation='nearest', vmin=-300, vmax=300)
+    
+    # Set up the time axis labels
+    n_timepoints = speed_windows_padded.shape[1]
+    time_labels = np.linspace(-window, window, n_timepoints)
+    tick_indices = np.linspace(0, n_timepoints-1, 11, dtype=int)  # 11 ticks from -5 to +5
+    tick_labels = [f'{time_labels[i]:.1f}' for i in tick_indices]
+    
+    plt.xticks(tick_indices, tick_labels)
+    plt.xlabel('Time from Reward Zone Entry (s)')
+    plt.ylabel('Trial #')
+    plt.title(f'Treadmill Speed Raster: Individual Trials Aligned to Reward Zone Entry (n={n_rewards_speed} trials)')
+    
+    # Add colorbar with proper label
+    cbar = plt.colorbar(im)
+    cbar.set_label('Treadmill Speed')
+    
+    # Add vertical line at t=0 (reward zone entry)
+    plt.axvline(x=n_timepoints//2, color='black', linestyle='--', alpha=0.8, linewidth=2)
+    
+    # Add dynamic reward delivery lines based on actual trial data
+    if len(reward_zone_trials) > 0:
+        for raster_row_idx, (trial_idx, zone_entry_time, reward_event_time) in enumerate(reward_zone_trials):
+            if pd.notna(reward_event_time) and reward_event_time > 0:
+                # Calculate delay between zone entry and reward delivery
+                delay = reward_event_time - zone_entry_time
+                if -window <= delay <= window:  # Only draw if within the time window
+                    # Convert delay to pixel position
+                    reward_delivery_position = int((delay + window) / (2 * window) * n_timepoints)
+                    # Draw line only for this specific trial (row)
+                    plt.plot([reward_delivery_position, reward_delivery_position], 
+                            [raster_row_idx - 0.4, raster_row_idx + 0.4], 
+                            color='green', linestyle='-', alpha=0.8, linewidth=1.5)
+    
+    # Remove top and right spines
+    ax = plt.gca()
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    
+    plt.tight_layout()
+    save_figure(plt.gcf(), "treadmill_speed_raster_reward_zones")
+    plt.show()
+
+# --- Treadmill Speed Raster Plot (Absolute Values): Individual Trials aligned to Reward Zone Entry ---
+# Create absolute value version where 0 is white
+# if len(reward_times_flat) > 0 and speed_windows_padded is not None:
+#     plt.figure(figsize=(14, 8))
+    
+#     # Create the heatmap using absolute speed values
+#     # Use a colormap where 0 (minimum) is white and higher values are darker red
+#     speed_abs = np.abs(speed_windows_padded)
+#     im = plt.imshow(speed_abs, aspect='auto', cmap='Reds', interpolation='nearest')
+    
+#     # Set up the time axis labels
+#     n_timepoints = speed_abs.shape[1]
+#     time_labels = np.linspace(-window, window, n_timepoints)
+#     tick_indices = np.linspace(0, n_timepoints-1, 11, dtype=int)  # 11 ticks from -5 to +5
+#     tick_labels = [f'{time_labels[i]:.1f}' for i in tick_indices]
+    
+#     plt.xticks(tick_indices, tick_labels)
+#     plt.xlabel('Time from Reward Zone Entry (s)')
+#     plt.ylabel('Trial #')
+#     plt.title(f'Treadmill Speed Raster (Absolute Values): Individual Trials Aligned to Reward Zone Entry (n={n_rewards_speed} trials)')
+    
+#     # Add colorbar with proper label
+#     cbar = plt.colorbar(im)
+#     cbar.set_label('Absolute Treadmill Speed')
+    
+#     # Add vertical line at t=0 (reward zone entry)
+#     plt.axvline(x=n_timepoints//2, color='black', linestyle='--', alpha=0.8, linewidth=2)
+    
+#     # Add vertical line at t=+0.6s (reward delivery time)
+#     reward_delivery_position = int((0.6 + window) / (2 * window) * n_timepoints)
+#     plt.axvline(x=reward_delivery_position, color='green', linestyle='--', alpha=0.8, linewidth=2)
+    
+#     # Remove top and right spines
+#     ax = plt.gca()
+#     ax.spines['top'].set_visible(False)
+#     ax.spines['right'].set_visible(False)
+    
+#     plt.tight_layout()
+#     save_figure(plt.gcf(), "treadmill_speed_raster_absolute_reward_zones")
+#     plt.show()
+# else:
+#     print("Skipping absolute treadmill speed raster plot - no reward zone data available.")
+
+# plt.show()
 
 # --- Combined Pupil Diameter Analysis: Reward Zone and Reward Events ---
 if has_pupil_data and pupil_diameter_interp is not None:
@@ -969,9 +1062,6 @@ if 'probe_time' in trial_log_df.columns:
                 for seg in cap_probe_windows
             ])
             
-            # Apply moving median filter (21-point window) to probe capacitive data
-            cap_probe_windows_filtered = apply_moving_median_15point(cap_probe_windows_padded)
-            
             # --- Treadmill Speed aligned to probe events ---
             speed_probe_windows = []
             for pt in probe_event_times_flat:
@@ -1009,8 +1099,8 @@ if 'probe_time' in trial_log_df.columns:
             axs[0].tick_params(axis='both', direction='out')
             
             # --- Plot 2: Capacitive Value aligned to probe events ---
-            mean_cap_probe = np.nanmean(cap_probe_windows_filtered, axis=0)
-            sem_cap_probe = np.nanstd(cap_probe_windows_filtered, axis=0) / np.sqrt(np.sum(~np.isnan(cap_probe_windows_filtered), axis=0))
+            mean_cap_probe = np.nanmean(cap_probe_windows_padded, axis=0)
+            sem_cap_probe = np.nanstd(cap_probe_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(cap_probe_windows_padded), axis=0))
             axs[1].plot(aligned_time_probe, mean_cap_probe, color='green', label=f'Mean (n={n_probes})')
             axs[1].fill_between(aligned_time_probe, mean_cap_probe - sem_cap_probe, mean_cap_probe + sem_cap_probe, color='green', alpha=0.2, label='SEM')
             axs[1].axvline(0, color='black', linestyle='--', label='Probe Event (t=0)')
@@ -1226,9 +1316,6 @@ if 'probe_time' in trial_log_df.columns and len(unpaired_revert_times) > 0 and p
             for seg in cap_sim_windows
         ])
         
-        # Apply moving median filter (21-point window) to simulated probe capacitive data
-        cap_sim_windows_filtered = apply_moving_median_15point(cap_sim_windows_padded)
-        
         # --- Treadmill Speed aligned to simulated probe events ---
         speed_sim_windows = []
         for sim_probe_time in simulated_probe_times:
@@ -1267,8 +1354,8 @@ if 'probe_time' in trial_log_df.columns and len(unpaired_revert_times) > 0 and p
         axs[0].tick_params(axis='both', direction='out')
         
         # --- Plot 2: Capacitive Value aligned to simulated probe events ---
-        mean_cap_sim = np.nanmean(cap_sim_windows_filtered, axis=0)
-        sem_cap_sim = np.nanstd(cap_sim_windows_filtered, axis=0) / np.sqrt(np.sum(~np.isnan(cap_sim_windows_filtered), axis=0))
+        mean_cap_sim = np.nanmean(cap_sim_windows_padded, axis=0)
+        sem_cap_sim = np.nanstd(cap_sim_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(cap_sim_windows_padded), axis=0))
         axs[1].plot(aligned_time_sim, mean_cap_sim, color='green', label=f'Mean (n={n_sim_probes})')
         axs[1].fill_between(aligned_time_sim, mean_cap_sim - sem_cap_sim, mean_cap_sim + sem_cap_sim, color='green', alpha=0.2, label='SEM')
         axs[1].axvline(0, color='black', linestyle='--', label='Simulated Probe (t=0)')
@@ -1368,16 +1455,13 @@ if len(puff_zone_times_flat) > 0:
                         for seg in cap_puff_event_windows
                     ])
                     
-                    # Apply moving median filter (21-point window) to puff event capacitive data
-                    cap_puff_event_windows_filtered = apply_moving_median_15point(cap_puff_event_windows_padded)
-                    
                     # Create a common time axis centered at 0 for capacitive data
                     aligned_time_puff_cap = np.linspace(-window_puff, window_puff, max_puff_cap_len)
                     
                     # Calculate mean and SEM for capacitive data
-                    n_puff_event_cap = cap_puff_event_windows_filtered.shape[0]
-                    mean_cap_puff_event = np.nanmean(cap_puff_event_windows_filtered, axis=0)
-                    sem_cap_puff_event = np.nanstd(cap_puff_event_windows_filtered, axis=0) / np.sqrt(np.sum(~np.isnan(cap_puff_event_windows_filtered), axis=0))
+                    n_puff_event_cap = cap_puff_event_windows_padded.shape[0]
+                    mean_cap_puff_event = np.nanmean(cap_puff_event_windows_padded, axis=0)
+                    sem_cap_puff_event = np.nanstd(cap_puff_event_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(cap_puff_event_windows_padded), axis=0))
                     
                     puff_event_capacitive_data = {
                         'aligned_time': aligned_time_puff_cap,
