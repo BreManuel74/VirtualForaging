@@ -1558,6 +1558,291 @@ else:
 
 # --- Analysis of Treadmill Speed aligned to Puff Zone Entry Times ---
 
+# First create puff zone analysis with temporal matching (similar to reward zone analysis)
+puff_zone_trials = []  # List to store (trial_idx, zone_entry_time, puff_event_time) tuples
+
+# Check if we have puff data
+if 'puff_event' in trial_log_df.columns and len(trial_log_df) > 0:
+    print(f"\nDEBUG: Starting temporal matching for puff zones with texture verification...")
+    
+    # Collect all puff zone entries with their original trial indices, timestamps, and zone boundaries
+    # Only include zones where texture_history is "assets/punish_mean100.jpg"
+    all_puff_zones = []
+    for trial_idx in range(len(trial_log_df)):
+        # Get texture_history for this trial
+        texture_hist = safe_literal_eval(trial_log_df.iloc[trial_idx]['texture_history'])
+        texture_change_times = safe_literal_eval(trial_log_df.iloc[trial_idx]['texture_change_time'])
+        texture_revert_times = safe_literal_eval(trial_log_df.iloc[trial_idx]['texture_revert'])
+        
+        # Check if this trial has punish texture
+        if (len(texture_hist) > 0 and 
+            texture_hist[0] == "assets/punish_mean100.jpg" and
+            len(texture_change_times) > 0 and
+            len(texture_revert_times) > 0):
+            
+            # Add all puff zones from this punish trial with their boundaries
+            for i, zone_start_time in enumerate(texture_change_times):
+                if (pd.notna(zone_start_time) and zone_start_time > 0 and
+                    i < len(texture_revert_times) and
+                    pd.notna(texture_revert_times[i]) and texture_revert_times[i] > 0):
+                    zone_end_time = texture_revert_times[i]
+                    all_puff_zones.append((trial_idx, zone_start_time, zone_end_time))
+    
+    print(f"DEBUG: Found {len(all_puff_zones)} puff zones with verified texture_history and zone boundaries")
+    
+    # Collect all puff events
+    all_puff_events = []
+    for trial_idx in range(len(trial_log_df)):
+        puff_event = trial_log_df.iloc[trial_idx]['puff_event']
+        if pd.notna(puff_event) and puff_event > 0:
+            all_puff_events.append((trial_idx, puff_event))
+    
+    print(f"DEBUG: Found {len(all_puff_events)} total puff events")
+    
+    # Sort both lists by timestamp
+    all_puff_zones.sort(key=lambda x: x[1])  # Sort by zone_start_time
+    all_puff_events.sort(key=lambda x: x[1])  # Sort by puff_event_time
+    
+    # For each puff zone, find all puff events that fall within its boundaries
+    # and keep only the first (earliest) puff event for each zone
+    for zone_trial_idx, zone_start_time, zone_end_time in all_puff_zones:
+        # Find all puff events that fall within this zone's time boundaries
+        zone_puff_events = []
+        for puff_trial_idx, puff_event_time in all_puff_events:
+            if zone_start_time <= puff_event_time <= zone_end_time:
+                zone_puff_events.append((puff_trial_idx, puff_event_time))
+        
+        if zone_puff_events:
+            # Sort by puff event time and take only the first (earliest) one
+            zone_puff_events.sort(key=lambda x: x[1])
+            first_puff_trial_idx, first_puff_time = zone_puff_events[0]
+            
+            # Verify that the zone trial has punish texture_history
+            zone_texture_hist = safe_literal_eval(trial_log_df.iloc[zone_trial_idx]['texture_history'])
+            if len(zone_texture_hist) > 0 and zone_texture_hist[0] == "assets/punish_mean100.jpg":
+                puff_zone_trials.append((zone_trial_idx, zone_start_time, first_puff_time))
+                print(f"DEBUG: Matched puff zone (trial {zone_trial_idx}, {zone_start_time:.2f}-{zone_end_time:.2f}s) to first puff_event {first_puff_time:.2f}s (trial {first_puff_trial_idx}) - texture verified")
+                
+                # Log if multiple puff events were found in this zone
+                if len(zone_puff_events) > 1:
+                    excluded_puffs = [f"{pe:.2f}s" for _, pe in zone_puff_events[1:]]
+                    print(f"DEBUG:   Excluded {len(zone_puff_events)-1} additional puff events in same zone: {', '.join(excluded_puffs)}")
+        else:
+            # No puff events found in this zone
+            puff_zone_trials.append((zone_trial_idx, zone_start_time, np.nan))
+            print(f"DEBUG: No puff events found for puff zone (trial {zone_trial_idx}, {zone_start_time:.2f}-{zone_end_time:.2f}s)")
+    
+    # Sort by zone entry time for consistent ordering
+    puff_zone_trials.sort(key=lambda x: x[1])
+    
+    print(f"DEBUG: Created {len(puff_zone_trials)} verified puff zone trial pairs (first puff events only)")
+    
+    # Print debug information
+    print(f"\n=== PUFF ZONE TO DELIVERY ALIGNMENT DEBUG (FIRST PUFF EVENTS ONLY) ===")
+    print(f"Total puff zone entries found: {len(puff_zone_trials)}")
+    
+    print(f"\nFirst 10 puff zone trials (trial_idx, zone_entry_time, puff_event_time):")
+    for i, (trial_idx, zone_entry, puff_event) in enumerate(puff_zone_trials[:10]):
+        puff_str = f"{puff_event:8.3f}s" if pd.notna(puff_event) else "None    "
+        # Get and display texture_history for verification
+        texture_hist = safe_literal_eval(trial_log_df.iloc[trial_idx]['texture_history'])
+        texture_type = texture_hist[0] if len(texture_hist) > 0 else "None"
+        print(f"  {i:2d}: Trial {trial_idx:2d} | Zone: {zone_entry:8.3f}s | Puff: {puff_str:>8s} | Texture: {texture_type}")
+    
+    if len(puff_zone_trials) > 10:
+        print(f"  ... and {len(puff_zone_trials) - 10} more entries")
+    
+    # Count valid puff deliveries
+    valid_puff_deliveries = [(trial_idx, zone_entry, puff_event) for trial_idx, zone_entry, puff_event in puff_zone_trials if pd.notna(puff_event) and puff_event > 0]
+    print(f"\nValid puff deliveries: {len(valid_puff_deliveries)} out of {len(puff_zone_trials)} puff zones")
+    
+    if len(valid_puff_deliveries) > 0:
+        print(f"Delivery delays (puff_event - zone_entry):")
+        for trial_idx, zone_entry, puff_event in valid_puff_deliveries[:10]:
+            delay = puff_event - zone_entry
+            print(f"  Trial {trial_idx:2d}: Zone {zone_entry:7.2f}s -> Puff {puff_event:7.2f}s = {delay:6.3f}s delay")
+        if len(valid_puff_deliveries) > 10:
+            print(f"  ... and {len(valid_puff_deliveries) - 10} more")
+    
+    print(f"=== END DEBUG ===\n")
+
+else:
+    print("No puff event data found. Skipping puff zone analysis.")
+
+# --- Treadmill Speed Raster Plot: Individual Trials aligned to Puff Zone Entry ---
+# Only create raster plot if we have puff zone data
+if len(puff_zone_trials) > 0:
+    # Extract puff zone entry times for analysis
+    puff_times_flat = np.array([entry[1] for entry in puff_zone_trials])
+    
+    # Use larger window for puff analysis
+    puff_window = 10  # seconds before and after
+    
+    plt.figure(figsize=(14, 8))
+    
+    # Create speed windows centered on puff zone entry times
+    puff_speed_windows = []
+    for _, zone_entry_time, _ in puff_zone_trials:
+        mask = (cap_time >= zone_entry_time - puff_window) & (cap_time <= zone_entry_time + puff_window)
+        speed_segment = speed_val[mask]
+        puff_speed_windows.append(speed_segment)
+    
+    # Pad all segments to the same length
+    max_puff_len = max(len(seg) for seg in puff_speed_windows)
+    puff_speed_windows_padded = np.array([
+        np.pad(seg.astype(float), (0, max_puff_len - len(seg)), constant_values=np.nan)
+        for seg in puff_speed_windows
+    ])
+    
+    # Get actual trial numbers for y-axis
+    puff_trial_indices = [entry[0] for entry in puff_zone_trials]
+    
+    # Create the heatmap using speed data centered on puff zone entry
+    im = plt.imshow(puff_speed_windows_padded, aspect='auto', cmap='coolwarm', interpolation='nearest', vmin=-300, vmax=300)
+    
+    # Set up the time axis labels
+    n_timepoints = puff_speed_windows_padded.shape[1]
+    time_labels = np.linspace(-puff_window, puff_window, n_timepoints)
+    tick_indices = np.linspace(0, n_timepoints-1, 11, dtype=int)  # 11 ticks from -10 to +10
+    tick_labels = [f'{time_labels[i]:.1f}' for i in tick_indices]
+    
+    plt.xticks(tick_indices, tick_labels)
+    plt.xlabel('Time from Puff Zone Entry (s)')
+    
+    # Set y-axis to show actual trial numbers
+    plt.ylabel('Trial Number')
+    n_trials = len(puff_trial_indices)
+    
+    # Create y-tick positions and labels using actual trial indices
+    if n_trials <= 20:
+        # Show all trial numbers if there are 20 or fewer trials
+        ytick_positions = list(range(n_trials))
+        ytick_labels = [str(trial_idx) for trial_idx in puff_trial_indices]
+    else:
+        # Show subset of trial numbers if there are many trials
+        step = max(1, n_trials // 10)  # Show approximately 10 labels
+        ytick_positions = list(range(0, n_trials, step))
+        ytick_labels = [str(puff_trial_indices[pos]) for pos in ytick_positions]
+    
+    plt.yticks(ytick_positions, ytick_labels)
+    plt.title(f'Treadmill Speed Raster: Individual Trials Aligned to Puff Zone Entry (n={len(puff_zone_trials)} trials)')
+    
+    # Add colorbar with proper label
+    cbar = plt.colorbar(im)
+    cbar.set_label('Treadmill Speed')
+    
+    # Add vertical line at t=0 (puff zone entry)
+    plt.axvline(x=n_timepoints//2, color='black', linestyle='--', alpha=0.8, linewidth=2)
+    
+    # Add individual puff delivery lines for trials that have puffs
+    for raster_row_idx, (trial_idx, zone_entry_time, puff_event_time) in enumerate(puff_zone_trials):
+        if pd.notna(puff_event_time) and puff_event_time > 0:
+            # Calculate delay between zone entry and puff delivery
+            delay = puff_event_time - zone_entry_time
+            if -puff_window <= delay <= puff_window:  # Only draw if within the time window
+                # Convert delay to pixel position
+                puff_delivery_position = int((delay + puff_window) / (2 * puff_window) * n_timepoints)
+                # Draw line only for this specific trial (row)
+                plt.plot([puff_delivery_position, puff_delivery_position], 
+                        [raster_row_idx - 0.4, raster_row_idx + 0.4], 
+                        color='green', linestyle='-', alpha=0.8, linewidth=3.0)
+    
+    # Remove top and right spines
+    ax = plt.gca()
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    
+    plt.tight_layout()
+    save_figure(plt.gcf(), "treadmill_speed_raster_puff_zones")
+    plt.show()
+else:
+    print("No puff zones found in the data. Skipping puff zone raster plot.")
+
+# --- Treadmill Speed Raster Plot: Individual Trials aligned to Puff Delivery (centered at t=0) ---
+# Only create this plot if we have actual puff deliveries
+puff_delivery_trials = [(trial_idx, zone_entry_time, puff_event_time) for trial_idx, zone_entry_time, puff_event_time in puff_zone_trials if pd.notna(puff_event_time) and puff_event_time > 0]
+
+if len(puff_delivery_trials) > 0:
+    plt.figure(figsize=(14, 8))
+    
+    # Extract puff delivery times and trial indices for centering
+    puff_delivery_times = [entry[2] for entry in puff_delivery_trials]
+    actual_puff_trial_indices = [entry[0] for entry in puff_delivery_trials]  # Get actual trial numbers
+    
+    # Create speed windows centered on puff delivery times
+    delivery_puff_speed_windows = []
+    for _, _, delivery_time in puff_delivery_trials:
+        mask = (cap_time >= delivery_time - puff_window) & (cap_time <= delivery_time + puff_window)
+        speed_segment = speed_val[mask]
+        delivery_puff_speed_windows.append(speed_segment)
+    
+    # Pad all segments to the same length
+    max_delivery_puff_len = max(len(seg) for seg in delivery_puff_speed_windows)
+    delivery_puff_speed_windows_padded = np.array([
+        np.pad(seg.astype(float), (0, max_delivery_puff_len - len(seg)), constant_values=np.nan)
+        for seg in delivery_puff_speed_windows
+    ])
+    
+    # Create the heatmap using speed data centered on puff delivery
+    im = plt.imshow(delivery_puff_speed_windows_padded, aspect='auto', cmap='coolwarm', interpolation='nearest', vmin=-400, vmax=400)
+    
+    # Set up the time axis labels
+    n_timepoints = delivery_puff_speed_windows_padded.shape[1]
+    time_labels = np.linspace(-puff_window, puff_window, n_timepoints)
+    tick_indices = np.linspace(0, n_timepoints-1, 11, dtype=int)  # 11 ticks from -10 to +10
+    tick_labels = [f'{time_labels[i]:.1f}' for i in tick_indices]
+    
+    plt.xticks(tick_indices, tick_labels)
+    plt.xlabel('Time from Puff Delivery (s)')
+    
+    # Set y-axis to show actual trial numbers
+    plt.ylabel('Trial Number')
+    n_trials = len(actual_puff_trial_indices)
+    
+    # Create y-tick positions and labels using actual trial indices
+    if n_trials <= 20:
+        # Show all trial numbers if there are 20 or fewer trials
+        ytick_positions = list(range(n_trials))
+        ytick_labels = [str(trial_idx) for trial_idx in actual_puff_trial_indices]
+    else:
+        # Show subset of trial numbers if there are many trials
+        step = max(1, n_trials // 10)  # Show approximately 10 labels
+        ytick_positions = list(range(0, n_trials, step))
+        ytick_labels = [str(actual_puff_trial_indices[pos]) for pos in ytick_positions]
+    
+    plt.yticks(ytick_positions, ytick_labels)
+    plt.title(f'Treadmill Speed Raster: Individual Trials Aligned to Puff Delivery (n={len(puff_delivery_trials)} trials)')
+    
+    # Add colorbar with proper label
+    cbar = plt.colorbar(im)
+    cbar.set_label('Treadmill Speed')
+    
+    # Add vertical line at t=0 (puff delivery time)
+    plt.axvline(x=n_timepoints//2, color='green', linestyle='--', alpha=0.8, linewidth=2)
+    
+    # Add individual puff zone entry lines based on actual trial delays
+    for raster_row_idx, (trial_idx, zone_entry_time, puff_event_time) in enumerate(puff_delivery_trials):
+        # Calculate delay between puff delivery and zone entry (should be negative)
+        delay = zone_entry_time - puff_event_time
+        if -puff_window <= delay <= puff_window:  # Only draw if within the time window
+            # Convert delay to pixel position
+            zone_entry_position = int((delay + puff_window) / (2 * puff_window) * n_timepoints)
+            # Draw line only for this specific trial (row)
+            plt.plot([zone_entry_position, zone_entry_position], 
+                    [raster_row_idx - 0.4, raster_row_idx + 0.4], 
+                    color='black', linestyle='-', alpha=0.8, linewidth=3.0)
+    
+    # Remove top and right spines
+    ax = plt.gca()
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    
+    plt.tight_layout()
+    save_figure(plt.gcf(), "treadmill_speed_raster_puff_delivery_centered")
+    plt.show()
+else:
+    print("No puff deliveries found in the data. Skipping puff delivery-centered raster plot.")
+
 # Extract ONLY FIRST punish_texture_change_times (puff zone entry times) from all trials
 # Use first puff per zone for all calculations
 puff_zone_times_flat = punish_texture_change_time_first
