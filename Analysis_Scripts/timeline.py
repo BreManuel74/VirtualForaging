@@ -624,22 +624,105 @@ window = 5  # seconds before and after
 # Restructure reward zone analysis to maintain trial indexing
 reward_zone_trials = []  # List to store (trial_idx, zone_entry_time, reward_event_time) tuples
 if reward_texture_change_time.size > 0:
-    # Get reward events as a Series for easy indexing
-    reward_events = pd.to_numeric(trial_log_df['reward_event'], errors='coerce')
+    print(f"\nDEBUG: Starting temporal matching with texture verification...")
     
-    # Process each trial individually to maintain indexing
-    for trial_idx in range(reward_texture_change_time.shape[0]):
-        for zone_idx in range(reward_texture_change_time.shape[1]):
-            zone_entry_time = reward_texture_change_time[trial_idx, zone_idx]
-            # Convert to numeric and check validity
-            zone_entry_time_numeric = pd.to_numeric(zone_entry_time, errors='coerce')
-            if pd.notna(zone_entry_time_numeric) and zone_entry_time_numeric > 0:
-                # Get corresponding reward event time for this trial
-                reward_event_time = reward_events.iloc[trial_idx] if trial_idx < len(reward_events) else np.nan
-                reward_zone_trials.append((trial_idx, zone_entry_time_numeric, reward_event_time))
+    # Collect all reward zone entries with their original trial indices and timestamps
+    # Only include zones where texture_history is "assets/reward_mean100.jpg"
+    all_reward_zones = []
+    for trial_idx in range(len(trial_log_df)):
+        # Get texture_history for this trial
+        texture_hist = safe_literal_eval(trial_log_df.iloc[trial_idx]['texture_history'])
+        texture_change_times = safe_literal_eval(trial_log_df.iloc[trial_idx]['texture_change_time'])
+        
+        # Check if this trial has reward texture
+        if (len(texture_hist) > 0 and 
+            texture_hist[0] == "assets/reward_mean100.jpg" and
+            len(texture_change_times) > 0):
+            
+            # Add all texture_change_times from this reward trial
+            for zone_time in texture_change_times:
+                if pd.notna(zone_time) and zone_time > 0:
+                    all_reward_zones.append((trial_idx, zone_time))
+    
+    print(f"DEBUG: Found {len(all_reward_zones)} reward zone entries with verified texture_history")
+    
+    # Collect all reward events
+    reward_events = []
+    for trial_idx in range(len(trial_log_df)):
+        reward_event = trial_log_df.iloc[trial_idx]['reward_event']
+        if pd.notna(reward_event) and reward_event > 0:
+            reward_events.append((trial_idx, reward_event))
+    
+    print(f"DEBUG: Found {len(reward_events)} reward events")
+    
+    # Sort both lists by timestamp
+    all_reward_zones.sort(key=lambda x: x[1])  # Sort by zone_entry_time
+    reward_events.sort(key=lambda x: x[1])     # Sort by reward_event_time
+    
+    # For each reward event, find the most recent preceding reward zone
+    for reward_trial_idx, reward_event_time in reward_events:
+        # Find the most recent reward zone entry before this reward event
+        matched_zone = None
+        for zone_trial_idx, zone_entry_time in reversed(all_reward_zones):
+            if zone_entry_time < reward_event_time:
+                matched_zone = (zone_trial_idx, zone_entry_time)
+                break
+        
+        if matched_zone:
+            zone_trial_idx, zone_entry_time = matched_zone
+            # Verify that the matched zone trial has reward texture_history
+            zone_texture_hist = safe_literal_eval(trial_log_df.iloc[zone_trial_idx]['texture_history'])
+            if len(zone_texture_hist) > 0 and zone_texture_hist[0] == "assets/reward_mean100.jpg":
+                reward_zone_trials.append((zone_trial_idx, zone_entry_time, reward_event_time))
+                print(f"DEBUG: Matched reward_event {reward_event_time:.2f} (trial {reward_trial_idx}) to zone_entry_time {zone_entry_time:.2f} (trial {zone_trial_idx}) - texture verified")
+                # Remove this zone from future matching
+                all_reward_zones.remove(matched_zone)
+            else:
+                print(f"DEBUG: Rejected match for reward_event {reward_event_time:.2f} - zone trial {zone_trial_idx} texture_history is not reward texture")
+        else:
+            print(f"DEBUG: No matching zone found for reward_event {reward_event_time:.2f} (trial {reward_trial_idx})")
+    
+    # Add any unmatched reward zones (those without rewards) with NaN reward times
+    for zone_trial_idx, zone_entry_time in all_reward_zones:
+        reward_zone_trials.append((zone_trial_idx, zone_entry_time, np.nan))
+    
+    # Sort by zone entry time for consistent ordering
+    reward_zone_trials.sort(key=lambda x: x[1])
     
     # Extract just the zone entry times for backward compatibility
     reward_times_flat = np.array([entry[1] for entry in reward_zone_trials])
+    
+    print(f"DEBUG: Created {len(reward_zone_trials)} verified reward zone trial pairs")
+    
+    # Debug: Print reward zone and delivery alignment information
+    print(f"\n=== REWARD ZONE TO DELIVERY ALIGNMENT DEBUG (TEMPORAL MATCHING WITH TEXTURE VERIFICATION) ===")
+    print(f"Total trials in trial_log_df: {len(trial_log_df)}")
+    print(f"Total reward zone entries found: {len(reward_zone_trials)}")
+    
+    print(f"\nFirst 10 reward zone trials (trial_idx, zone_entry_time, reward_event_time):")
+    for i, (trial_idx, zone_entry, reward_event) in enumerate(reward_zone_trials[:10]):
+        reward_str = f"{reward_event:8.3f}s" if pd.notna(reward_event) else "None    "
+        # Get and display texture_history for verification
+        texture_hist = safe_literal_eval(trial_log_df.iloc[trial_idx]['texture_history'])
+        texture_type = texture_hist[0] if len(texture_hist) > 0 else "None"
+        print(f"  {i:2d}: Trial {trial_idx:2d} | Zone: {zone_entry:8.3f}s | Reward: {reward_str:>8s} | Texture: {texture_type}")
+    
+    if len(reward_zone_trials) > 10:
+        print(f"  ... and {len(reward_zone_trials) - 10} more entries")
+    
+    # Count valid reward deliveries
+    valid_deliveries = [(trial_idx, zone_entry, reward_event) for trial_idx, zone_entry, reward_event in reward_zone_trials if pd.notna(reward_event) and reward_event > 0]
+    print(f"\nValid reward deliveries: {len(valid_deliveries)} out of {len(reward_zone_trials)} reward zones")
+    
+    if len(valid_deliveries) > 0:
+        print(f"Delivery delays (reward_event - zone_entry):")
+        for trial_idx, zone_entry, reward_event in valid_deliveries[:10]:
+            delay = reward_event - zone_entry
+            print(f"  Trial {trial_idx:2d}: Zone {zone_entry:7.2f}s -> Reward {reward_event:7.2f}s = {delay:6.3f}s delay")
+        if len(valid_deliveries) > 10:
+            print(f"  ... and {len(valid_deliveries) - 10} more")
+    
+    print(f"=== END DEBUG ===\n")
 else:
     reward_times_flat = np.array([])
 
@@ -906,7 +989,7 @@ if len(reward_times_flat) > 0 and speed_windows_padded is not None:
                     # Draw line only for this specific trial (row)
                     plt.plot([reward_delivery_position, reward_delivery_position], 
                             [raster_row_idx - 0.4, raster_row_idx + 0.4], 
-                            color='green', linestyle='-', alpha=0.8, linewidth=1.5)
+                            color='green', linestyle='-', alpha=0.8, linewidth= 3.0)
     
     # Remove top and right spines
     ax = plt.gca()
@@ -916,6 +999,74 @@ if len(reward_times_flat) > 0 and speed_windows_padded is not None:
     plt.tight_layout()
     save_figure(plt.gcf(), "treadmill_speed_raster_reward_zones")
     plt.show()
+
+# --- Treadmill Speed Raster Plot: Individual Trials aligned to Reward Delivery (centered at t=0) ---
+# Only create this plot if we have actual reward deliveries
+reward_delivery_trials = [(trial_idx, zone_entry_time, reward_event_time) for trial_idx, zone_entry_time, reward_event_time in reward_zone_trials if pd.notna(reward_event_time) and reward_event_time > 0]
+
+if len(reward_delivery_trials) > 0:
+    plt.figure(figsize=(14, 8))
+    
+    # Extract reward delivery times for centering
+    reward_delivery_times = [entry[2] for entry in reward_delivery_trials]
+    
+    # Create speed windows centered on reward delivery times
+    delivery_speed_windows = []
+    for _, _, delivery_time in reward_delivery_trials:
+        mask = (cap_time >= delivery_time - window) & (cap_time <= delivery_time + window)
+        speed_segment = speed_val[mask]
+        delivery_speed_windows.append(speed_segment)
+    
+    # Pad all segments to the same length
+    max_delivery_len = max(len(seg) for seg in delivery_speed_windows)
+    delivery_speed_windows_padded = np.array([
+        np.pad(seg.astype(float), (0, max_delivery_len - len(seg)), constant_values=np.nan)
+        for seg in delivery_speed_windows
+    ])
+    
+    # Create the heatmap using speed data centered on reward delivery
+    im = plt.imshow(delivery_speed_windows_padded, aspect='auto', cmap='coolwarm', interpolation='nearest', vmin=-300, vmax=300)
+    
+    # Set up the time axis labels
+    n_timepoints = delivery_speed_windows_padded.shape[1]
+    time_labels = np.linspace(-window, window, n_timepoints)
+    tick_indices = np.linspace(0, n_timepoints-1, 11, dtype=int)  # 11 ticks from -5 to +5
+    tick_labels = [f'{time_labels[i]:.1f}' for i in tick_indices]
+    
+    plt.xticks(tick_indices, tick_labels)
+    plt.xlabel('Time from Reward Delivery (s)')
+    plt.ylabel('Trial #')
+    plt.title(f'Treadmill Speed Raster: Individual Trials Aligned to Reward Delivery (n={len(reward_delivery_trials)} trials)')
+    
+    # Add colorbar with proper label
+    cbar = plt.colorbar(im)
+    cbar.set_label('Treadmill Speed')
+    
+    # Add vertical line at t=0 (reward delivery time)
+    plt.axvline(x=n_timepoints//2, color='green', linestyle='--', alpha=0.8, linewidth=2)
+    
+    # Add individual reward zone entry lines based on actual trial delays
+    for raster_row_idx, (trial_idx, zone_entry_time, reward_event_time) in enumerate(reward_delivery_trials):
+        # Calculate delay between reward delivery and zone entry (should be negative)
+        delay = zone_entry_time - reward_event_time
+        if -window <= delay <= window:  # Only draw if within the time window
+            # Convert delay to pixel position
+            zone_entry_position = int((delay + window) / (2 * window) * n_timepoints)
+            # Draw line only for this specific trial (row)
+            plt.plot([zone_entry_position, zone_entry_position], 
+                    [raster_row_idx - 0.4, raster_row_idx + 0.4], 
+                    color='black', linestyle='-', alpha=0.8, linewidth= 3.0)
+    
+    # Remove top and right spines
+    ax = plt.gca()
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    
+    plt.tight_layout()
+    save_figure(plt.gcf(), "treadmill_speed_raster_reward_delivery_centered")
+    plt.show()
+else:
+    print("No reward deliveries found in the data. Skipping reward delivery-centered raster plot.")
 
 # --- Treadmill Speed Raster Plot (Absolute Values): Individual Trials aligned to Reward Zone Entry ---
 # Create absolute value version where 0 is white
