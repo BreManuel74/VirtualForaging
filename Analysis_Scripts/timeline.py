@@ -1007,8 +1007,9 @@ reward_delivery_trials = [(trial_idx, zone_entry_time, reward_event_time) for tr
 if len(reward_delivery_trials) > 0:
     plt.figure(figsize=(14, 8))
     
-    # Extract reward delivery times for centering
+    # Extract reward delivery times and trial indices for centering
     reward_delivery_times = [entry[2] for entry in reward_delivery_trials]
+    actual_trial_indices = [entry[0] for entry in reward_delivery_trials]  # Get actual trial numbers
     
     # Create speed windows centered on reward delivery times
     delivery_speed_windows = []
@@ -1035,7 +1036,23 @@ if len(reward_delivery_trials) > 0:
     
     plt.xticks(tick_indices, tick_labels)
     plt.xlabel('Time from Reward Delivery (s)')
-    plt.ylabel('Trial #')
+    
+    # Set y-axis to show actual trial numbers
+    plt.ylabel('Trial Number')
+    n_trials = len(actual_trial_indices)
+    
+    # Create y-tick positions and labels using actual trial indices
+    if n_trials <= 20:
+        # Show all trial numbers if there are 20 or fewer trials
+        ytick_positions = list(range(n_trials))
+        ytick_labels = [str(trial_idx) for trial_idx in actual_trial_indices]
+    else:
+        # Show subset of trial numbers if there are many trials
+        step = max(1, n_trials // 10)  # Show approximately 10 labels
+        ytick_positions = list(range(0, n_trials, step))
+        ytick_labels = [str(actual_trial_indices[pos]) for pos in ytick_positions]
+    
+    plt.yticks(ytick_positions, ytick_labels)
     plt.title(f'Treadmill Speed Raster: Individual Trials Aligned to Reward Delivery (n={len(reward_delivery_trials)} trials)')
     
     # Add colorbar with proper label
