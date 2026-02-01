@@ -967,7 +967,25 @@ if len(reward_times_flat) > 0 and speed_windows_padded is not None:
     
     plt.xticks(tick_indices, tick_labels)
     plt.xlabel('Time from Reward Zone Entry (s)')
-    plt.ylabel('Trial #')
+    
+    # Set y-axis to show actual trial numbers
+    plt.ylabel('Trial Number')
+    actual_trial_numbers = [trial_idx + 1 for trial_idx, _, _ in reward_zone_trials]  # +1 for 1-based indexing
+    
+    # Show subset of trial numbers since this plot has many sequential trials
+    n_trials = len(actual_trial_numbers)
+    if n_trials <= 20:
+        # Show all labels for small number of trials
+        ytick_positions = list(range(n_trials))
+        ytick_labels = [str(trial_num) for trial_num in actual_trial_numbers]
+    else:
+        # Show approximately every 5th label for larger datasets
+        step = max(1, n_trials // 10)  # Approximately 10 labels
+        ytick_positions = list(range(0, n_trials, step))
+        ytick_labels = [str(actual_trial_numbers[pos]) for pos in ytick_positions]
+    
+    plt.yticks(ytick_positions, ytick_labels)
+    
     plt.title(f'Treadmill Speed Raster: Individual Trials Aligned to Reward Zone Entry (n={n_rewards_speed} trials)')
     
     # Add colorbar with proper label
@@ -1009,7 +1027,7 @@ if len(reward_delivery_trials) > 0:
     
     # Extract reward delivery times and trial indices for centering
     reward_delivery_times = [entry[2] for entry in reward_delivery_trials]
-    actual_trial_indices = [entry[0] for entry in reward_delivery_trials]  # Get actual trial numbers
+    actual_trial_indices = [entry[0] + 1 for entry in reward_delivery_trials]  # Get actual trial numbers (1-based)
     
     # Create speed windows centered on reward delivery times
     delivery_speed_windows = []
@@ -1039,19 +1057,10 @@ if len(reward_delivery_trials) > 0:
     
     # Set y-axis to show actual trial numbers
     plt.ylabel('Trial Number')
-    n_trials = len(actual_trial_indices)
     
-    # Create y-tick positions and labels using actual trial indices
-    if n_trials <= 20:
-        # Show all trial numbers if there are 20 or fewer trials
-        ytick_positions = list(range(n_trials))
-        ytick_labels = [str(trial_idx) for trial_idx in actual_trial_indices]
-    else:
-        # Show subset of trial numbers if there are many trials
-        step = max(1, n_trials // 10)  # Show approximately 10 labels
-        ytick_positions = list(range(0, n_trials, step))
-        ytick_labels = [str(actual_trial_indices[pos]) for pos in ytick_positions]
-    
+    # Always use actual trial numbers for y-axis labels  
+    ytick_positions = list(range(len(actual_trial_indices)))
+    ytick_labels = [str(trial_num) for trial_num in actual_trial_indices]
     plt.yticks(ytick_positions, ytick_labels)
     plt.title(f'Treadmill Speed Raster: Individual Trials Aligned to Reward Delivery (n={len(reward_delivery_trials)} trials)')
     
@@ -1694,9 +1703,6 @@ if len(puff_zone_trials) > 0:
         for seg in puff_speed_windows
     ])
     
-    # Get actual trial numbers for y-axis
-    puff_trial_indices = [entry[0] for entry in puff_zone_trials]
-    
     # Create the heatmap using speed data centered on puff zone entry
     im = plt.imshow(puff_speed_windows_padded, aspect='auto', cmap='coolwarm', interpolation='nearest', vmin=-300, vmax=300)
     
@@ -1711,19 +1717,12 @@ if len(puff_zone_trials) > 0:
     
     # Set y-axis to show actual trial numbers
     plt.ylabel('Trial Number')
-    n_trials = len(puff_trial_indices)
+    # Get actual trial numbers (1-based) for y-axis labels
+    puff_trial_indices = [trial_idx + 1 for trial_idx, _, _ in puff_zone_trials]
     
-    # Create y-tick positions and labels using actual trial indices
-    if n_trials <= 20:
-        # Show all trial numbers if there are 20 or fewer trials
-        ytick_positions = list(range(n_trials))
-        ytick_labels = [str(trial_idx) for trial_idx in puff_trial_indices]
-    else:
-        # Show subset of trial numbers if there are many trials
-        step = max(1, n_trials // 10)  # Show approximately 10 labels
-        ytick_positions = list(range(0, n_trials, step))
-        ytick_labels = [str(puff_trial_indices[pos]) for pos in ytick_positions]
-    
+    # Always use actual trial numbers for y-axis labels
+    ytick_positions = list(range(len(puff_trial_indices)))  # Row positions: 0, 1, 2, ...
+    ytick_labels = [str(trial_num) for trial_num in puff_trial_indices]  # Actual trial numbers
     plt.yticks(ytick_positions, ytick_labels)
     plt.title(f'Treadmill Speed Raster: Individual Trials Aligned to Puff Zone Entry (n={len(puff_zone_trials)} trials)')
     
@@ -1765,9 +1764,8 @@ puff_delivery_trials = [(trial_idx, zone_entry_time, puff_event_time) for trial_
 if len(puff_delivery_trials) > 0:
     plt.figure(figsize=(14, 8))
     
-    # Extract puff delivery times and trial indices for centering
+    # Extract puff delivery times for centering
     puff_delivery_times = [entry[2] for entry in puff_delivery_trials]
-    actual_puff_trial_indices = [entry[0] for entry in puff_delivery_trials]  # Get actual trial numbers
     
     # Create speed windows centered on puff delivery times
     delivery_puff_speed_windows = []
@@ -1797,19 +1795,12 @@ if len(puff_delivery_trials) > 0:
     
     # Set y-axis to show actual trial numbers
     plt.ylabel('Trial Number')
-    n_trials = len(actual_puff_trial_indices)
+    # Get actual trial numbers (1-based) for y-axis labels
+    actual_puff_trial_indices = [trial_idx + 1 for trial_idx, _, _ in puff_delivery_trials]
     
-    # Create y-tick positions and labels using actual trial indices
-    if n_trials <= 20:
-        # Show all trial numbers if there are 20 or fewer trials
-        ytick_positions = list(range(n_trials))
-        ytick_labels = [str(trial_idx) for trial_idx in actual_puff_trial_indices]
-    else:
-        # Show subset of trial numbers if there are many trials
-        step = max(1, n_trials // 10)  # Show approximately 10 labels
-        ytick_positions = list(range(0, n_trials, step))
-        ytick_labels = [str(actual_puff_trial_indices[pos]) for pos in ytick_positions]
-    
+    # Always use actual trial numbers for y-axis labels
+    ytick_positions = list(range(len(actual_puff_trial_indices)))  # Row positions: 0, 1, 2, ...
+    ytick_labels = [str(trial_num) for trial_num in actual_puff_trial_indices]  # Actual trial numbers
     plt.yticks(ytick_positions, ytick_labels)
     plt.title(f'Treadmill Speed Raster: Individual Trials Aligned to Puff Delivery (n={len(puff_delivery_trials)} trials)')
     
