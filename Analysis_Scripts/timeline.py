@@ -1018,6 +1018,86 @@ if len(reward_times_flat) > 0 and speed_windows_padded is not None:
     save_figure(plt.gcf(), "treadmill_speed_raster_reward_zones")
     plt.show()
 
+# --- Capacitive Raster Plot: Individual Trials aligned to Reward Zone Entry ---
+if len(reward_times_flat) > 0:
+    plt.figure(figsize=(14, 8))
+    
+    # Create capacitive windows for each reward zone entry
+    cap_reward_zone_windows = []
+    for rt in reward_times_flat:
+        mask = (cap_time >= rt - window) & (cap_time <= rt + window)
+        cap_segment = cap_val[mask]
+        cap_reward_zone_windows.append(cap_segment)
+    
+    # Pad all segments to the same length
+    max_cap_len = max(len(seg) for seg in cap_reward_zone_windows)
+    cap_reward_zone_windows_padded = np.array([
+        np.pad(seg.astype(float), (0, max_cap_len - len(seg)), constant_values=np.nan)
+        for seg in cap_reward_zone_windows
+    ])
+    
+    # Create the heatmap using capacitive data (binary colormap for licking pattern)
+    im = plt.imshow(cap_reward_zone_windows_padded, aspect='auto', cmap='binary', interpolation='nearest')
+    
+    # Set up the time axis labels
+    n_timepoints = cap_reward_zone_windows_padded.shape[1]
+    time_labels = np.linspace(-window, window, n_timepoints)
+    tick_indices = np.linspace(0, n_timepoints-1, 11, dtype=int)  # 11 ticks from -5 to +5
+    tick_labels = [f'{time_labels[i]:.1f}' for i in tick_indices]
+    
+    plt.xticks(tick_indices, tick_labels)
+    plt.xlabel('Time from Reward Zone Entry (s)')
+    
+    # Set y-axis to show actual trial numbers
+    plt.ylabel('Trial Number')
+    actual_trial_numbers = [trial_idx + 1 for trial_idx, _, _ in reward_zone_trials]  # +1 for 1-based indexing
+    
+    # Show subset of trial numbers since this plot has many sequential trials
+    n_trials = len(actual_trial_numbers)
+    if n_trials <= 20:
+        # Show all labels for small number of trials
+        ytick_positions = list(range(n_trials))
+        ytick_labels = [str(trial_num) for trial_num in actual_trial_numbers]
+    else:
+        # Show approximately every 5th label for larger datasets
+        step = max(1, n_trials // 10)  # Approximately 10 labels
+        ytick_positions = list(range(0, n_trials, step))
+        ytick_labels = [str(actual_trial_numbers[pos]) for pos in ytick_positions]
+    
+    plt.yticks(ytick_positions, ytick_labels)
+    
+    plt.title(f'Capacitive (Licking) Raster: Individual Trials Aligned to Reward Zone Entry (n={len(reward_times_flat)} trials)')
+    
+    # Add colorbar with proper label
+    cbar = plt.colorbar(im)
+    cbar.set_label('Capacitive Value (Licking)')
+    
+    # Add vertical line at t=0 (reward zone entry)
+    plt.axvline(x=n_timepoints//2, color='blue', linestyle='--', alpha=0.8, linewidth=2)
+    
+    # Add dynamic reward delivery lines based on actual trial data
+    if len(reward_zone_trials) > 0:
+        for raster_row_idx, (trial_idx, zone_entry_time, reward_event_time) in enumerate(reward_zone_trials):
+            if pd.notna(reward_event_time) and reward_event_time > 0:
+                # Calculate delay between zone entry and reward delivery
+                delay = reward_event_time - zone_entry_time
+                if -window <= delay <= window:  # Only draw if within the time window
+                    # Convert delay to pixel position
+                    reward_delivery_position = int((delay + window) / (2 * window) * n_timepoints)
+                    # Draw line only for this specific trial (row)
+                    plt.plot([reward_delivery_position, reward_delivery_position], 
+                            [raster_row_idx - 0.4, raster_row_idx + 0.4], 
+                            color='green', linestyle='-', alpha=0.8, linewidth=3.0)
+    
+    # Remove top and right spines
+    ax = plt.gca()
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    
+    plt.tight_layout()
+    save_figure(plt.gcf(), "capacitive_raster_reward_zones")
+    plt.show()
+
 # --- Treadmill Speed Raster Plot: Individual Trials aligned to Reward Delivery (centered at t=0) ---
 # Only create this plot if we have actual reward deliveries
 reward_delivery_trials = [(trial_idx, zone_entry_time, reward_event_time) for trial_idx, zone_entry_time, reward_event_time in reward_zone_trials if pd.notna(reward_event_time) and reward_event_time > 0]
@@ -1093,6 +1173,79 @@ if len(reward_delivery_trials) > 0:
     plt.show()
 else:
     print("No reward deliveries found in the data. Skipping reward delivery-centered raster plot.")
+
+# --- Capacitive Raster Plot: Individual Trials aligned to Reward Delivery (centered at t=0) ---
+if len(reward_delivery_trials) > 0:
+    plt.figure(figsize=(14, 8))
+    
+    # Extract reward delivery times and trial indices for centering
+    reward_delivery_times = [entry[2] for entry in reward_delivery_trials]
+    actual_trial_indices = [entry[0] + 1 for entry in reward_delivery_trials]  # Get actual trial numbers (1-based)
+    
+    # Create capacitive windows centered on reward delivery times
+    delivery_cap_windows = []
+    for _, _, delivery_time in reward_delivery_trials:
+        mask = (cap_time >= delivery_time - window) & (cap_time <= delivery_time + window)
+        cap_segment = cap_val[mask]
+        delivery_cap_windows.append(cap_segment)
+    
+    # Pad all segments to the same length
+    max_delivery_cap_len = max(len(seg) for seg in delivery_cap_windows)
+    delivery_cap_windows_padded = np.array([
+        np.pad(seg.astype(float), (0, max_delivery_cap_len - len(seg)), constant_values=np.nan)
+        for seg in delivery_cap_windows
+    ])
+    
+    # Create the heatmap using capacitive data centered on reward delivery (binary colormap for licking)
+    im = plt.imshow(delivery_cap_windows_padded, aspect='auto', cmap='binary', interpolation='nearest')
+    
+    # Set up the time axis labels
+    n_timepoints = delivery_cap_windows_padded.shape[1]
+    time_labels = np.linspace(-window, window, n_timepoints)
+    tick_indices = np.linspace(0, n_timepoints-1, 11, dtype=int)  # 11 ticks from -5 to +5
+    tick_labels = [f'{time_labels[i]:.1f}' for i in tick_indices]
+    
+    plt.xticks(tick_indices, tick_labels)
+    plt.xlabel('Time from Reward Delivery (s)')
+    
+    # Set y-axis to show actual trial numbers
+    plt.ylabel('Trial Number')
+    
+    # Always use actual trial numbers for y-axis labels  
+    ytick_positions = list(range(len(actual_trial_indices)))
+    ytick_labels = [str(trial_num) for trial_num in actual_trial_indices]
+    plt.yticks(ytick_positions, ytick_labels)
+    plt.title(f'Capacitive (Licking) Raster: Individual Trials Aligned to Reward Delivery (n={len(reward_delivery_trials)} trials)')
+    
+    # Add colorbar with proper label
+    cbar = plt.colorbar(im)
+    cbar.set_label('Capacitive Value (Licking)')
+    
+    # Add vertical line at t=0 (reward delivery time)
+    plt.axvline(x=n_timepoints//2, color='green', linestyle='--', alpha=0.8, linewidth=2)
+    
+    # Add individual reward zone entry lines based on actual trial delays
+    for raster_row_idx, (trial_idx, zone_entry_time, reward_event_time) in enumerate(reward_delivery_trials):
+        # Calculate delay between reward delivery and zone entry (should be negative)
+        delay = zone_entry_time - reward_event_time
+        if -window <= delay <= window:  # Only draw if within the time window
+            # Convert delay to pixel position
+            zone_entry_position = int((delay + window) / (2 * window) * n_timepoints)
+            # Draw line only for this specific trial (row)
+            plt.plot([zone_entry_position, zone_entry_position], 
+                    [raster_row_idx - 0.4, raster_row_idx + 0.4], 
+                    color='blue', linestyle='-', alpha=0.8, linewidth=3.0)
+    
+    # Remove top and right spines
+    ax = plt.gca()
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    
+    plt.tight_layout()
+    save_figure(plt.gcf(), "capacitive_raster_reward_delivery_centered")
+    plt.show()
+else:
+    print("No reward deliveries found in the data. Skipping capacitive reward delivery-centered raster plot.")
 
 # --- Treadmill Speed Raster Plot (Absolute Values): Individual Trials aligned to Reward Zone Entry ---
 # Create absolute value version where 0 is white
@@ -1301,64 +1454,6 @@ if 'probe_time' in trial_log_df.columns:
         print("No probe events found in the data.")
 else:
     print("No 'probe_time' column found in trial_log_df.")
-
-plt.tight_layout()
-
-# --- Prepare data for heatmap with 5-second window ---
-# Only create heatmap if there are reward events
-if n_rewards_event > 0:
-    window_heatmap = 5  # seconds before and after for heatmap
-
-    cap_event_windows_heatmap = []
-    for rt in reward_event_times_flat:
-        mask = (cap_time >= rt - window_heatmap) & (cap_time <= rt + window_heatmap)
-        cap_segment = cap_val[mask]
-        cap_event_windows_heatmap.append(cap_segment)
-
-    # Pad all segments to the same length (max found)
-    max_event_len_heatmap = max(len(seg) for seg in cap_event_windows_heatmap)
-    cap_event_windows_padded_heatmap = np.array([
-        np.pad(seg.astype(float), (0, max_event_len_heatmap - len(seg)), constant_values=np.nan)
-        for seg in cap_event_windows_heatmap
-    ])
-
-    # --- Heatmap of cap_event_windows (5s window) ---
-
-    plt.figure(figsize=(12, 8))
-
-    # Create the heatmap using 5-second window data
-    im = plt.imshow(cap_event_windows_padded_heatmap, aspect='auto', cmap='gray_r', interpolation='nearest')
-
-    # Set up the time axis labels for 5-second window
-    n_timepoints = cap_event_windows_padded_heatmap.shape[1]
-    #print("Number of timepoints:", n_timepoints)
-    time_labels = np.linspace(-window_heatmap, window_heatmap, n_timepoints)
-    tick_indices = np.linspace(0, n_timepoints-1, 11, dtype=int)  # 11 ticks 
-    tick_labels = [f'{time_labels[i]:.1f}' for i in tick_indices]
-
-    plt.xticks(tick_indices, tick_labels)
-    plt.xlabel('Time from Reward Event (s)')
-    plt.ylabel('Reward Event #')
-    plt.title(f'Heatmap: Capacitive Value Across All Reward Events (5s window, n={n_rewards_event})')
-
-    # Add colorbar
-    cbar = plt.colorbar(im)
-    cbar.set_label('Capacitive Value')
-
-    # Add vertical line at t=0
-    plt.axvline(x=n_timepoints//2, color='red', linestyle='--', alpha=0.8, linewidth=2)
-
-    # Remove top and right spines
-    ax = plt.gca()
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-
-    plt.tight_layout()
-    current_fig = plt.gcf()
-    save_figure(current_fig, "reward_events_heatmap")
-    plt.show()
-else:
-    print("Skipping reward events heatmap - no reward events found.")
 
 # --- Match probe_time with texture_revert_time (approximately 1 second before) ---
 
@@ -1757,6 +1852,91 @@ if len(puff_zone_trials) > 0:
 else:
     print("No puff zones found in the data. Skipping puff zone raster plot.")
 
+# --- Capacitive Raster Plot: Individual Trials aligned to Puff Zone Entry ---
+if len(puff_zone_trials) > 0:
+    plt.figure(figsize=(14, 8))
+    
+    # Extract puff zone entry times
+    puff_zone_entry_times = [entry[1] for entry in puff_zone_trials]
+    
+    # Create capacitive windows for each puff zone entry
+    cap_puff_zone_windows = []
+    for pzt in puff_zone_entry_times:
+        mask = (cap_time >= pzt - puff_window) & (cap_time <= pzt + puff_window)
+        cap_segment = cap_val[mask]
+        cap_puff_zone_windows.append(cap_segment)
+    
+    # Pad all segments to the same length
+    max_cap_puff_len = max(len(seg) for seg in cap_puff_zone_windows)
+    cap_puff_zone_windows_padded = np.array([
+        np.pad(seg.astype(float), (0, max_cap_puff_len - len(seg)), constant_values=np.nan)
+        for seg in cap_puff_zone_windows
+    ])
+    
+    # Create the heatmap using capacitive data (binary colormap for licking)
+    im = plt.imshow(cap_puff_zone_windows_padded, aspect='auto', cmap='binary', interpolation='nearest')
+    
+    # Set up the time axis labels
+    n_timepoints = cap_puff_zone_windows_padded.shape[1]
+    time_labels = np.linspace(-puff_window, puff_window, n_timepoints)
+    tick_indices = np.linspace(0, n_timepoints-1, 11, dtype=int)  # 11 ticks from -10 to +10
+    tick_labels = [f'{time_labels[i]:.1f}' for i in tick_indices]
+    
+    plt.xticks(tick_indices, tick_labels)
+    plt.xlabel('Time from Puff Zone Entry (s)')
+    
+    # Set y-axis to show actual trial numbers
+    plt.ylabel('Trial Number')
+    actual_puff_trial_numbers = [trial_idx + 1 for trial_idx, _, _ in puff_zone_trials]  # +1 for 1-based indexing
+    
+    # Show subset of trial numbers since this plot has many sequential trials
+    n_puff_trials = len(actual_puff_trial_numbers)
+    if n_puff_trials <= 20:
+        # Show all labels for small number of trials
+        ytick_positions = list(range(n_puff_trials))
+        ytick_labels = [str(trial_num) for trial_num in actual_puff_trial_numbers]
+    else:
+        # Show approximately every 5th label for larger datasets
+        step = max(1, n_puff_trials // 10)  # Approximately 10 labels
+        ytick_positions = list(range(0, n_puff_trials, step))
+        ytick_labels = [str(actual_puff_trial_numbers[pos]) for pos in ytick_positions]
+    
+    plt.yticks(ytick_positions, ytick_labels)
+    
+    plt.title(f'Capacitive (Licking) Raster: Individual Trials Aligned to Puff Zone Entry (n={len(puff_zone_trials)} trials)')
+    
+    # Add colorbar with proper label
+    cbar = plt.colorbar(im)
+    cbar.set_label('Capacitive Value (Licking)')
+    
+    # Add vertical line at t=0 (puff zone entry)
+    plt.axvline(x=n_timepoints//2, color='blue', linestyle='--', alpha=0.8, linewidth=2)
+    
+    # Add dynamic puff delivery lines based on actual trial data
+    if len(puff_zone_trials) > 0:
+        for raster_row_idx, (trial_idx, zone_entry_time, puff_event_time) in enumerate(puff_zone_trials):
+            if pd.notna(puff_event_time) and puff_event_time > 0:
+                # Calculate delay between zone entry and puff delivery
+                delay = puff_event_time - zone_entry_time
+                if -puff_window <= delay <= puff_window:  # Only draw if within the time window
+                    # Convert delay to pixel position
+                    puff_delivery_position = int((delay + puff_window) / (2 * puff_window) * n_timepoints)
+                    # Draw line only for this specific trial (row)
+                    plt.plot([puff_delivery_position, puff_delivery_position], 
+                            [raster_row_idx - 0.4, raster_row_idx + 0.4], 
+                            color='green', linestyle='-', alpha=0.8, linewidth=3.0)
+    
+    # Remove top and right spines
+    ax = plt.gca()
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    
+    plt.tight_layout()
+    save_figure(plt.gcf(), "capacitive_raster_puff_zones")
+    plt.show()
+else:
+    print("No puff zones found in the data. Skipping capacitive puff zone raster plot.")
+
 # --- Treadmill Speed Raster Plot: Individual Trials aligned to Puff Delivery (centered at t=0) ---
 # Only create this plot if we have actual puff deliveries
 puff_delivery_trials = [(trial_idx, zone_entry_time, puff_event_time) for trial_idx, zone_entry_time, puff_event_time in puff_zone_trials if pd.notna(puff_event_time) and puff_event_time > 0]
@@ -1833,6 +2013,80 @@ if len(puff_delivery_trials) > 0:
     plt.show()
 else:
     print("No puff deliveries found in the data. Skipping puff delivery-centered raster plot.")
+
+# --- Capacitive Raster Plot: Individual Trials aligned to Puff Delivery (centered at t=0) ---
+if len(puff_delivery_trials) > 0:
+    plt.figure(figsize=(14, 8))
+    
+    # Extract puff delivery times for centering
+    puff_delivery_times = [entry[2] for entry in puff_delivery_trials]
+    
+    # Create capacitive windows centered on puff delivery times
+    delivery_puff_cap_windows = []
+    for _, _, delivery_time in puff_delivery_trials:
+        mask = (cap_time >= delivery_time - puff_window) & (cap_time <= delivery_time + puff_window)
+        cap_segment = cap_val[mask]
+        delivery_puff_cap_windows.append(cap_segment)
+    
+    # Pad all segments to the same length
+    max_delivery_puff_cap_len = max(len(seg) for seg in delivery_puff_cap_windows)
+    delivery_puff_cap_windows_padded = np.array([
+        np.pad(seg.astype(float), (0, max_delivery_puff_cap_len - len(seg)), constant_values=np.nan)
+        for seg in delivery_puff_cap_windows
+    ])
+    
+    # Create the heatmap using capacitive data centered on puff delivery (binary colormap for licking)
+    im = plt.imshow(delivery_puff_cap_windows_padded, aspect='auto', cmap='binary', interpolation='nearest')
+    
+    # Set up the time axis labels
+    n_timepoints = delivery_puff_cap_windows_padded.shape[1]
+    time_labels = np.linspace(-puff_window, puff_window, n_timepoints)
+    tick_indices = np.linspace(0, n_timepoints-1, 11, dtype=int)  # 11 ticks from -10 to +10
+    tick_labels = [f'{time_labels[i]:.1f}' for i in tick_indices]
+    
+    plt.xticks(tick_indices, tick_labels)
+    plt.xlabel('Time from Puff Delivery (s)')
+    
+    # Set y-axis to show actual trial numbers
+    plt.ylabel('Trial Number')
+    # Get actual trial numbers (1-based) for y-axis labels
+    actual_puff_trial_indices = [trial_idx + 1 for trial_idx, _, _ in puff_delivery_trials]
+    
+    # Always use actual trial numbers for y-axis labels
+    ytick_positions = list(range(len(actual_puff_trial_indices)))  # Row positions: 0, 1, 2, ...
+    ytick_labels = [str(trial_num) for trial_num in actual_puff_trial_indices]  # Actual trial numbers
+    plt.yticks(ytick_positions, ytick_labels)
+    plt.title(f'Capacitive (Licking) Raster: Individual Trials Aligned to Puff Delivery (n={len(puff_delivery_trials)} trials)')
+    
+    # Add colorbar with proper label
+    cbar = plt.colorbar(im)
+    cbar.set_label('Capacitive Value (Licking)')
+    
+    # Add vertical line at t=0 (puff delivery time)
+    plt.axvline(x=n_timepoints//2, color='green', linestyle='--', alpha=0.8, linewidth=2)
+    
+    # Add individual puff zone entry lines based on actual trial delays
+    for raster_row_idx, (trial_idx, zone_entry_time, puff_event_time) in enumerate(puff_delivery_trials):
+        # Calculate delay between puff delivery and zone entry (should be negative)
+        delay = zone_entry_time - puff_event_time
+        if -puff_window <= delay <= puff_window:  # Only draw if within the time window
+            # Convert delay to pixel position
+            zone_entry_position = int((delay + puff_window) / (2 * puff_window) * n_timepoints)
+            # Draw line only for this specific trial (row)
+            plt.plot([zone_entry_position, zone_entry_position], 
+                    [raster_row_idx - 0.4, raster_row_idx + 0.4], 
+                    color='blue', linestyle='-', alpha=0.8, linewidth=3.0)
+    
+    # Remove top and right spines
+    ax = plt.gca()
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    
+    plt.tight_layout()
+    save_figure(plt.gcf(), "capacitive_raster_puff_delivery_centered")
+    plt.show()
+else:
+    print("No puff deliveries found in the data. Skipping capacitive puff delivery-centered raster plot.")
 
 # Extract ONLY FIRST punish_texture_change_times (puff zone entry times) from all trials
 # Use first puff per zone for all calculations
