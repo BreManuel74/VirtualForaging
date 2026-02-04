@@ -498,6 +498,40 @@ def main():
     root = tk.Tk()
     root.withdraw()
 
+    # Open file dialog to select the master CSV file
+    master_csv_path = filedialog.askopenfilename(
+        title='Select master CSV file (containing animal_id, sex, starting_condition)',
+        filetypes=[('CSV files', '*.csv')],
+        initialdir=os.getcwd()
+    )
+    
+    if not master_csv_path:
+        print("No master CSV file selected. Exiting...")
+        return
+    
+    # Read the master CSV file
+    try:
+        master_df = pd.read_csv(master_csv_path)
+        # Strip whitespace from column names and values
+        master_df.columns = master_df.columns.str.strip()
+        master_df['animal_id'] = master_df['animal_id'].str.strip()
+        master_df['sex'] = master_df['sex'].str.strip().str.lower()
+        master_df['starting_condition'] = master_df['starting_condition'].str.strip()
+        
+        # Create a dictionary mapping animal_id to sex and starting_condition
+        animal_info = {}
+        for _, row in master_df.iterrows():
+            animal_info[row['animal_id']] = {
+                'sex': row['sex'],
+                'starting_condition': row['starting_condition']
+            }
+        
+        print(f"Loaded master CSV with {len(animal_info)} animals")
+        
+    except Exception as e:
+        print(f"Error reading master CSV file: {str(e)}")
+        return
+
     # Open file dialog to select multiple data files
     file_paths = filedialog.askopenfilenames(
         title='Select mouse data files',
@@ -506,22 +540,25 @@ def main():
     )
     
     if file_paths:
-        # Ask user for marker type and starting condition for each mouse
+        # Extract markers and starting conditions from master CSV
         markers = []
         starting_conditions = []
         for file_path in file_paths:
             mouse_name = os.path.basename(file_path).split("_")[0]
-            while True:
-                choice = input(f"Enter marker type for {mouse_name} (s for square, o for circle): ").lower().strip()
-                if choice in ['s', 'o']:
-                    markers.append(choice)
-                    break
-                else:
-                    print("Invalid choice. Please enter 's' for square or 'o' for circle.")
             
-            # Get starting condition
-            condition = input(f"Enter starting condition for {mouse_name}: ").strip()
-            starting_conditions.append(condition)
+            if mouse_name in animal_info:
+                # Convert sex to marker type (male -> 's' for square, female -> 'o' for circle)
+                sex = animal_info[mouse_name]['sex']
+                marker = 's' if sex == 'male' else 'o'
+                markers.append(marker)
+                
+                # Get starting condition
+                starting_conditions.append(animal_info[mouse_name]['starting_condition'])
+                
+                print(f"{mouse_name}: sex={sex}, marker={marker}, condition={animal_info[mouse_name]['starting_condition']}")
+            else:
+                print(f"Warning: {mouse_name} not found in master CSV file. Skipping...")
+                continue
             
         # Analyze data and plot results
         speed_fig, sensitivity_fig, lick_fig, reward_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, level_fig, all_results = analyze_mouse_data(file_paths, markers, starting_conditions)
