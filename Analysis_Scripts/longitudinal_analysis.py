@@ -76,7 +76,7 @@ def analyze_levels(data_files):
     plt.title('Average Rewards Per Minute by Level')
     plt.xlabel('Level')
     plt.ylabel('Rewards per Minute (Mean ± SEM)')
-    plt.grid(True, axis='y')
+    plt.grid(False)
     ax = plt.gca()
     ax.tick_params(axis='both', direction='in')
     ax.spines['top'].set_visible(False)
@@ -242,7 +242,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions):
         })
         
         # Plot this mouse's data with sequential day numbers and specified marker
-        day_numbers = np.arange(1, len(results_df) + 1)
+        day_numbers = np.arange(0, len(results_df))
         mouse_name = os.path.basename(data_file).split("_")[0]
         
         # Plot speed data
@@ -270,14 +270,33 @@ def analyze_mouse_data(data_files, markers, starting_conditions):
     plt.title('Average Speed Over Time')
     plt.xlabel('Day')
     plt.ylabel('Average Speed')
-    plt.grid(True)
+    plt.grid(False)
     ax = plt.gca()
     ax.tick_params(axis='both', direction='in')
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     ax.set_ylim(bottom=-10)
-    ax.set_xlim(left=0)
-    ax.xaxis.set_major_locator(plt.MultipleLocator(5))
+    max_day = max(len(result['df']) for result in all_results)
+    ax.set_xlim(left=0, right=max_day - 1)
+    # Dynamic tick spacing based on data range
+    if max_day <= 10:
+        major_spacing = 1
+        minor_spacing = 1
+    elif max_day <= 20:
+        major_spacing = 2
+        minor_spacing = 1
+    elif max_day <= 50:
+        major_spacing = 5
+        minor_spacing = 1
+    elif max_day <= 100:
+        major_spacing = 10
+        minor_spacing = 2
+    else:
+        major_spacing = 20
+        minor_spacing = 5
+    ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
+    ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
+    ax.tick_params(axis='x', which='minor', direction='in')
     ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
     
     # Configure sensitivity plot
@@ -285,14 +304,16 @@ def analyze_mouse_data(data_files, markers, starting_conditions):
     plt.title('Sensitivity Over Time')
     plt.xlabel('Day')
     plt.ylabel('Sensitivity (Hits / Total Trials)')
-    plt.grid(True)
+    plt.grid(False)
     ax = plt.gca()
     ax.tick_params(axis='both', direction='in')
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     ax.set_ylim(-0.05, 1.05)  # Sensitivity is between 0 and 1
-    ax.set_xlim(left=0)
-    ax.xaxis.set_major_locator(plt.MultipleLocator(5))
+    ax.set_xlim(left=0, right=max_day - 1)
+    ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
+    ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
+    ax.tick_params(axis='x', which='minor', direction='in')
     ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
     
     # Configure lick count plot
@@ -300,14 +321,16 @@ def analyze_mouse_data(data_files, markers, starting_conditions):
     plt.title('Lick Counts Over Time')
     plt.xlabel('Day')
     plt.ylabel('Number of Licks')
-    plt.grid(True)
+    plt.grid(False)
     ax = plt.gca()
     ax.tick_params(axis='both', direction='in')
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     ax.set_ylim(bottom=0)  # Lick counts cannot be negative
-    ax.set_xlim(left=0)
-    ax.xaxis.set_major_locator(plt.MultipleLocator(5))
+    ax.set_xlim(left=0, right=max_day - 1)
+    ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
+    ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
+    ax.tick_params(axis='x', which='minor', direction='in')
     ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
     
     # Configure reward count plot
@@ -315,19 +338,38 @@ def analyze_mouse_data(data_files, markers, starting_conditions):
     plt.title('Number of Rewards Over Time')
     plt.xlabel('Day')
     plt.ylabel('Number of Rewards')
-    plt.grid(True)
+    plt.grid(False)
     ax = plt.gca()
     ax.tick_params(axis='both', direction='in')
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     ax.set_ylim(bottom=0)  # Reward counts cannot be negative
-    ax.set_xlim(left=0)
-    ax.xaxis.set_major_locator(plt.MultipleLocator(5))
+    ax.set_xlim(left=0, right=max_day - 1)
+    ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
+    ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
+    ax.tick_params(axis='x', which='minor', direction='in')
     ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
     
     # Calculate average rewards/minute and SEM across mice
     # First, find the maximum number of days
     max_days = max(len(result['hits']) for result in all_results)
+    
+    # Dynamic tick spacing based on data range for aggregate plots
+    if max_days <= 10:
+        agg_major_spacing = 1
+        agg_minor_spacing = 1
+    elif max_days <= 20:
+        agg_major_spacing = 2
+        agg_minor_spacing = 1
+    elif max_days <= 50:
+        agg_major_spacing = 5
+        agg_minor_spacing = 1
+    elif max_days <= 100:
+        agg_major_spacing = 10
+        agg_minor_spacing = 2
+    else:
+        agg_major_spacing = 20
+        agg_minor_spacing = 5
     
     # Initialize arrays for rewards per minute (all mice)
     all_rewards_per_min = np.zeros((len(data_files), max_days))
@@ -366,7 +408,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions):
     
     # Plot average rewards/minute with SEM
     plt.figure(avg_reward_fig.number)
-    day_numbers = np.arange(1, max_days + 1)
+    day_numbers = np.arange(0, max_days)
     plt.plot(day_numbers, mean_rewards_per_min, '-', color='black', linewidth=2, label='Mean')
     plt.fill_between(day_numbers, mean_rewards_per_min - sem_rewards_per_min, mean_rewards_per_min + sem_rewards_per_min, 
                      color='gray', alpha=0.3, label='SEM')
@@ -375,20 +417,22 @@ def analyze_mouse_data(data_files, markers, starting_conditions):
     plt.title('Average Rewards Per Minute Across Mice')
     plt.xlabel('Day')
     plt.ylabel('Rewards per Minute (Mean ± SEM)')
-    plt.grid(True)
+    plt.grid(False)
     ax = plt.gca()
     ax.tick_params(axis='both', direction='in')
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     ax.set_ylim(bottom=0)
-    ax.set_xlim(left=0)
+    ax.set_xlim(left=0, right=max_days - 1)
     ax.xaxis.set_major_locator(plt.MultipleLocator(5))
+    ax.xaxis.set_minor_locator(plt.MultipleLocator(1))
+    ax.tick_params(axis='x', which='minor', direction='in')
     ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
     plt.legend()
     
     # Plot sex-specific average rewards/minute with SEM
     plt.figure(sex_reward_fig.number)
-    day_numbers = np.arange(1, max_days + 1)
+    day_numbers = np.arange(0, max_days)
     
     # Plot male data if available
     if len(male_rewards_per_min) > 0:
@@ -424,14 +468,16 @@ def analyze_mouse_data(data_files, markers, starting_conditions):
     plt.title('Sex-Specific Average Rewards Per Minute')
     plt.xlabel('Day')
     plt.ylabel('Rewards per Minute (Mean ± SEM)')
-    plt.grid(True)
+    plt.grid(False)
     ax = plt.gca()
     ax.tick_params(axis='both', direction='in')
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     ax.set_ylim(bottom=0)
-    ax.set_xlim(left=0)
-    ax.xaxis.set_major_locator(plt.MultipleLocator(5))
+    ax.set_xlim(left=0, right=max_days - 1)
+    ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
+    ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
+    ax.tick_params(axis='x', which='minor', direction='in')
     ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
     plt.legend()
 
@@ -467,7 +513,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions):
                              0)
         
         # Plot the data
-        day_numbers = np.arange(1, max_len + 1)
+        day_numbers = np.arange(0, max_len)
         plt.plot(day_numbers, mean_rewards, '-', color=color, linewidth=2, 
                 label=f'{condition} (n={len(rewards_list)})')
         plt.fill_between(day_numbers, mean_rewards - sem_rewards, mean_rewards + sem_rewards,
@@ -477,14 +523,16 @@ def analyze_mouse_data(data_files, markers, starting_conditions):
     plt.title('Average Rewards Per Minute by Starting Condition')
     plt.xlabel('Day')
     plt.ylabel('Rewards per Minute (Mean ± SEM)')
-    plt.grid(True)
+    plt.grid(False)
     ax = plt.gca()
     ax.tick_params(axis='both', direction='in')
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     ax.set_ylim(bottom=0)
-    ax.set_xlim(left=0)
-    ax.xaxis.set_major_locator(plt.MultipleLocator(5))
+    ax.set_xlim(left=0, right=max_days - 1)
+    ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
+    ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
+    ax.tick_params(axis='x', which='minor', direction='in')
     ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
     plt.legend()
 
