@@ -63,8 +63,18 @@ def analyze_levels(data_files):
     
     # Create bar plot
     level_fig = plt.figure(figsize=(15, 8))  # Larger figure size
-    # Sort levels in ascending numerical order
-    levels = sorted(level_stats.keys(), key=lambda x: int(x.split('_')[1].split('.')[0]) if '_' in x and '.' in x else 0)
+    # Sort levels - numerical levels first, then alphabetically
+    def sort_key(x):
+        # Try to extract level number if it follows "level_X" pattern
+        if x.startswith('level_'):
+            try:
+                return (0, int(x.split('_')[1].split('.')[0]))
+            except (ValueError, IndexError):
+                pass
+        # Otherwise sort alphabetically (put after numbered levels)
+        return (1, x)
+    
+    levels = sorted(level_stats.keys(), key=sort_key)
     means = [level_stats[level]['mean'] for level in levels]
     sems = [level_stats[level]['sem'] for level in levels]
     
@@ -97,6 +107,11 @@ def analyze_mouse_data(data_files, markers, starting_conditions):
     # Create dictionaries to map mouse names to markers and starting conditions
     markers = {os.path.basename(file).split("_")[0]: marker for file, marker in zip(data_files, markers)}
     conditions = {os.path.basename(file).split("_")[0]: condition for file, condition in zip(data_files, starting_conditions)}
+    
+    # Create color mapping based on starting conditions
+    unique_conditions = list(set(starting_conditions))
+    condition_colors = generate_colors(len(unique_conditions))
+    condition_color_map = {condition: color for condition, color in zip(unique_conditions, condition_colors)}
     
     speed_fig = plt.figure(figsize=(12, 6))
     sensitivity_fig = plt.figure(figsize=(12, 6))
@@ -175,8 +190,8 @@ def analyze_mouse_data(data_files, markers, starting_conditions):
                 # Calculate misses (reward opportunities minus hits)
                 misses = reward_opportunities - reward_count
                 
-                # Calculate sensitivity only if there are at least 30 trials
-                if total_trials >= 30:
+                # Calculate sensitivity only if there is at least one trial
+                if total_trials >= 1:
                     sensitivity = float(reward_count) / float(reward_opportunities) if reward_opportunities > 0 else 0.0
                 else:
                     sensitivity = float('nan')  # Will not be plotted
@@ -245,25 +260,28 @@ def analyze_mouse_data(data_files, markers, starting_conditions):
         day_numbers = np.arange(0, len(results_df))
         mouse_name = os.path.basename(data_file).split("_")[0]
         
+        # Use color based on starting condition for all plots
+        condition_color = condition_color_map[conditions[mouse_name]]
+        
         # Plot speed data
         plt.figure(speed_fig.number)
         plt.plot(day_numbers, results_df['average_speed'], 
-            f'{markers[mouse_name]}-', color=colors[idx], markersize=8, label=mouse_name)
+            f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
         
         # Plot sensitivity data
         plt.figure(sensitivity_fig.number)
         plt.plot(day_numbers, results_df['sensitivity'], 
-            f'{markers[mouse_name]}-', color=colors[idx], markersize=8, label=mouse_name)
+            f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
             
         # Plot lick count data
         plt.figure(lick_fig.number)
         plt.plot(day_numbers, results_df['lick_count'], 
-            f'{markers[mouse_name]}-', color=colors[idx], markersize=8, label=mouse_name)
+            f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
             
         # Plot reward count data
         plt.figure(reward_fig.number)
         plt.plot(day_numbers, results_df['hits'], 
-            f'{markers[mouse_name]}-', color=colors[idx], markersize=8, label=mouse_name)
+            f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
     
     # Configure speed plot
     plt.figure(speed_fig.number)
@@ -275,9 +293,9 @@ def analyze_mouse_data(data_files, markers, starting_conditions):
     ax.tick_params(axis='both', direction='in')
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
-    ax.set_ylim(bottom=-10)
+    ax.set_ylim(bottom=0)
     max_day = max(len(result['df']) for result in all_results)
-    ax.set_xlim(left=0, right=max_day - 1)
+    ax.set_xlim(left=0, right=max_day - 0.5)  # Add padding to prevent data points from being cut off
     # Dynamic tick spacing based on data range
     if max_day <= 10:
         major_spacing = 1
@@ -310,7 +328,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions):
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     ax.set_ylim(-0.05, 1.05)  # Sensitivity is between 0 and 1
-    ax.set_xlim(left=0, right=max_day - 1)
+    ax.set_xlim(left=0, right=max_day - 0.5)  # Add padding to prevent data points from being cut off
     ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
     ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
     ax.tick_params(axis='x', which='minor', direction='in')
@@ -327,7 +345,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions):
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     ax.set_ylim(bottom=0)  # Lick counts cannot be negative
-    ax.set_xlim(left=0, right=max_day - 1)
+    ax.set_xlim(left=0, right=max_day - 0.5)  # Add padding to prevent data points from being cut off
     ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
     ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
     ax.tick_params(axis='x', which='minor', direction='in')
@@ -344,7 +362,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions):
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     ax.set_ylim(bottom=0)  # Reward counts cannot be negative
-    ax.set_xlim(left=0, right=max_day - 1)
+    ax.set_xlim(left=0, right=max_day - 0.5)  # Add padding to prevent data points from being cut off
     ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
     ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
     ax.tick_params(axis='x', which='minor', direction='in')
@@ -495,11 +513,9 @@ def analyze_mouse_data(data_files, markers, starting_conditions):
         rewards_per_min = rewards / session_lengths
         condition_groups[condition].append(rewards_per_min)
     
-    # Generate colors for different conditions
-    condition_colors = generate_colors(len(condition_groups))
-    
     # Plot each condition's data
-    for (condition, rewards_list), color in zip(condition_groups.items(), condition_colors):
+    for condition, rewards_list in condition_groups.items():
+        color = condition_color_map[condition]
         # Pad arrays to make them equal length
         max_len = max(len(r) for r in rewards_list)
         padded_rewards = np.array([np.pad(r, (0, max_len - len(r)), 
@@ -536,10 +552,61 @@ def analyze_mouse_data(data_files, markers, starting_conditions):
     ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
     plt.legend()
 
+    # Create a new figure for condition-based speed analysis
+    condition_speed_fig = plt.figure(figsize=(12, 6))
+    
+    # Group mice by starting condition for speed
+    condition_speed_groups = {}
+    for result in all_results:
+        condition = result['starting_condition']
+        if condition not in condition_speed_groups:
+            condition_speed_groups[condition] = []
+        speeds = np.array(result['speeds'])
+        condition_speed_groups[condition].append(speeds)
+    
+    # Plot each condition's speed data
+    for condition, speed_list in condition_speed_groups.items():
+        color = condition_color_map[condition]
+        # Pad arrays to make them equal length
+        max_len = max(len(s) for s in speed_list)
+        padded_speeds = np.array([np.pad(s, (0, max_len - len(s)), 
+                                        constant_values=np.nan) for s in speed_list])
+        
+        # Calculate mean and SEM
+        mean_speeds = np.nanmean(padded_speeds, axis=0)
+        n_mice = np.sum(~np.isnan(padded_speeds), axis=0)
+        sem_speeds = np.where(n_mice > 1,
+                             np.nanstd(padded_speeds, axis=0) / np.sqrt(n_mice),
+                             0)
+        
+        # Plot the data
+        day_numbers = np.arange(0, max_len)
+        plt.plot(day_numbers, mean_speeds, '-', color=color, linewidth=2, 
+                label=f'{condition} (n={len(speed_list)})')
+        plt.fill_between(day_numbers, mean_speeds - sem_speeds, mean_speeds + sem_speeds,
+                        color=color, alpha=0.2)
+    
+    # Configure condition-based speed plot
+    plt.title('Average Speed by Starting Condition')
+    plt.xlabel('Day')
+    plt.ylabel('Average Speed (Mean ± SEM)')
+    plt.grid(False)
+    ax = plt.gca()
+    ax.tick_params(axis='both', direction='in')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.set_ylim(bottom=0)
+    ax.set_xlim(left=0, right=max_days - 1)
+    ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
+    ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
+    ax.tick_params(axis='x', which='minor', direction='in')
+    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+    plt.legend()
+
     # Create the level-based analysis plot
     level_fig = analyze_levels(data_files)
 
-    return speed_fig, sensitivity_fig, lick_fig, reward_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, level_fig, all_results
+    return speed_fig, sensitivity_fig, lick_fig, reward_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, condition_speed_fig, level_fig, all_results
 
 def main():
     # Create and hide the root window
@@ -609,10 +676,10 @@ def main():
                 continue
             
         # Analyze data and plot results
-        speed_fig, sensitivity_fig, lick_fig, reward_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, level_fig, all_results = analyze_mouse_data(file_paths, markers, starting_conditions)
+        speed_fig, sensitivity_fig, lick_fig, reward_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, condition_speed_fig, level_fig, all_results = analyze_mouse_data(file_paths, markers, starting_conditions)
 
         # Configure all figures
-        for fig in [speed_fig, sensitivity_fig, lick_fig, reward_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, level_fig]:
+        for fig in [speed_fig, sensitivity_fig, lick_fig, reward_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, condition_speed_fig, level_fig]:
             plt.figure(fig.number)
             if len(file_paths) > 10:
                 plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
@@ -622,7 +689,7 @@ def main():
             plt.tight_layout()
 
         # Display all plots
-        for fig in [speed_fig, sensitivity_fig, lick_fig, reward_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig]:
+        for fig in [speed_fig, sensitivity_fig, lick_fig, reward_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, condition_speed_fig]:
             fig.show()
         plt.show()
 
@@ -643,6 +710,7 @@ def main():
                 (avg_reward_fig, 'avg_reward', 'Average rewards plot'),
                 (sex_reward_fig, 'sex_reward', 'Sex-specific average rewards plot'),
                 (condition_reward_fig, 'condition_reward', 'Condition-based average rewards plot'),
+                (condition_speed_fig, 'condition_speed', 'Condition-based average speed plot'),
                 (level_fig, 'level_reward', 'Level-based average rewards plot')
             ]
 
