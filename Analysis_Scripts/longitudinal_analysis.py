@@ -10,6 +10,12 @@ import numpy as np
 import matplotlib.pyplot as plt
 from datetime import datetime
 import colorsys
+import sys
+
+# Add Analysis_Scripts to path to import lick detection algorithm
+script_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, script_dir)
+import lick_detection_algorithm as lda
 
 def generate_colors(n):
     """Generate n distinct colors"""
@@ -103,10 +109,16 @@ def analyze_levels(data_files):
     plt.tight_layout()
     return level_fig
 
-def analyze_mouse_data(data_files, markers, starting_conditions):
+def analyze_mouse_data(data_files, markers, starting_conditions, save_lick_plots=False, output_dir=None):
     # Create dictionaries to map mouse names to markers and starting conditions
     markers = {os.path.basename(file).split("_")[0]: marker for file, marker in zip(data_files, markers)}
     conditions = {os.path.basename(file).split("_")[0]: condition for file, condition in zip(data_files, starting_conditions)}
+    
+    # Create output directory for lick detection plots if needed
+    if save_lick_plots and output_dir:
+        lick_plots_dir = os.path.join(output_dir, 'lick_detection_plots')
+        os.makedirs(lick_plots_dir, exist_ok=True)
+        print(f"\nSaving lick detection plots to: {lick_plots_dir}")
     
     # Create color mapping based on starting conditions
     unique_conditions = list(set(starting_conditions))
@@ -147,30 +159,49 @@ def analyze_mouse_data(data_files, markers, starting_conditions):
                 # Calculate average speed for this date
                 avg_speed = treadmill_data['speed'].mean()
                 
-                # Read capacitive data and perform z-score normalization
+                # Read capacitive data for lick detection
                 capacitive_data = pd.read_csv(row['capacitive'])
-                capacitive_values = capacitive_data['capacitive_value']
                 
                 # Calculate session length in minutes from the elapsed_time column
                 session_length_minutes = capacitive_data['elapsed_time'].max() / 60.0
                 
-                # Calculate z-score: z = (x - μ) / σ
-                z_scores = (capacitive_values - capacitive_values.mean()) / capacitive_values.std()
+                # Use new lick detection algorithm
+                # Prepare data with Time_sec column
+                cap_df = capacitive_data.copy()
+                cap_df['Time_sec'] = cap_df['elapsed_time']
                 
-                # Binarize the data based on z-score threshold of 3
-                binary_data = (z_scores > 3).astype(int)
+                # Compute KDE normalization
+                kde_value = lda.compute_KDE(cap_df, 'capacitive_value')
+                cap_df = lda.compute_KDE_normalizations(cap_df, 'capacitive_value', kde_value)
                 
-                # Count lick bouts (transitions from 0 to 1)
-                # Convert to numpy array for easier manipulation
-                binary_array = binary_data.values
-                # Find where values change (True where value changes, False where it stays the same)
-                transitions = np.diff(binary_array, prepend=0)
-                # Count only 0->1 transitions (positive changes)
-                lick_count = np.sum(transitions == 1)
+                # Detect lick events using dynamic threshold (max_deviation / 2)
+                events_df, threshold_used = lda.detect_events_above_threshold(cap_df, 'capacitive_value', threshold=None)
+                
+                # Count total lick events
+                lick_count = events_df['capacitive_value_event'].sum()
+                
+                # Optionally save lick detection plots
+                if save_lick_plots and output_dir:
+                    mouse_name = os.path.basename(data_file).split('_')[0]
+                    date_str = datetime.fromtimestamp(int(timestamp)).strftime('%Y-%m-%d')
+                    plot_filename = f"{mouse_name}_{date_str}_lick_detection.png"
+                    plot_path = os.path.join(lick_plots_dir, plot_filename)
+                    
+                    # Create summary plot
+                    fig = lda.plot_summary(
+                        cap_df, events_df, 
+                        column='capacitive_value',
+                        kde_value=kde_value, 
+                        threshold=threshold_used,
+                        title=f"{mouse_name} - {date_str} - {lick_count} licks detected",
+                        show=False
+                    )
+                    fig.savefig(plot_path, dpi=150, bbox_inches='tight')
+                    plt.close(fig)
                 
                 # print(f"\nMouse: {os.path.basename(data_file).split('_')[0]}")
                 # print(f"Date: {datetime.fromtimestamp(int(timestamp)).strftime('%Y-%m-%d')}")
-                # print(f"Total lick bouts: {lick_count}")
+                # print(f"Total licks detected: {lick_count}")
                 
                 # Read trial log data for texture history and reward events
                 trial_log = pd.read_csv(row['trial_log'])
@@ -674,9 +705,32 @@ def main():
             else:
                 print(f"Warning: {mouse_name} not found in master CSV file. Skipping...")
                 continue
+        
+        # Ask if user wants to save lick detection plots
+        print("\n" + "=" * 60)
+        save_lick_plots_input = input("Generate lick detection plots for each session? (yes/no): ").lower().strip()
+        save_lick_plots = save_lick_plots_input.startswith('y')
+        
+        output_dir = None
+        if save_lick_plots:
+            # Ask for output directory
+            output_dir = filedialog.askdirectory(
+                title='Select folder to save lick detection plots',
+                initialdir=os.getcwd()
+            )
+            if not output_dir:
+                print("No output directory selected. Lick detection plots will not be saved.")
+                save_lick_plots = False
+            else:
+                print(f"Lick detection plots will be saved to: {output_dir}")
+        print("=" * 60 + "\n")
             
         # Analyze data and plot results
-        speed_fig, sensitivity_fig, lick_fig, reward_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, condition_speed_fig, level_fig, all_results = analyze_mouse_data(file_paths, markers, starting_conditions)
+        speed_fig, sensitivity_fig, lick_fig, reward_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, condition_speed_fig, level_fig, all_results = analyze_mouse_data(
+            file_paths, markers, starting_conditions, 
+            save_lick_plots=save_lick_plots, 
+            output_dir=output_dir
+        )
 
         # Configure all figures
         for fig in [speed_fig, sensitivity_fig, lick_fig, reward_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, condition_speed_fig, level_fig]:
