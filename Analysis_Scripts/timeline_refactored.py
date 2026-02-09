@@ -773,7 +773,7 @@ def add_event_markers(ax, reward_times, puff_times, probe_times):
     
     # Probe events
     for i, pt in enumerate(probe_times):
-        ax.axvline(x=pt, color='blue', linestyle='--', alpha=0.7, linewidth=2,
+        ax.axvline(x=pt, color='black', linestyle='-', alpha=0.7, linewidth=2,
                    label='Probe Event' if i == 0 else "")
 
 
@@ -808,13 +808,15 @@ def add_texture_intervals(ax, texture_data):
 
 def plot_raster_heatmap(windows_padded, aligned_time, event_trials, title, 
                        ylabel, colormap, output_folder, filename, vmin=None, vmax=None,
-                       center_time=0, event_label="Event"):
+                       center_time=0, event_label="Event", show_zone_entries=False, 
+                       zone_entry_color='black', zone_entry_linewidth=3.0,
+                       show_delivery_markers=False, center_line_color='black'):
     """Create a raster heatmap plot for aligned data
     
     Args:
         windows_padded: 2D array of aligned data windows
         aligned_time: Time axis for windows
-        event_trials: List of event information tuples
+        event_trials: List of event information tuples (trial_idx, zone_entry_time, event_time)
         title: Plot title
         ylabel: Y-axis label
         colormap: Matplotlib colormap name
@@ -824,6 +826,11 @@ def plot_raster_heatmap(windows_padded, aligned_time, event_trials, title,
         vmax: Maximum value for colormap (optional)
         center_time: Time value to mark as center (default 0)
         event_label: Label for the center time marker
+        show_zone_entries: If True, draw vertical lines showing zone entry times for each trial
+        zone_entry_color: Color for zone entry markers
+        zone_entry_linewidth: Line width for zone entry markers
+        show_delivery_markers: If True, draw green delivery markers on zone-entry plots
+        center_line_color: Color for the center vertical line (default 'black')
     """
     if windows_padded is None or len(event_trials) == 0:
         print(f"Skipping {filename} - no data available")
@@ -845,21 +852,544 @@ def plot_raster_heatmap(windows_padded, aligned_time, event_trials, title,
     ax.set_xticks(tick_indices)
     ax.set_xticklabels(tick_labels)
     ax.set_xlabel(f'Time from {event_label} (s)')
-    ax.set_ylabel(ylabel)
+    
+    # Set y-axis to show actual trial numbers (1-based) with smart labeling
+    actual_trial_indices = [trial_idx + 1 for trial_idx, _, _ in event_trials]
+    n_trials = len(actual_trial_indices)
+    
+    if n_trials <= 20:
+        # Show all labels for small number of trials
+        ytick_positions = list(range(n_trials))
+        ytick_labels = [str(trial_num) for trial_num in actual_trial_indices]
+    else:
+        # Show approximately 10 labels for larger datasets
+        step = max(1, n_trials // 10)
+        ytick_positions = list(range(0, n_trials, step))
+        ytick_labels = [str(actual_trial_indices[pos]) for pos in ytick_positions]
+    
+    ax.set_yticks(ytick_positions)
+    ax.set_yticklabels(ytick_labels)
+    ax.set_ylabel('Trial Number')
     ax.set_title(title)
     
     # Add colorbar
     cbar = plt.colorbar(im, ax=ax)
     cbar.set_label(ylabel)
     
-    # Add vertical line at center time
+    # Add vertical line at center time (use specified color)
     center_position = int((center_time - aligned_time[0]) / (aligned_time[-1] - aligned_time[0]) * n_timepoints)
-    ax.axvline(x=center_position, color='black', linestyle='--', alpha=0.8, linewidth=2)
+    ax.axvline(x=center_position, color=center_line_color, linestyle='--', alpha=0.8, linewidth=2)
+    
+    # Add delivery markers on zone entry plots (green lines showing when delivery happened)
+    if show_delivery_markers:
+        for raster_row_idx, (trial_idx, zone_entry_time, event_time) in enumerate(event_trials):
+            if pd.notna(event_time) and event_time > 0:
+                # Calculate delay between zone entry and delivery
+                delay = event_time - zone_entry_time
+                if aligned_time[0] <= delay <= aligned_time[-1]:  # Only draw if within the time window
+                    # Convert delay to pixel position
+                    delivery_position = int((delay - aligned_time[0]) / (aligned_time[-1] - aligned_time[0]) * n_timepoints)
+                    # Draw green line for this specific trial (row)
+                    ax.plot([delivery_position, delivery_position], 
+                           [raster_row_idx - 0.4, raster_row_idx + 0.4], 
+                           color='green', linestyle='-', alpha=0.8, linewidth=3.0)
+    
+    # Add individual zone entry lines if requested (for delivery-centered plots)
+    if show_zone_entries:
+        for raster_row_idx, (trial_idx, zone_entry_time, event_time) in enumerate(event_trials):
+            # Calculate delay between event and zone entry (typically negative)
+            delay = zone_entry_time - event_time
+            if aligned_time[0] <= delay <= aligned_time[-1]:  # Only draw if within the time window
+                # Convert delay to pixel position
+                zone_entry_position = int((delay - aligned_time[0]) / (aligned_time[-1] - aligned_time[0]) * n_timepoints)
+                # Draw line only for this specific trial (row)
+                ax.plot([zone_entry_position, zone_entry_position], 
+                       [raster_row_idx - 0.4, raster_row_idx + 0.4], 
+                       color=zone_entry_color, linestyle='-', alpha=0.8, linewidth=zone_entry_linewidth)
     
     setup_plot_style(ax)
     plt.tight_layout()
     save_figure(fig, filename, output_folder)
     plt.show()
+
+
+# ============================================================================
+# PLOTTING FUNCTIONS: AVERAGE TRACES
+# ============================================================================
+
+def plot_average_traces_reward(reward_zone_trials, trial_log_df, capacitive_df, 
+                               treadmill_interp, pupil_diameter_interp, output_folder, window=5):
+    """Plot average traces (mean ± SEM) for reward zone and delivery events
+    
+    Args:
+        reward_zone_trials: List of reward zone trial tuples
+        trial_log_df: Trial log DataFrame
+        capacitive_df: Capacitive DataFrame
+        treadmill_interp: Interpolated treadmill speed
+        pupil_diameter_interp: Interpolated pupil diameter (or None)
+        output_folder: Directory to save figures
+        window: Window size in seconds
+    """
+    if len(reward_zone_trials) == 0:
+        print("No reward zones for average trace analysis")
+        return
+    
+    cap_time = capacitive_df['elapsed_time'].values
+    cap_val = capacitive_df['capacitive_value'].values
+    speed_val = treadmill_interp.values
+    
+    # Extract zone entry times
+    zone_entry_times = [entry[1] for entry in reward_zone_trials]
+    
+    # Create speed windows aligned to zone entry
+    speed_windows = []
+    for rt in zone_entry_times:
+        mask = (cap_time >= rt - window) & (cap_time <= rt + window)
+        speed_segment = speed_val[mask]
+        speed_windows.append(speed_segment)
+    
+    max_speed_len = max(len(seg) for seg in speed_windows)
+    speed_windows_padded = np.array([
+        np.pad(seg.astype(float), (0, max_speed_len - len(seg)), constant_values=np.nan)
+        for seg in speed_windows
+    ])
+    
+    aligned_time_speed = np.linspace(-window, window, max_speed_len)
+    mean_speed = np.nanmean(speed_windows_padded, axis=0)
+    sem_speed = np.nanstd(speed_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(speed_windows_padded), axis=0))
+    
+    # Get reward event times
+    reward_event_times_flat = pd.to_numeric(trial_log_df['reward_event'], errors='coerce').dropna()
+    reward_event_times_flat = reward_event_times_flat[~np.isnan(reward_event_times_flat)].values
+    
+    if len(reward_event_times_flat) == 0:
+        print("No reward events found for average trace analysis")
+        return
+    
+    # Create capacitive windows aligned to reward events
+    cap_event_windows = []
+    for rt in reward_event_times_flat:
+        mask = (cap_time >= rt - window) & (cap_time <= rt + window)
+        cap_segment = cap_val[mask]
+        cap_event_windows.append(cap_segment)
+    
+    max_event_len = max(len(seg) for seg in cap_event_windows)
+    cap_event_windows_padded = np.array([
+        np.pad(seg.astype(float), (0, max_event_len - len(seg)), constant_values=np.nan)
+        for seg in cap_event_windows
+    ])
+    
+    aligned_time_event = np.linspace(-window, window, max_event_len)
+    mean_event_vals = np.nanmean(cap_event_windows_padded, axis=0)
+    sem_event_vals = np.nanstd(cap_event_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(cap_event_windows_padded), axis=0))
+    
+    # Create combined subplot figure
+    num_plots = 3 if pupil_diameter_interp is not None else 2
+    fig, axs = plt.subplots(num_plots, 1, figsize=(12, 10 if num_plots == 2 else 14), sharex=True)
+    
+    if num_plots == 2:
+        axs = [axs[0], axs[1]]
+    
+    # Plot 1: Treadmill Speed aligned to reward zone entry
+    n_rewards_speed = speed_windows_padded.shape[0]
+    axs[0].plot(aligned_time_speed, mean_speed, color='purple', label=f'Mean Speed (n={n_rewards_speed})')
+    axs[0].fill_between(aligned_time_speed, mean_speed - sem_speed, mean_speed + sem_speed, 
+                        color='purple', alpha=0.2, label='SEM')
+    axs[0].axvline(0, color='red', linestyle='--', label='Reward Zone Onset (t=0)')
+    axs[0].set_ylabel('Treadmill Speed (interpolated)')
+    axs[0].set_title('Treadmill Speed Aligned to Reward Zone Onset')
+    axs[0].legend()
+    axs[0].set_xlim(-5, 5)
+    axs[0].spines['top'].set_visible(False)
+    axs[0].spines['right'].set_visible(False)
+    
+    # Plot 2: Capacitive Value aligned to reward events
+    n_rewards_event = cap_event_windows_padded.shape[0]
+    axs[1].plot(aligned_time_event, mean_event_vals, color='green', label=f'Mean (n={n_rewards_event})')
+    axs[1].fill_between(aligned_time_event, mean_event_vals - sem_event_vals, 
+                        mean_event_vals + sem_event_vals, color='green', alpha=0.2, label='SEM')
+    axs[1].axvline(0, color='red', linestyle='--', label='Reward Event (t=0)')
+    axs[1].set_ylabel('Capacitive Value')
+    axs[1].set_title('Capacitive Value Aligned to Reward Event')
+    axs[1].legend()
+    axs[1].set_xlim(-5, 5)
+    axs[1].set_ylim(bottom=0)
+    axs[1].spines['top'].set_visible(False)
+    axs[1].spines['right'].set_visible(False)
+    
+    # Plot 3: Pupil diameter (if available)
+    if pupil_diameter_interp is not None:
+        pupil_val = pupil_diameter_interp.values
+        
+        # Pupil aligned to zone entry
+        pupil_zone_windows = []
+        for rt in zone_entry_times:
+            mask = (cap_time >= rt - window) & (cap_time <= rt + window)
+            pupil_segment = pupil_val[mask]
+            pupil_zone_windows.append(pupil_segment)
+        
+        max_pupil_len = max(len(seg) for seg in pupil_zone_windows)
+        pupil_zone_windows_padded = np.array([
+            np.pad(seg.astype(float), (0, max_pupil_len - len(seg)), constant_values=np.nan)
+            for seg in pupil_zone_windows
+        ])
+        
+        aligned_time_pupil = np.linspace(-window, window, max_pupil_len)
+        mean_pupil = np.nanmean(pupil_zone_windows_padded, axis=0)
+        sem_pupil = np.nanstd(pupil_zone_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(pupil_zone_windows_padded), axis=0))
+        
+        # Pupil aligned to reward events
+        pupil_event_windows = []
+        for rt in reward_event_times_flat:
+            mask = (cap_time >= rt - window) & (cap_time <= rt + window)
+            pupil_segment = pupil_val[mask]
+            pupil_event_windows.append(pupil_segment)
+        
+        max_pupil_event_len = max(len(seg) for seg in pupil_event_windows)
+        pupil_event_windows_padded = np.array([
+            np.pad(seg.astype(float), (0, max_pupil_event_len - len(seg)), constant_values=np.nan)
+            for seg in pupil_event_windows
+        ])
+        
+        aligned_time_pupil_event = np.linspace(-window, window, max_pupil_event_len)
+        mean_pupil_event = np.nanmean(pupil_event_windows_padded, axis=0)
+        sem_pupil_event = np.nanstd(pupil_event_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(pupil_event_windows_padded), axis=0))
+        
+        # Create separate pupil figure with 2 subplots
+        fig_pupil, axs_pupil = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
+        
+        # Plot 1: Pupil aligned to zone entry
+        n_pupil_zone = pupil_zone_windows_padded.shape[0]
+        axs_pupil[0].plot(aligned_time_pupil, mean_pupil, color='orange', label=f'Mean Pupil Diameter (n={n_pupil_zone})')
+        axs_pupil[0].fill_between(aligned_time_pupil, mean_pupil - sem_pupil, mean_pupil + sem_pupil,
+                                  color='orange', alpha=0.2, label='SEM')
+        axs_pupil[0].axvline(0, color='red', linestyle='--', label='Reward Zone Onset (t=0)')
+        axs_pupil[0].set_ylabel('Pupil Diameter (pixels)')
+        axs_pupil[0].set_title('Pupil Diameter Aligned to Reward Zone Onset')
+        axs_pupil[0].legend()
+        axs_pupil[0].set_xlim(-5, 5)
+        axs_pupil[0].set_ylim(bottom=0)
+        axs_pupil[0].spines['top'].set_visible(False)
+        axs_pupil[0].spines['right'].set_visible(False)
+        
+        # Plot 2: Pupil aligned to reward events
+        n_pupil_event = pupil_event_windows_padded.shape[0]
+        axs_pupil[1].plot(aligned_time_pupil_event, mean_pupil_event, color='orange', 
+                         label=f'Mean Pupil Diameter (n={n_pupil_event})')
+        axs_pupil[1].fill_between(aligned_time_pupil_event, mean_pupil_event - sem_pupil_event,
+                                   mean_pupil_event + sem_pupil_event, color='orange', alpha=0.2, label='SEM')
+        axs_pupil[1].axvline(0, color='red', linestyle='--', label='Reward Event (t=0)')
+        axs_pupil[1].set_xlabel('Time (s)')
+        axs_pupil[1].set_ylabel('Pupil Diameter (pixels)')
+        axs_pupil[1].set_title('Pupil Diameter Aligned to Reward Events')
+        axs_pupil[1].legend()
+        axs_pupil[1].set_xlim(-5, 5)
+        axs_pupil[1].set_ylim(bottom=0)
+        axs_pupil[1].spines['top'].set_visible(False)
+        axs_pupil[1].spines['right'].set_visible(False)
+        
+        for ax in axs_pupil:
+            ax.set_xticks(np.arange(-5, 6, 1))
+        
+        plt.tight_layout()
+        save_figure(fig_pupil, "pupil_diameter_reward_combined", output_folder)
+        plt.show()
+    else:
+        axs[1].set_xlabel('Time from Reward Event (s)')
+    
+    # Set x-axis formatting for main figure
+    for ax in axs:
+        ax.set_xticks(np.arange(-5, 6, 1))
+    
+    if num_plots == 2:
+        axs[-1].set_xlabel('Time (s)')
+    
+    plt.tight_layout()
+    save_figure(fig, "reward_zone_analysis_capacitive_treadmill", output_folder)
+    plt.show()
+    
+    print(f"Average trace plots created: {n_rewards_speed} zone entries, {n_rewards_event} reward events")
+
+
+def plot_average_traces_puff(puff_zone_trials, trial_log_df, capacitive_df,
+                             treadmill_interp, pupil_diameter_interp, output_folder, window=5):
+    """Plot average traces (mean ± SEM) for puff zone and delivery events
+    
+    Args:
+        puff_zone_trials: List of puff zone trial tuples
+        trial_log_df: Trial log DataFrame
+        capacitive_df: Capacitive DataFrame
+        treadmill_interp: Interpolated treadmill speed
+        pupil_diameter_interp: Interpolated pupil diameter (or None)
+        output_folder: Directory to save figures
+        window: Window size in seconds
+    """
+    if len(puff_zone_trials) == 0:
+        print("No puff zones for average trace analysis")
+        return
+    
+    cap_time = capacitive_df['elapsed_time'].values
+    cap_val = capacitive_df['capacitive_value'].values
+    speed_val = treadmill_interp.values
+    
+    # Extract zone entry times
+    zone_entry_times = [entry[1] for entry in puff_zone_trials]
+    
+    # Speed aligned to puff zone entry
+    speed_puff_windows = []
+    for puff_time in zone_entry_times:
+        mask = (cap_time >= puff_time - window) & (cap_time <= puff_time + window)
+        speed_segment = speed_val[mask]
+        speed_puff_windows.append(speed_segment)
+    
+    if not speed_puff_windows or max(len(seg) for seg in speed_puff_windows) == 0:
+        print("No valid speed data for puff zone analysis")
+        return
+    
+    max_puff_len = max(len(seg) for seg in speed_puff_windows)
+    speed_puff_windows_padded = np.array([
+        np.pad(seg.astype(float), (0, max_puff_len - len(seg)), constant_values=np.nan)
+        for seg in speed_puff_windows
+    ])
+    
+    aligned_time_puff = np.linspace(-window, window, max_puff_len)
+    n_puff_events = speed_puff_windows_padded.shape[0]
+    mean_speed_puff = np.nanmean(speed_puff_windows_padded, axis=0)
+    sem_speed_puff = np.nanstd(speed_puff_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(speed_puff_windows_padded), axis=0))
+    
+    # Get puff event times
+    puff_event_capacitive_data = None
+    puff_event_speed_data = None
+    
+    if 'puff_event' in trial_log_df.columns:
+        puff_event_times = pd.to_numeric(trial_log_df['puff_event'], errors='coerce').dropna()
+        puff_event_times = puff_event_times[~np.isnan(puff_event_times)].values
+        
+        if len(puff_event_times) > 0:
+            # Capacitive aligned to puff events
+            cap_puff_event_windows = []
+            for puff_event_time in puff_event_times:
+                mask = (cap_time >= puff_event_time - window) & (cap_time <= puff_event_time + window)
+                cap_segment = cap_val[mask]
+                cap_puff_event_windows.append(cap_segment)
+            
+            if cap_puff_event_windows and max(len(seg) for seg in cap_puff_event_windows) > 0:
+                max_puff_cap_len = max(len(seg) for seg in cap_puff_event_windows)
+                cap_puff_event_windows_padded = np.array([
+                    np.pad(seg.astype(float), (0, max_puff_cap_len - len(seg)), constant_values=np.nan)
+                    for seg in cap_puff_event_windows
+                ])
+                
+                aligned_time_puff_cap = np.linspace(-window, window, max_puff_cap_len)
+                n_puff_event_cap = cap_puff_event_windows_padded.shape[0]
+                mean_cap_puff_event = np.nanmean(cap_puff_event_windows_padded, axis=0)
+                sem_cap_puff_event = np.nanstd(cap_puff_event_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(cap_puff_event_windows_padded), axis=0))
+                
+                puff_event_capacitive_data = {
+                    'aligned_time': aligned_time_puff_cap,
+                    'mean_values': mean_cap_puff_event,
+                    'sem_values': sem_cap_puff_event,
+                    'n_events': n_puff_event_cap
+                }
+            
+            # Speed aligned to puff events
+            speed_puff_event_windows = []
+            for puff_event_time in puff_event_times:
+                mask = (cap_time >= puff_event_time - window) & (cap_time <= puff_event_time + window)
+                speed_segment = speed_val[mask]
+                speed_puff_event_windows.append(speed_segment)
+            
+            if speed_puff_event_windows and max(len(seg) for seg in speed_puff_event_windows) > 0:
+                max_puff_speed_len = max(len(seg) for seg in speed_puff_event_windows)
+                speed_puff_event_windows_padded = np.array([
+                    np.pad(seg.astype(float), (0, max_puff_speed_len - len(seg)), constant_values=np.nan)
+                    for seg in speed_puff_event_windows
+                ])
+                
+                aligned_time_puff_speed = np.linspace(-window, window, max_puff_speed_len)
+                n_puff_event_speed = speed_puff_event_windows_padded.shape[0]
+                mean_speed_puff_event = np.nanmean(speed_puff_event_windows_padded, axis=0)
+                sem_speed_puff_event = np.nanstd(speed_puff_event_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(speed_puff_event_windows_padded), axis=0))
+                
+                puff_event_speed_data = {
+                    'aligned_time': aligned_time_puff_speed,
+                    'mean_values': mean_speed_puff_event,
+                    'sem_values': sem_speed_puff_event,
+                    'n_events': n_puff_event_speed
+                }
+    
+    # Create 3-panel figure
+    fig, axs = plt.subplots(3, 1, figsize=(12, 14), sharex=True)
+    
+    # Plot 1: Treadmill Speed aligned to puff zone entry
+    axs[0].plot(aligned_time_puff, mean_speed_puff, color='red', linewidth=2, 
+               label=f'Mean Speed (n={n_puff_events})')
+    axs[0].fill_between(aligned_time_puff, mean_speed_puff - sem_speed_puff, 
+                        mean_speed_puff + sem_speed_puff, color='red', alpha=0.2, label='SEM')
+    axs[0].axvline(0, color='black', linestyle='--', alpha=0.8, linewidth=2, label='Puff Zone Entry (t=0)')
+    axs[0].set_ylabel('Treadmill Speed (interpolated)')
+    axs[0].set_title(f'Average Treadmill Speed Aligned to Puff Zone Entry Times (n={n_puff_events})')
+    axs[0].legend()
+    axs[0].set_xlim(-5, 5)
+    axs[0].spines['top'].set_visible(False)
+    axs[0].spines['right'].set_visible(False)
+    
+    # Plot 2: Capacitive Value aligned to puff events
+    if puff_event_capacitive_data is not None:
+        axs[1].plot(puff_event_capacitive_data['aligned_time'], puff_event_capacitive_data['mean_values'],
+                   color='blue', linewidth=2, label=f'Mean Capacitive (n={puff_event_capacitive_data["n_events"]})')
+        axs[1].fill_between(puff_event_capacitive_data['aligned_time'],
+                           puff_event_capacitive_data['mean_values'] - puff_event_capacitive_data['sem_values'],
+                           puff_event_capacitive_data['mean_values'] + puff_event_capacitive_data['sem_values'],
+                           color='blue', alpha=0.2, label='SEM')
+        axs[1].axvline(0, color='black', linestyle='--', alpha=0.8, linewidth=2, label='Puff Event (t=0)')
+        axs[1].set_ylabel('Capacitive Value')
+        axs[1].set_title(f'Average Capacitive Value Aligned to Puff Events (n={puff_event_capacitive_data["n_events"]})')
+        axs[1].legend()
+        axs[1].set_ylim(bottom=0)
+    else:
+        axs[1].text(0.5, 0.5, 'No puff event data available\nfor capacitive analysis',
+                   horizontalalignment='center', verticalalignment='center',
+                   transform=axs[1].transAxes, fontsize=12)
+        axs[1].set_ylabel('Capacitive Value')
+        axs[1].set_title('Capacitive Value Aligned to Puff Events (No Data)')
+    
+    axs[1].set_xlim(-5, 5)
+    axs[1].spines['top'].set_visible(False)
+    axs[1].spines['right'].set_visible(False)
+    
+    # Plot 3: Treadmill Speed aligned to puff events
+    if puff_event_speed_data is not None:
+        axs[2].plot(puff_event_speed_data['aligned_time'], puff_event_speed_data['mean_values'],
+                   color='purple', linewidth=2, label=f'Mean Speed (n={puff_event_speed_data["n_events"]})')
+        axs[2].fill_between(puff_event_speed_data['aligned_time'],
+                           puff_event_speed_data['mean_values'] - puff_event_speed_data['sem_values'],
+                           puff_event_speed_data['mean_values'] + puff_event_speed_data['sem_values'],
+                           color='purple', alpha=0.2, label='SEM')
+        axs[2].axvline(0, color='black', linestyle='--', alpha=0.8, linewidth=2, label='Puff Event (t=0)')
+        axs[2].set_ylabel('Treadmill Speed (interpolated)')
+        axs[2].set_title(f'Average Treadmill Speed Aligned to Puff Events (n={puff_event_speed_data["n_events"]})')
+        axs[2].legend()
+    else:
+        axs[2].text(0.5, 0.5, 'No puff event data available\nfor treadmill speed analysis',
+                   horizontalalignment='center', verticalalignment='center',
+                   transform=axs[2].transAxes, fontsize=12)
+        axs[2].set_ylabel('Treadmill Speed')
+        axs[2].set_title('Treadmill Speed Aligned to Puff Events (No Data)')
+    
+    axs[2].set_xlabel('Time from Puff Event (s)')
+    axs[2].set_xlim(-5, 5)
+    axs[2].set_xticks(np.arange(-5, 6, 1))
+    axs[2].spines['top'].set_visible(False)
+    axs[2].spines['right'].set_visible(False)
+    
+    plt.tight_layout()
+    save_figure(fig, "puff_events_analysis", output_folder)
+    plt.show()
+    
+    # Create pupil plots if available
+    if pupil_diameter_interp is not None:
+        pupil_val = pupil_diameter_interp.values
+        window_pupil = 10
+        
+        # Pupil aligned to puff zone entry
+        pupil_puff_windows = []
+        for puff_time in zone_entry_times:
+            mask = (cap_time >= puff_time - window_pupil) & (cap_time <= puff_time + window_pupil)
+            pupil_segment = pupil_val[mask]
+            pupil_puff_windows.append(pupil_segment)
+        
+        max_pupil_puff_len = max(len(seg) for seg in pupil_puff_windows)
+        pupil_puff_windows_padded = np.array([
+            np.pad(seg.astype(float), (0, max_pupil_puff_len - len(seg)), constant_values=np.nan)
+            for seg in pupil_puff_windows
+        ])
+        
+        aligned_time_pupil_puff = np.linspace(-window_pupil, window_pupil, max_pupil_puff_len)
+        mean_pupil_puff = np.nanmean(pupil_puff_windows_padded, axis=0)
+        sem_pupil_puff = np.nanstd(pupil_puff_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(pupil_puff_windows_padded), axis=0))
+        n_puffs_pupil = pupil_puff_windows_padded.shape[0]
+        
+        # Pupil aligned to puff events (if available)
+        pupil_puff_event_data = None
+        if 'puff_event' in trial_log_df.columns:
+            puff_event_times = pd.to_numeric(trial_log_df['puff_event'], errors='coerce').dropna().values
+            
+            if len(puff_event_times) > 0:
+                pupil_puff_event_windows = []
+                for puff_time in puff_event_times:
+                    mask = (cap_time >= puff_time - window_pupil) & (cap_time <= puff_time + window_pupil)
+                    pupil_segment = pupil_val[mask]
+                    pupil_puff_event_windows.append(pupil_segment)
+                
+                if pupil_puff_event_windows and max(len(seg) for seg in pupil_puff_event_windows) > 0:
+                    max_pupil_puff_event_len = max(len(seg) for seg in pupil_puff_event_windows)
+                    pupil_puff_event_windows_padded = np.array([
+                        np.pad(seg.astype(float), (0, max_pupil_puff_event_len - len(seg)), constant_values=np.nan)
+                        for seg in pupil_puff_event_windows
+                    ])
+                    
+                    aligned_time_pupil_puff_event = np.linspace(-window_pupil, window_pupil, max_pupil_puff_event_len)
+                    n_puffs_pupil_event = pupil_puff_event_windows_padded.shape[0]
+                    mean_pupil_puff_event = np.nanmean(pupil_puff_event_windows_padded, axis=0)
+                    sem_pupil_puff_event = np.nanstd(pupil_puff_event_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(pupil_puff_event_windows_padded), axis=0))
+                    
+                    pupil_puff_event_data = {
+                        'time': aligned_time_pupil_puff_event,
+                        'mean': mean_pupil_puff_event,
+                        'sem': sem_pupil_puff_event,
+                        'n': n_puffs_pupil_event
+                    }
+        
+        # Create pupil subplot figure
+        num_puff_plots = 2 if pupil_puff_event_data is not None else 1
+        fig_pupil, axs_pupil = plt.subplots(num_puff_plots, 1, figsize=(12, 10 if num_puff_plots == 2 else 6), sharex=True)
+        
+        if num_puff_plots == 1:
+            axs_pupil = [axs_pupil]
+        
+        # Plot 1: Pupil aligned to puff zone entry
+        axs_pupil[0].plot(aligned_time_pupil_puff, mean_pupil_puff, color='red', 
+                         label=f'Mean Pupil Diameter (n={n_puffs_pupil})')
+        axs_pupil[0].fill_between(aligned_time_pupil_puff, mean_pupil_puff - sem_pupil_puff,
+                                   mean_pupil_puff + sem_pupil_puff, color='red', alpha=0.2, label='SEM')
+        axs_pupil[0].axvline(0, color='red', linestyle='--', label='Puff Zone Entry (t=0)')
+        axs_pupil[0].set_ylabel('Pupil Diameter (pixels)')
+        axs_pupil[0].set_title('Pupil Diameter Aligned to Puff Zone Entry')
+        axs_pupil[0].legend()
+        axs_pupil[0].set_xlim(-10, 10)
+        axs_pupil[0].set_ylim(bottom=0)
+        axs_pupil[0].spines['top'].set_visible(False)
+        axs_pupil[0].spines['right'].set_visible(False)
+        
+        # Plot 2: Pupil aligned to puff events (if available)
+        if pupil_puff_event_data is not None:
+            axs_pupil[1].plot(pupil_puff_event_data['time'], pupil_puff_event_data['mean'], 
+                             color='red', label=f'Mean Pupil Diameter (n={pupil_puff_event_data["n"]})')
+            axs_pupil[1].fill_between(pupil_puff_event_data['time'],
+                                       pupil_puff_event_data['mean'] - pupil_puff_event_data['sem'],
+                                       pupil_puff_event_data['mean'] + pupil_puff_event_data['sem'],
+                                       color='red', alpha=0.2, label='SEM')
+            axs_pupil[1].axvline(0, color='red', linestyle='--', label='Puff Event (t=0)')
+            axs_pupil[1].set_xlabel('Time (s)')
+            axs_pupil[1].set_ylabel('Pupil Diameter (pixels)')
+            axs_pupil[1].set_title('Pupil Diameter Aligned to Puff Events')
+            axs_pupil[1].legend()
+            axs_pupil[1].set_xlim(-10, 10)
+            axs_pupil[1].set_ylim(bottom=0)
+            axs_pupil[1].spines['top'].set_visible(False)
+            axs_pupil[1].spines['right'].set_visible(False)
+        else:
+            axs_pupil[0].set_xlabel('Time (s)')
+        
+        for ax in axs_pupil:
+            ax.set_xticks(np.arange(-10, 11, 2))
+        
+        plt.tight_layout()
+        save_figure(fig_pupil, f"pupil_diameter_puff_combined_{'with_events' if pupil_puff_event_data is not None else 'zone_only'}", output_folder)
+        plt.show()
+    
+    print(f"Puff average trace plots created: {n_puff_events} zone entries")
 
 
 # ============================================================================
@@ -904,22 +1434,24 @@ def analyze_reward_zones(reward_zone_trials, capacitive_df, treadmill_interp,
     if speed_windows is not None:
         plot_raster_heatmap(
             speed_windows, aligned_time_speed, reward_zone_trials,
-            f'Treadmill Speed: Aligned to Reward Zone Entry (n={len(reward_zone_trials)})',
-            'Trial #', 'coolwarm', output_folder, 
-            'treadmill_speed_raster_reward_zone_entry',
+            f'Treadmill Speed Raster: Individual Trials Aligned to Reward Zone Entry (n={len(reward_zone_trials)} trials)',
+            'Treadmill Speed', 'coolwarm', output_folder, 
+            'treadmill_speed_raster_reward_zones',
             vmin=-300,
             vmax=300,
-            center_time=0, event_label="Reward Zone Entry"
+            center_time=0, event_label="Reward Zone Entry",
+            show_delivery_markers=True, center_line_color='black'
         )
     
     # Plot raster for capacitive at zone entry
     if cap_windows is not None:
         plot_raster_heatmap(
             cap_windows, aligned_time_cap, reward_zone_trials,
-            f'Capacitive Value: Aligned to Reward Zone Entry (n={len(reward_zone_trials)})',
-            'Trial #', 'binary', output_folder,
-            'capacitive_raster_reward_zone_entry',
-            center_time=0, event_label="Reward Zone Entry"
+            f'Capacitive (Licking) Raster: Individual Trials Aligned to Reward Zone Entry (n={len(reward_zone_trials)} trials)',
+            'Capacitive Value (Licking)', 'binary', output_folder,
+            'capacitive_raster_reward_zones',
+            center_time=0, event_label="Reward Zone Entry",
+            show_delivery_markers=True, center_line_color='blue'
         )
     
     # Analyze reward deliveries (where reward_event is valid)
@@ -961,21 +1493,23 @@ def analyze_reward_deliveries(reward_delivery_trials, cap_time, cap_val, speed_v
     if speed_windows is not None:
         plot_raster_heatmap(
             speed_windows, aligned_time_speed, reward_delivery_trials,
-            f'Treadmill Speed: Aligned to Reward Delivery (n={len(reward_delivery_trials)})',
-            'Trial #', 'coolwarm', output_folder,
-            'treadmill_speed_raster_reward_delivery',
+            f'Treadmill Speed Raster: Individual Trials Aligned to Reward Delivery (n={len(reward_delivery_trials)} trials)',
+            'Treadmill Speed', 'coolwarm', output_folder,
+            'treadmill_speed_raster_reward_delivery_centered',
             vmin=-300,
             vmax=300,
-            center_time=0, event_label="Reward Delivery"
+            center_time=0, event_label="Reward Delivery",
+            show_zone_entries=True, zone_entry_color='black', center_line_color='green'
         )
     
     if cap_windows is not None:
         plot_raster_heatmap(
             cap_windows, aligned_time_cap, reward_delivery_trials,
-            f'Capacitive Value: Aligned to Reward Delivery (n={len(reward_delivery_trials)})',
-            'Trial #', 'binary', output_folder,
-            'capacitive_raster_reward_delivery',
-            center_time=0, event_label="Reward Delivery"
+            f'Capacitive (Licking) Raster: Individual Trials Aligned to Reward Delivery (n={len(reward_delivery_trials)} trials)',
+            'Capacitive Value (Licking)', 'binary', output_folder,
+            'capacitive_raster_reward_delivery_centered',
+            center_time=0, event_label="Reward Delivery",
+            show_zone_entries=True, zone_entry_color='blue', center_line_color='green'
         )
 
 
@@ -984,7 +1518,7 @@ def analyze_reward_deliveries(reward_delivery_trials, cap_time, cap_val, speed_v
 # ============================================================================
 
 def analyze_puff_zones(puff_zone_trials, capacitive_df, treadmill_interp, 
-                       pupil_diameter_interp, output_folder, window=5):
+                       pupil_diameter_interp, output_folder, window=10):
     """Analyze data aligned to puff zone entries and deliveries
     
     Args:
@@ -1021,21 +1555,23 @@ def analyze_puff_zones(puff_zone_trials, capacitive_df, treadmill_interp,
     if speed_windows is not None:
         plot_raster_heatmap(
             speed_windows, aligned_time_speed, puff_zone_trials,
-            f'Treadmill Speed: Aligned to Puff Zone Entry (n={len(puff_zone_trials)})',
-            'Trial #', 'coolwarm', output_folder,
-            'treadmill_speed_raster_puff_zone_entry',
+            f'Treadmill Speed Raster: Individual Trials Aligned to Puff Zone Entry (n={len(puff_zone_trials)} trials)',
+            'Treadmill Speed', 'coolwarm', output_folder,
+            'treadmill_speed_raster_puff_zones',
             vmin=-300,
             vmax=300,
-            center_time=0, event_label="Puff Zone Entry"
+            center_time=0, event_label="Puff Zone Entry",
+            show_delivery_markers=True, center_line_color='black'
         )
     
     if cap_windows is not None:
         plot_raster_heatmap(
             cap_windows, aligned_time_cap, puff_zone_trials,
-            f'Capacitive Value: Aligned to Puff Zone Entry (n={len(puff_zone_trials)})',
-            'Trial #', 'binary', output_folder,
-            'capacitive_raster_puff_zone_entry',
-            center_time=0, event_label="Puff Zone Entry"
+            f'Capacitive (Licking) Raster: Individual Trials Aligned to Puff Zone Entry (n={len(puff_zone_trials)} trials)',
+            'Capacitive Value (Licking)', 'binary', output_folder,
+            'capacitive_raster_puff_zones',
+            center_time=0, event_label="Puff Zone Entry",
+            show_delivery_markers=True, center_line_color='blue'
         )
     
     # Analyze puff deliveries
@@ -1049,7 +1585,7 @@ def analyze_puff_zones(puff_zone_trials, capacitive_df, treadmill_interp,
 
 
 def analyze_puff_deliveries(puff_delivery_trials, cap_time, cap_val, speed_val,
-                            output_folder, window=5):
+                            output_folder, window=10):
     """Analyze data aligned to puff delivery times
     
     Args:
@@ -1076,21 +1612,23 @@ def analyze_puff_deliveries(puff_delivery_trials, cap_time, cap_val, speed_val,
     if speed_windows is not None:
         plot_raster_heatmap(
             speed_windows, aligned_time_speed, puff_delivery_trials,
-            f'Treadmill Speed: Aligned to Puff Delivery (n={len(puff_delivery_trials)})',
-            'Trial #', 'coolwarm', output_folder,
-            'treadmill_speed_raster_puff_delivery',
+            f'Treadmill Speed Raster: Individual Trials Aligned to Puff Delivery (n={len(puff_delivery_trials)} trials)',
+            'Treadmill Speed', 'coolwarm', output_folder,
+            'treadmill_speed_raster_puff_delivery_centered',
             vmin=-400,
             vmax=400,
-            center_time=0, event_label="Puff Delivery"
+            center_time=0, event_label="Puff Delivery",
+            show_zone_entries=True, zone_entry_color='black', center_line_color='green'
         )
     
     if cap_windows is not None:
         plot_raster_heatmap(
             cap_windows, aligned_time_cap, puff_delivery_trials,
-            f'Capacitive Value: Aligned to Puff Delivery (n={len(puff_delivery_trials)})',
-            'Trial #', 'binary', output_folder,
-            'capacitive_raster_puff_delivery',
-            center_time=0, event_label="Puff Delivery"
+            f'Capacitive (Licking) Raster: Individual Trials Aligned to Puff Delivery (n={len(puff_delivery_trials)} trials)',
+            'Capacitive Value (Licking)', 'binary', output_folder,
+            'capacitive_raster_puff_delivery_centered',
+            center_time=0, event_label="Puff Delivery",
+            show_zone_entries=True, zone_entry_color='blue', center_line_color='green'
         )
 
 
@@ -1154,6 +1692,13 @@ def main():
             reward_zone_trials, data['capacitive'], treadmill_interp,
             pupil_diameter_interp, output_folder
         )
+        
+        # Create average trace plots for rewards
+        print("\nCreating reward average trace plots...")
+        plot_average_traces_reward(
+            reward_zone_trials, data['trial_log'], data['capacitive'],
+            treadmill_interp, pupil_diameter_interp, output_folder
+        )
     
     # Step 8: Match and analyze puff zones
     print("\nAnalyzing puff zones...")
@@ -1165,6 +1710,13 @@ def main():
         analyze_puff_zones(
             puff_zone_trials, data['capacitive'], treadmill_interp,
             pupil_diameter_interp, output_folder
+        )
+        
+        # Create average trace plots for puffs
+        print("\nCreating puff average trace plots...")
+        plot_average_traces_puff(
+            puff_zone_trials, data['trial_log'], data['capacitive'],
+            treadmill_interp, pupil_diameter_interp, output_folder
         )
     
     # Step 9: Summary
