@@ -369,14 +369,14 @@ def interpolate_treadmill_to_capacitive(treadmill_df, capacitive_df):
         capacitive_df: Capacitive DataFrame
         
     Returns:
-        pd.Series: Interpolated treadmill speed
+        pd.Series: Interpolated treadmill speed in cm/s
     """
     return pd.Series(
         data=np.interp(
             capacitive_df['elapsed_time'],
             treadmill_df['global_time'],
             treadmill_df['speed']
-        ),
+        ) / 10.0,
         index=capacitive_df['elapsed_time']
     )
 
@@ -708,7 +708,7 @@ def plot_capacitive_timeline(ax, capacitive_df, reward_times, puff_times, probe_
                              texture_data, label_prefix=""):
     """Plot capacitive sensor data with event markers"""
     ax.plot(capacitive_df['elapsed_time'], capacitive_df['capacitive_value'], 
-            label='Capacitive Value')
+            label='Capacitive Value (a.u.)')
     
     # Add event markers
     add_event_markers(ax, reward_times, puff_times, probe_times)
@@ -716,7 +716,7 @@ def plot_capacitive_timeline(ax, capacitive_df, reward_times, puff_times, probe_
     # Highlight reward and punish intervals
     add_texture_intervals(ax, texture_data)
     
-    ax.set_ylabel('Capacitive Value')
+    ax.set_ylabel('Capacitive Value (a.u.)')
     ax.set_title(f'{label_prefix} Capacitive Sensor Over Time with Reward and Puff Events')
     ax.legend(loc='upper right')
     ax.set_ylim(bottom=0)
@@ -735,7 +735,7 @@ def plot_treadmill_timeline(ax, capacitive_df, treadmill_interp, reward_times,
     add_texture_intervals(ax, texture_data)
     
     ax.set_xlabel('Elapsed Time (s)' if not has_pupil_data else '')
-    ax.set_ylabel('Speed')
+    ax.set_ylabel('Speed (cm/s)')
     ax.set_title('Interpolated Treadmill Speed Over Time with Reward and Puff Events')
     ax.legend(loc='upper right')
 
@@ -996,7 +996,7 @@ def plot_average_traces_reward(reward_zone_trials, trial_log_df, capacitive_df,
     axs[0].fill_between(aligned_time_speed, mean_speed - sem_speed, mean_speed + sem_speed, 
                         color='purple', alpha=0.2, label='SEM')
     axs[0].axvline(0, color='red', linestyle='--', label='Reward Zone Onset (t=0)')
-    axs[0].set_ylabel('Treadmill Speed (interpolated)')
+    axs[0].set_ylabel('Treadmill Speed (cm/s)')
     axs[0].set_title('Treadmill Speed Aligned to Reward Zone Onset')
     axs[0].legend()
     axs[0].set_xlim(-5, 5)
@@ -1009,7 +1009,7 @@ def plot_average_traces_reward(reward_zone_trials, trial_log_df, capacitive_df,
     axs[1].fill_between(aligned_time_event, mean_event_vals - sem_event_vals, 
                         mean_event_vals + sem_event_vals, color='green', alpha=0.2, label='SEM')
     axs[1].axvline(0, color='red', linestyle='--', label='Reward Event (t=0)')
-    axs[1].set_ylabel('Capacitive Value')
+    axs[1].set_ylabel('Capacitive Value (a.u.)')
     axs[1].set_title('Capacitive Value Aligned to Reward Event')
     axs[1].legend()
     axs[1].set_xlim(-5, 5)
@@ -1227,7 +1227,7 @@ def plot_average_traces_puff(puff_zone_trials, trial_log_df, capacitive_df,
     axs[0].fill_between(aligned_time_puff, mean_speed_puff - sem_speed_puff, 
                         mean_speed_puff + sem_speed_puff, color='red', alpha=0.2, label='SEM')
     axs[0].axvline(0, color='black', linestyle='--', alpha=0.8, linewidth=2, label='Puff Zone Entry (t=0)')
-    axs[0].set_ylabel('Treadmill Speed (interpolated)')
+    axs[0].set_ylabel('Treadmill Speed (cm/s)')
     axs[0].set_title(f'Average Treadmill Speed Aligned to Puff Zone Entry Times (n={n_puff_events})')
     axs[0].legend()
     axs[0].set_xlim(-5, 5)
@@ -1243,7 +1243,7 @@ def plot_average_traces_puff(puff_zone_trials, trial_log_df, capacitive_df,
                            puff_event_capacitive_data['mean_values'] + puff_event_capacitive_data['sem_values'],
                            color='blue', alpha=0.2, label='SEM')
         axs[1].axvline(0, color='black', linestyle='--', alpha=0.8, linewidth=2, label='Puff Event (t=0)')
-        axs[1].set_ylabel('Capacitive Value')
+        axs[1].set_ylabel('Capacitive Value (a.u.)')
         axs[1].set_title(f'Average Capacitive Value Aligned to Puff Events (n={puff_event_capacitive_data["n_events"]})')
         axs[1].legend()
         axs[1].set_ylim(bottom=0)
@@ -1251,7 +1251,7 @@ def plot_average_traces_puff(puff_zone_trials, trial_log_df, capacitive_df,
         axs[1].text(0.5, 0.5, 'No puff event data available\nfor capacitive analysis',
                    horizontalalignment='center', verticalalignment='center',
                    transform=axs[1].transAxes, fontsize=12)
-        axs[1].set_ylabel('Capacitive Value')
+        axs[1].set_ylabel('Capacitive Value (a.u.)')
         axs[1].set_title('Capacitive Value Aligned to Puff Events (No Data)')
     
     axs[1].set_xlim(-5, 5)
@@ -1267,14 +1267,14 @@ def plot_average_traces_puff(puff_zone_trials, trial_log_df, capacitive_df,
                            puff_event_speed_data['mean_values'] + puff_event_speed_data['sem_values'],
                            color='purple', alpha=0.2, label='SEM')
         axs[2].axvline(0, color='black', linestyle='--', alpha=0.8, linewidth=2, label='Puff Event (t=0)')
-        axs[2].set_ylabel('Treadmill Speed (interpolated)')
+        axs[2].set_ylabel('Treadmill Speed (cm/s)')
         axs[2].set_title(f'Average Treadmill Speed Aligned to Puff Events (n={puff_event_speed_data["n_events"]})')
         axs[2].legend()
     else:
         axs[2].text(0.5, 0.5, 'No puff event data available\nfor treadmill speed analysis',
                    horizontalalignment='center', verticalalignment='center',
                    transform=axs[2].transAxes, fontsize=12)
-        axs[2].set_ylabel('Treadmill Speed')
+        axs[2].set_ylabel('Treadmill Speed (cm/s)')
         axs[2].set_title('Treadmill Speed Aligned to Puff Events (No Data)')
     
     axs[2].set_xlabel('Time from Puff Event (s)')
@@ -1435,10 +1435,10 @@ def analyze_reward_zones(reward_zone_trials, capacitive_df, treadmill_interp,
         plot_raster_heatmap(
             speed_windows, aligned_time_speed, reward_zone_trials,
             f'Treadmill Speed Raster: Individual Trials Aligned to Reward Zone Entry (n={len(reward_zone_trials)} trials)',
-            'Treadmill Speed', 'coolwarm', output_folder, 
+            'Treadmill Speed (cm/s)', 'coolwarm', output_folder, 
             'treadmill_speed_raster_reward_zones',
-            vmin=-300,
-            vmax=300,
+            vmin=-30,
+            vmax=30,
             center_time=0, event_label="Reward Zone Entry",
             show_delivery_markers=True, center_line_color='black'
         )
@@ -1448,7 +1448,7 @@ def analyze_reward_zones(reward_zone_trials, capacitive_df, treadmill_interp,
         plot_raster_heatmap(
             cap_windows, aligned_time_cap, reward_zone_trials,
             f'Capacitive (Licking) Raster: Individual Trials Aligned to Reward Zone Entry (n={len(reward_zone_trials)} trials)',
-            'Capacitive Value (Licking)', 'binary', output_folder,
+            'Capacitive Value (a.u.)', 'binary', output_folder,
             'capacitive_raster_reward_zones',
             center_time=0, event_label="Reward Zone Entry",
             show_delivery_markers=True, center_line_color='blue'
@@ -1494,10 +1494,10 @@ def analyze_reward_deliveries(reward_delivery_trials, cap_time, cap_val, speed_v
         plot_raster_heatmap(
             speed_windows, aligned_time_speed, reward_delivery_trials,
             f'Treadmill Speed Raster: Individual Trials Aligned to Reward Delivery (n={len(reward_delivery_trials)} trials)',
-            'Treadmill Speed', 'coolwarm', output_folder,
+            'Treadmill Speed (cm/s)', 'coolwarm', output_folder,
             'treadmill_speed_raster_reward_delivery_centered',
-            vmin=-300,
-            vmax=300,
+            vmin=-30,
+            vmax=30,
             center_time=0, event_label="Reward Delivery",
             show_zone_entries=True, zone_entry_color='black', center_line_color='green'
         )
@@ -1506,7 +1506,7 @@ def analyze_reward_deliveries(reward_delivery_trials, cap_time, cap_val, speed_v
         plot_raster_heatmap(
             cap_windows, aligned_time_cap, reward_delivery_trials,
             f'Capacitive (Licking) Raster: Individual Trials Aligned to Reward Delivery (n={len(reward_delivery_trials)} trials)',
-            'Capacitive Value (Licking)', 'binary', output_folder,
+            'Capacitive Value (a.u.)', 'binary', output_folder,
             'capacitive_raster_reward_delivery_centered',
             center_time=0, event_label="Reward Delivery",
             show_zone_entries=True, zone_entry_color='blue', center_line_color='green'
@@ -1556,10 +1556,10 @@ def analyze_puff_zones(puff_zone_trials, capacitive_df, treadmill_interp,
         plot_raster_heatmap(
             speed_windows, aligned_time_speed, puff_zone_trials,
             f'Treadmill Speed Raster: Individual Trials Aligned to Puff Zone Entry (n={len(puff_zone_trials)} trials)',
-            'Treadmill Speed', 'coolwarm', output_folder,
+            'Treadmill Speed (cm/s)', 'coolwarm', output_folder,
             'treadmill_speed_raster_puff_zones',
-            vmin=-300,
-            vmax=300,
+            vmin=-30,
+            vmax=30,
             center_time=0, event_label="Puff Zone Entry",
             show_delivery_markers=True, center_line_color='black'
         )
@@ -1568,7 +1568,7 @@ def analyze_puff_zones(puff_zone_trials, capacitive_df, treadmill_interp,
         plot_raster_heatmap(
             cap_windows, aligned_time_cap, puff_zone_trials,
             f'Capacitive (Licking) Raster: Individual Trials Aligned to Puff Zone Entry (n={len(puff_zone_trials)} trials)',
-            'Capacitive Value (Licking)', 'binary', output_folder,
+            'Capacitive Value (a.u.)', 'binary', output_folder,
             'capacitive_raster_puff_zones',
             center_time=0, event_label="Puff Zone Entry",
             show_delivery_markers=True, center_line_color='blue'
@@ -1613,10 +1613,10 @@ def analyze_puff_deliveries(puff_delivery_trials, cap_time, cap_val, speed_val,
         plot_raster_heatmap(
             speed_windows, aligned_time_speed, puff_delivery_trials,
             f'Treadmill Speed Raster: Individual Trials Aligned to Puff Delivery (n={len(puff_delivery_trials)} trials)',
-            'Treadmill Speed', 'coolwarm', output_folder,
+            'Treadmill Speed (cm/s)', 'coolwarm', output_folder,
             'treadmill_speed_raster_puff_delivery_centered',
-            vmin=-400,
-            vmax=400,
+            vmin=-40,
+            vmax=40,
             center_time=0, event_label="Puff Delivery",
             show_zone_entries=True, zone_entry_color='black', center_line_color='green'
         )
@@ -1625,7 +1625,7 @@ def analyze_puff_deliveries(puff_delivery_trials, cap_time, cap_val, speed_val,
         plot_raster_heatmap(
             cap_windows, aligned_time_cap, puff_delivery_trials,
             f'Capacitive (Licking) Raster: Individual Trials Aligned to Puff Delivery (n={len(puff_delivery_trials)} trials)',
-            'Capacitive Value (Licking)', 'binary', output_folder,
+            'Capacitive Value (a.u.)', 'binary', output_folder,
             'capacitive_raster_puff_delivery_centered',
             center_time=0, event_label="Puff Delivery",
             show_zone_entries=True, zone_entry_color='blue', center_line_color='green'
