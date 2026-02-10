@@ -395,18 +395,17 @@ def process_pupil_data(pupil_df, frame_log_df, capacitive_df):
     if pupil_df is None or frame_log_df is None:
         return None
     
-    # Rename columns if needed
+    # Rename columns if needed (pupil CSV has generic column names after skipping header rows)
     if pupil_df.columns[0] != 'frame_number':
-        pupil_df.columns = ['frame_number'] + list(pupil_df.columns[1:])
-    
-    # Extract relevant columns
-    required_cols = ['point_3_x', 'point_3_y', 'point_3_likelihood', 
-                     'point_7_x', 'point_7_y', 'point_7_likelihood']
-    
-    for col in required_cols:
-        if col not in pupil_df.columns:
-            print(f"Warning: Missing column {col} in pupil data")
-            return None
+        pupil_df_columns = pupil_df.columns.tolist()
+        pupil_df_columns[0] = 'frame_number'
+        pupil_df_columns[7] = 'point_3_x'
+        pupil_df_columns[8] = 'point_3_y'
+        pupil_df_columns[9] = 'point_3_likelihood'
+        pupil_df_columns[19] = 'point_7_x'
+        pupil_df_columns[20] = 'point_7_y'
+        pupil_df_columns[21] = 'point_7_likelihood'
+        pupil_df.columns = pupil_df_columns
     
     # Align frame numbers and map timestamps
     frame_to_time_mapping = dict(zip(frame_log_df['frame_number'], frame_log_df['time_seconds']))
@@ -428,6 +427,11 @@ def process_pupil_data(pupil_df, frame_log_df, capacitive_df):
     if valid_data_mask.sum() > 1:
         valid_times = pupil_df.loc[valid_data_mask, 'time_seconds'].values
         valid_diameters = pupil_df.loc[valid_data_mask, 'pupil_diameter'].values
+        
+        # CRITICAL: Sort pupil data by timestamp (required for np.interp)
+        sort_indices = np.argsort(valid_times)
+        valid_times = valid_times[sort_indices]
+        valid_diameters = valid_diameters[sort_indices]
         
         pupil_diameter_interp = pd.Series(
             data=np.interp(
@@ -504,7 +508,7 @@ def match_reward_zones_to_events(trial_log_df, reward_texture_change_time):
                 continue
             if zone_entry_time <= reward_event_time:
                 time_diff = reward_event_time - zone_entry_time
-                if time_diff < best_time_diff and time_diff < 2.0:  # Within 2 seconds
+                if time_diff < best_time_diff and time_diff < 10.0:  # Within 10 seconds
                     best_match = i
                     best_time_diff = time_diff
         
@@ -678,13 +682,13 @@ def plot_main_timeline(capacitive_df, treadmill_interp, pupil_diameter_interp,
     puff_times = pd.to_numeric(trial_log_df['puff_event'], errors='coerce').dropna() if 'puff_event' in trial_log_df.columns else pd.Series([])
     probe_times = pd.to_numeric(trial_log_df['probe_time'], errors='coerce').dropna() if 'probe_time' in trial_log_df.columns else pd.Series([])
     
-    # Plot capacitive data
-    plot_capacitive_timeline(axs[0], capacitive_df, reward_times, puff_times, probe_times, 
-                             texture_data, "Capacitive")
+    # Plot treadmill data (top subplot)
+    plot_treadmill_timeline(axs[0], capacitive_df, treadmill_interp, reward_times, 
+                           puff_times, probe_times, texture_data, has_more_plots=True)
     
-    # Plot treadmill data
-    plot_treadmill_timeline(axs[1], capacitive_df, treadmill_interp, reward_times, 
-                           puff_times, probe_times, texture_data, has_pupil_data)
+    # Plot capacitive data (middle or bottom subplot)
+    plot_capacitive_timeline(axs[1], capacitive_df, reward_times, puff_times, probe_times, 
+                             texture_data, "Capacitive", show_xlabel=not has_pupil_data)
     
     # Plot pupil data if available
     if num_plots == 3 and pupil_diameter_interp is not None:
@@ -699,16 +703,16 @@ def plot_main_timeline(capacitive_df, treadmill_interp, pupil_diameter_interp,
     
     setup_plot_style(axs)
     plt.tight_layout()
-    save_figure(fig, f"timeline_{'capacitive_treadmill_pupil' if num_plots == 3 else 'capacitive_and_treadmill'}", 
+    save_figure(fig, f"timeline_{'treadmill_capacitive_pupil' if num_plots == 3 else 'treadmill_and_capacitive'}", 
                 output_folder)
     plt.show()
 
 
 def plot_capacitive_timeline(ax, capacitive_df, reward_times, puff_times, probe_times, 
-                             texture_data, label_prefix=""):
+                             texture_data, label_prefix="", show_xlabel=True):
     """Plot capacitive sensor data with event markers"""
     ax.plot(capacitive_df['elapsed_time'], capacitive_df['capacitive_value'], 
-            label='Capacitive Value (a.u.)')
+            label='Capacitive Value (a.u.)', color='C0')
     
     # Add event markers
     add_event_markers(ax, reward_times, puff_times, probe_times)
@@ -716,6 +720,8 @@ def plot_capacitive_timeline(ax, capacitive_df, reward_times, puff_times, probe_
     # Highlight reward and punish intervals
     add_texture_intervals(ax, texture_data)
     
+    if show_xlabel:
+        ax.set_xlabel('Elapsed Time (s)')
     ax.set_ylabel('Capacitive Value (a.u.)')
     ax.set_title(f'{label_prefix} Capacitive Sensor Over Time with Reward and Puff Events')
     ax.legend(loc='upper right')
@@ -723,7 +729,7 @@ def plot_capacitive_timeline(ax, capacitive_df, reward_times, puff_times, probe_
 
 
 def plot_treadmill_timeline(ax, capacitive_df, treadmill_interp, reward_times, 
-                           puff_times, probe_times, texture_data, has_pupil_data):
+                           puff_times, probe_times, texture_data, has_more_plots=False):
     """Plot treadmill speed data with event markers"""
     ax.plot(capacitive_df['elapsed_time'], treadmill_interp, 
             label='Treadmill Speed (interpolated)', color='purple')
@@ -734,7 +740,8 @@ def plot_treadmill_timeline(ax, capacitive_df, treadmill_interp, reward_times,
     # Highlight reward and punish intervals
     add_texture_intervals(ax, texture_data)
     
-    ax.set_xlabel('Elapsed Time (s)' if not has_pupil_data else '')
+    if not has_more_plots:
+        ax.set_xlabel('Elapsed Time (s)')
     ax.set_ylabel('Speed (cm/s)')
     ax.set_title('Interpolated Treadmill Speed Over Time with Reward and Puff Events')
     ax.legend(loc='upper right')
@@ -1005,9 +1012,9 @@ def plot_average_traces_reward(reward_zone_trials, trial_log_df, capacitive_df,
     
     # Plot 2: Capacitive Value aligned to reward events
     n_rewards_event = cap_event_windows_padded.shape[0]
-    axs[1].plot(aligned_time_event, mean_event_vals, color='green', label=f'Mean (n={n_rewards_event})')
+    axs[1].plot(aligned_time_event, mean_event_vals, color='C0', label=f'Mean (n={n_rewards_event})')
     axs[1].fill_between(aligned_time_event, mean_event_vals - sem_event_vals, 
-                        mean_event_vals + sem_event_vals, color='green', alpha=0.2, label='SEM')
+                        mean_event_vals + sem_event_vals, color='C0', alpha=0.2, label='SEM')
     axs[1].axvline(0, color='red', linestyle='--', label='Reward Event (t=0)')
     axs[1].set_ylabel('Capacitive Value (a.u.)')
     axs[1].set_title('Capacitive Value Aligned to Reward Event')
@@ -1222,10 +1229,10 @@ def plot_average_traces_puff(puff_zone_trials, trial_log_df, capacitive_df,
     fig, axs = plt.subplots(3, 1, figsize=(12, 14), sharex=True)
     
     # Plot 1: Treadmill Speed aligned to puff zone entry
-    axs[0].plot(aligned_time_puff, mean_speed_puff, color='red', linewidth=2, 
+    axs[0].plot(aligned_time_puff, mean_speed_puff, color='purple', linewidth=2, 
                label=f'Mean Speed (n={n_puff_events})')
     axs[0].fill_between(aligned_time_puff, mean_speed_puff - sem_speed_puff, 
-                        mean_speed_puff + sem_speed_puff, color='red', alpha=0.2, label='SEM')
+                        mean_speed_puff + sem_speed_puff, color='purple', alpha=0.2, label='SEM')
     axs[0].axvline(0, color='black', linestyle='--', alpha=0.8, linewidth=2, label='Puff Zone Entry (t=0)')
     axs[0].set_ylabel('Treadmill Speed (cm/s)')
     axs[0].set_title(f'Average Treadmill Speed Aligned to Puff Zone Entry Times (n={n_puff_events})')
@@ -1237,11 +1244,11 @@ def plot_average_traces_puff(puff_zone_trials, trial_log_df, capacitive_df,
     # Plot 2: Capacitive Value aligned to puff events
     if puff_event_capacitive_data is not None:
         axs[1].plot(puff_event_capacitive_data['aligned_time'], puff_event_capacitive_data['mean_values'],
-                   color='blue', linewidth=2, label=f'Mean Capacitive (n={puff_event_capacitive_data["n_events"]})')
+                   color='C0', linewidth=2, label=f'Mean Capacitive (n={puff_event_capacitive_data["n_events"]})')
         axs[1].fill_between(puff_event_capacitive_data['aligned_time'],
                            puff_event_capacitive_data['mean_values'] - puff_event_capacitive_data['sem_values'],
                            puff_event_capacitive_data['mean_values'] + puff_event_capacitive_data['sem_values'],
-                           color='blue', alpha=0.2, label='SEM')
+                           color='C0', alpha=0.2, label='SEM')
         axs[1].axvline(0, color='black', linestyle='--', alpha=0.8, linewidth=2, label='Puff Event (t=0)')
         axs[1].set_ylabel('Capacitive Value (a.u.)')
         axs[1].set_title(f'Average Capacitive Value Aligned to Puff Events (n={puff_event_capacitive_data["n_events"]})')
@@ -1396,12 +1403,13 @@ def plot_average_traces_puff(puff_zone_trials, trial_log_df, capacitive_df,
 # ANALYSIS FUNCTIONS: REWARD ZONES
 # ============================================================================
 
-def analyze_reward_zones(reward_zone_trials, capacitive_df, treadmill_interp, 
+def analyze_reward_zones(reward_zone_trials, trial_log_df, capacitive_df, treadmill_interp, 
                          pupil_diameter_interp, output_folder, window=5):
     """Analyze data aligned to reward zone entries and deliveries
     
     Args:
         reward_zone_trials: List of (trial_idx, zone_entry, reward_event) tuples
+        trial_log_df: Trial log DataFrame (needed to get ALL reward events)
         capacitive_df: Capacitive DataFrame
         treadmill_interp: Interpolated treadmill speed
         pupil_diameter_interp: Interpolated pupil diameter (or None)
@@ -1437,8 +1445,8 @@ def analyze_reward_zones(reward_zone_trials, capacitive_df, treadmill_interp,
             f'Treadmill Speed Raster: Individual Trials Aligned to Reward Zone Entry (n={len(reward_zone_trials)} trials)',
             'Treadmill Speed (cm/s)', 'coolwarm', output_folder, 
             'treadmill_speed_raster_reward_zones',
-            vmin=-30,
-            vmax=30,
+            vmin=-20,
+            vmax=20,
             center_time=0, event_label="Reward Zone Entry",
             show_delivery_markers=True, center_line_color='black'
         )
@@ -1454,22 +1462,20 @@ def analyze_reward_zones(reward_zone_trials, capacitive_df, treadmill_interp,
             show_delivery_markers=True, center_line_color='blue'
         )
     
-    # Analyze reward deliveries (where reward_event is valid)
-    reward_delivery_trials = [(t, z, r) for t, z, r in reward_zone_trials 
-                             if pd.notna(r) and r > 0]
-    
-    if len(reward_delivery_trials) > 0:
-        print(f"Analyzing {len(reward_delivery_trials)} reward deliveries...")
-        analyze_reward_deliveries(reward_delivery_trials, cap_time, cap_val, speed_val,
-                                 pupil_diameter_interp, output_folder, window)
+    # Analyze reward deliveries - pass trial_log_df to get ALL reward events
+    print(f"Analyzing reward deliveries...")
+    analyze_reward_deliveries(reward_zone_trials, trial_log_df, cap_time, cap_val, speed_val,
+                             pupil_diameter_interp, output_folder, window)
 
 
-def analyze_reward_deliveries(reward_delivery_trials, cap_time, cap_val, speed_val,
+def analyze_reward_deliveries(reward_zone_trials, trial_log_df, cap_time, cap_val, speed_val,
                               pupil_diameter_interp, output_folder, window=5):
     """Analyze data aligned to reward delivery times
     
     Args:
-        reward_delivery_trials: List of trials with valid reward deliveries
+        reward_zone_trials: List of reward zone trials (trial_idx, zone_entry, reward_event)
+                           Used to map reward events to their zone entries when available
+        trial_log_df: Trial log DataFrame (to get ALL reward events)
         cap_time: Capacitive time array
         cap_val: Capacitive value array
         speed_val: Treadmill speed array
@@ -1477,8 +1483,33 @@ def analyze_reward_deliveries(reward_delivery_trials, cap_time, cap_val, speed_v
         output_folder: Directory to save figures
         window: Window size in seconds
     """
+    # Get ALL reward events from trial log (not just matched ones)
+    all_reward_events = []
+    for trial_idx in range(len(trial_log_df)):
+        reward_event = trial_log_df.iloc[trial_idx]['reward_event']
+        if pd.notna(reward_event) and reward_event > 0:
+            all_reward_events.append((trial_idx, reward_event))
+    
+    if len(all_reward_events) == 0:
+        print("No reward delivery events found in trial log")
+        return
+    
+    print(f"Found {len(all_reward_events)} total reward delivery events in trial log")
+    
+    # Create a mapping from reward event times to zone entry times (for matched events)
+    reward_to_zone_map = {}
+    for trial_idx, zone_entry_time, reward_event_time in reward_zone_trials:
+        if pd.notna(reward_event_time) and reward_event_time > 0:
+            reward_to_zone_map[reward_event_time] = zone_entry_time
+    
+    # Build complete list for plotting: (trial_idx, zone_entry_time_or_nan, reward_event_time)
+    all_reward_delivery_trials = []
+    for trial_idx, reward_event_time in all_reward_events:
+        zone_entry_time = reward_to_zone_map.get(reward_event_time, np.nan)
+        all_reward_delivery_trials.append((trial_idx, zone_entry_time, reward_event_time))
+    
     # Extract reward delivery times (centered at t=0)
-    reward_times = [r for _, _, r in reward_delivery_trials]
+    reward_times = [r for _, _, r in all_reward_delivery_trials]
     
     # Create aligned windows
     speed_windows, aligned_time_speed = create_aligned_windows(
@@ -1492,20 +1523,20 @@ def analyze_reward_deliveries(reward_delivery_trials, cap_time, cap_val, speed_v
     # Plot rasters centered at reward delivery
     if speed_windows is not None:
         plot_raster_heatmap(
-            speed_windows, aligned_time_speed, reward_delivery_trials,
-            f'Treadmill Speed Raster: Individual Trials Aligned to Reward Delivery (n={len(reward_delivery_trials)} trials)',
+            speed_windows, aligned_time_speed, all_reward_delivery_trials,
+            f'Treadmill Speed Raster: Individual Trials Aligned to Reward Delivery (n={len(all_reward_delivery_trials)} trials)',
             'Treadmill Speed (cm/s)', 'coolwarm', output_folder,
             'treadmill_speed_raster_reward_delivery_centered',
-            vmin=-30,
-            vmax=30,
+            vmin=-20,
+            vmax=20,
             center_time=0, event_label="Reward Delivery",
             show_zone_entries=True, zone_entry_color='black', center_line_color='green'
         )
     
     if cap_windows is not None:
         plot_raster_heatmap(
-            cap_windows, aligned_time_cap, reward_delivery_trials,
-            f'Capacitive (Licking) Raster: Individual Trials Aligned to Reward Delivery (n={len(reward_delivery_trials)} trials)',
+            cap_windows, aligned_time_cap, all_reward_delivery_trials,
+            f'Capacitive (Licking) Raster: Individual Trials Aligned to Reward Delivery (n={len(all_reward_delivery_trials)} trials)',
             'Capacitive Value (a.u.)', 'binary', output_folder,
             'capacitive_raster_reward_delivery_centered',
             center_time=0, event_label="Reward Delivery",
@@ -1517,12 +1548,13 @@ def analyze_reward_deliveries(reward_delivery_trials, cap_time, cap_val, speed_v
 # ANALYSIS FUNCTIONS: PUFF ZONES
 # ============================================================================
 
-def analyze_puff_zones(puff_zone_trials, capacitive_df, treadmill_interp, 
+def analyze_puff_zones(puff_zone_trials, trial_log_df, capacitive_df, treadmill_interp, 
                        pupil_diameter_interp, output_folder, window=10):
     """Analyze data aligned to puff zone entries and deliveries
     
     Args:
         puff_zone_trials: List of (trial_idx, zone_entry, puff_event) tuples
+        trial_log_df: Trial log DataFrame (needed to get ALL puff events)
         capacitive_df: Capacitive DataFrame
         treadmill_interp: Interpolated treadmill speed
         pupil_diameter_interp: Interpolated pupil diameter (or None)
@@ -1558,8 +1590,8 @@ def analyze_puff_zones(puff_zone_trials, capacitive_df, treadmill_interp,
             f'Treadmill Speed Raster: Individual Trials Aligned to Puff Zone Entry (n={len(puff_zone_trials)} trials)',
             'Treadmill Speed (cm/s)', 'coolwarm', output_folder,
             'treadmill_speed_raster_puff_zones',
-            vmin=-30,
-            vmax=30,
+            vmin=-20,
+            vmax=20,
             center_time=0, event_label="Puff Zone Entry",
             show_delivery_markers=True, center_line_color='black'
         )
@@ -1579,25 +1611,58 @@ def analyze_puff_zones(puff_zone_trials, capacitive_df, treadmill_interp,
                            if pd.notna(p) and p > 0]
     
     if len(puff_delivery_trials) > 0:
-        print(f"Analyzing {len(puff_delivery_trials)} puff deliveries...")
-        analyze_puff_deliveries(puff_delivery_trials, cap_time, cap_val, speed_val,
+        print(f"Analyzing puff deliveries...")
+        # Note: Pass puff_zone_trials and trial_log_df so we can include ALL puff events
+        analyze_puff_deliveries(puff_zone_trials, trial_log_df, cap_time, cap_val, speed_val,
                                output_folder, window)
 
 
-def analyze_puff_deliveries(puff_delivery_trials, cap_time, cap_val, speed_val,
+def analyze_puff_deliveries(puff_zone_trials, trial_log_df, cap_time, cap_val, speed_val,
                             output_folder, window=10):
     """Analyze data aligned to puff delivery times
     
     Args:
-        puff_delivery_trials: List of trials with valid puff deliveries
+        puff_zone_trials: List of puff zone trials (trial_idx, zone_entry, puff_event)
+                         Used to map puff events to their zone entries when available
+        trial_log_df: Trial log DataFrame (to get ALL puff events)
         cap_time: Capacitive time array
         cap_val: Capacitive value array
         speed_val: Treadmill speed array
         output_folder: Directory to save figures
         window: Window size in seconds
     """
+    # Check if puff_event column exists
+    if 'puff_event' not in trial_log_df.columns:
+        print("No puff_event column in trial log")
+        return
+    
+    # Get ALL puff events from trial log (not just matched ones)
+    all_puff_events = []
+    for trial_idx in range(len(trial_log_df)):
+        puff_event = trial_log_df.iloc[trial_idx]['puff_event']
+        if pd.notna(puff_event) and puff_event > 0:
+            all_puff_events.append((trial_idx, puff_event))
+    
+    if len(all_puff_events) == 0:
+        print("No puff delivery events found in trial log")
+        return
+    
+    print(f"Found {len(all_puff_events)} total puff delivery events in trial log")
+    
+    # Create a mapping from puff event times to zone entry times (for matched events)
+    puff_to_zone_map = {}
+    for trial_idx, zone_entry_time, puff_event_time in puff_zone_trials:
+        if pd.notna(puff_event_time) and puff_event_time > 0:
+            puff_to_zone_map[puff_event_time] = zone_entry_time
+    
+    # Build complete list for plotting: (trial_idx, zone_entry_time_or_nan, puff_event_time)
+    all_puff_delivery_trials = []
+    for trial_idx, puff_event_time in all_puff_events:
+        zone_entry_time = puff_to_zone_map.get(puff_event_time, np.nan)
+        all_puff_delivery_trials.append((trial_idx, zone_entry_time, puff_event_time))
+    
     # Extract puff delivery times
-    puff_times = [p for _, _, p in puff_delivery_trials]
+    puff_times = [p for _, _, p in all_puff_delivery_trials]
     
     # Create aligned windows
     speed_windows, aligned_time_speed = create_aligned_windows(
@@ -1611,8 +1676,8 @@ def analyze_puff_deliveries(puff_delivery_trials, cap_time, cap_val, speed_val,
     # Plot rasters centered at puff delivery
     if speed_windows is not None:
         plot_raster_heatmap(
-            speed_windows, aligned_time_speed, puff_delivery_trials,
-            f'Treadmill Speed Raster: Individual Trials Aligned to Puff Delivery (n={len(puff_delivery_trials)} trials)',
+            speed_windows, aligned_time_speed, all_puff_delivery_trials,
+            f'Treadmill Speed Raster: Individual Trials Aligned to Puff Delivery (n={len(all_puff_delivery_trials)} trials)',
             'Treadmill Speed (cm/s)', 'coolwarm', output_folder,
             'treadmill_speed_raster_puff_delivery_centered',
             vmin=-40,
@@ -1623,8 +1688,8 @@ def analyze_puff_deliveries(puff_delivery_trials, cap_time, cap_val, speed_val,
     
     if cap_windows is not None:
         plot_raster_heatmap(
-            cap_windows, aligned_time_cap, puff_delivery_trials,
-            f'Capacitive (Licking) Raster: Individual Trials Aligned to Puff Delivery (n={len(puff_delivery_trials)} trials)',
+            cap_windows, aligned_time_cap, all_puff_delivery_trials,
+            f'Capacitive (Licking) Raster: Individual Trials Aligned to Puff Delivery (n={len(all_puff_delivery_trials)} trials)',
             'Capacitive Value (a.u.)', 'binary', output_folder,
             'capacitive_raster_puff_delivery_centered',
             center_time=0, event_label="Puff Delivery",
@@ -1689,7 +1754,7 @@ def main():
     
     if len(reward_zone_trials) > 0:
         analyze_reward_zones(
-            reward_zone_trials, data['capacitive'], treadmill_interp,
+            reward_zone_trials, data['trial_log'], data['capacitive'], treadmill_interp,
             pupil_diameter_interp, output_folder
         )
         
@@ -1708,7 +1773,7 @@ def main():
     
     if len(puff_zone_trials) > 0:
         analyze_puff_zones(
-            puff_zone_trials, data['capacitive'], treadmill_interp,
+            puff_zone_trials, data['trial_log'], data['capacitive'], treadmill_interp,
             pupil_diameter_interp, output_folder
         )
         
