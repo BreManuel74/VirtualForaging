@@ -5,6 +5,7 @@ Original Author: Brenna Manuel
 
 import pandas as pd
 import os
+import sys
 import tkinter as tk
 from tkinter import filedialog, messagebox
 import numpy as np
@@ -12,6 +13,11 @@ from datetime import datetime
 import colorsys
 import matplotlib.pyplot as plt
 from scipy import stats
+
+# Add Analysis_Scripts to path to import lick detection algorithm
+script_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, script_dir)
+import lick_detection_algorithm as lda
 
 def generate_colors(n):
     """Generate n distinct colors"""
@@ -93,6 +99,7 @@ def analyze_mouse_data(behavior_files, cohort_files):
     
     all_results = []
     cohort_data = []
+    markers = {}  # Initialize markers dictionary
     
     # Load cohort data first - we expect only one cohort file
     if cohort_files:
@@ -105,27 +112,18 @@ def analyze_mouse_data(behavior_files, cohort_files):
         unique_mice['Sex'] = unique_mice['Sex'].astype(str).str.strip()
         sex_map = unique_mice.set_index('ID')['Sex'].to_dict()
         
-        # print("\nSex mapping:")
-        # for mouse_id, sex in sex_map.items():
-        #     print(f"Mouse {mouse_id}: Sex = {sex}")
-        
         # Create markers based on sex ('s' for Male/M, 'o' for Female/F)
-        markers = {}
-        # print("\nCreating markers for each mouse:")
         for mouse_id, sex in sex_map.items():
-            #print(f"Processing {mouse_id}: Original sex value = '{sex}'")
             sex_upper = sex.upper()
-            #print(f"  Uppercase value = '{sex_upper}'")
             is_male = sex_upper.startswith('M')
-            #print(f"  Starts with M? {is_male}")
             markers[mouse_id] = 's' if is_male else 'o'
-            #print(f"  Setting {mouse_id} as {'male' if is_male else 'female'} with marker {'square' if is_male else 'circle'}")
     
     # Combine all cohort data
     if cohort_data:
         combined_cohort_data = pd.concat(cohort_data, ignore_index=True)
     else:
         combined_cohort_data = None
+        print("\nNo cohort data provided. Analysis will focus on behavioral metrics only.")
     
     # Process behavioral data
     for idx, data_file in enumerate(behavior_files):
@@ -151,23 +149,22 @@ def analyze_mouse_data(behavior_files, cohort_files):
                 # Calculate average speed (excluding NaN values)
                 avg_speed = treadmill_data['speed'].mean()
                 
-                # Read capacitive data and perform z-score normalization
+                # Read capacitive data and use KDE-based lick detection algorithm
                 capacitive_data = pd.read_csv(row['capacitive'])
-                capacitive_values = capacitive_data['capacitive_value']
                 
-                # Calculate z-score: z = (x - μ) / σ
-                z_scores = (capacitive_values - capacitive_values.mean()) / capacitive_values.std()
+                # Prepare data for lick detection
+                cap_df = capacitive_data.copy()
+                cap_df['Time_sec'] = cap_df['elapsed_time']
                 
-                # Binarize the data based on z-score threshold of 3
-                binary_data = (z_scores > 3).astype(int)
+                # Compute KDE normalization
+                kde_value = lda.compute_KDE(cap_df, 'capacitive_value')
+                cap_df = lda.compute_KDE_normalizations(cap_df, 'capacitive_value', kde_value)
                 
-                # Count lick bouts (transitions from 0 to 1)
-                # Convert to numpy array for easier manipulation
-                binary_array = binary_data.values
-                # Find where values change (True where value changes, False where it stays the same)
-                transitions = np.diff(binary_array, prepend=0)
-                # Count only 0->1 transitions (positive changes)
-                lick_count = np.sum(transitions == 1)
+                # Detect lick events using dynamic threshold (max_deviation / 2)
+                events_df, threshold_used = lda.detect_events_above_threshold(cap_df, 'capacitive_value', threshold=None)
+                
+                # Count total lick events
+                lick_count = events_df['capacitive_value_event'].sum()
                 
                 # Convert Unix timestamp to datetime
                 date = datetime.fromtimestamp(int(timestamp))
@@ -209,7 +206,7 @@ def analyze_mouse_data(behavior_files, cohort_files):
             'daily_metrics': daily_df,
             'cohort_metrics': cohort_metrics,
             'color': colors[idx],
-            'marker': markers[mouse_name]
+            'marker': markers.get(mouse_name, 'o')  # Default to circle if no marker defined
         })
         
         print(f"Processed {len(dates)} days of data for mouse {mouse_name}")
@@ -302,10 +299,9 @@ def create_lick_correlation_subplots(all_results, correlations_list):
     
     x_min, x_max = min(all_rewards), max(all_rewards)
     y_min, y_max = min(all_licks), max(all_licks)
-    # Add 5% padding to the limits
-    x_pad = (x_max - x_min) * 0.05
+    # Add padding only to y-axis, keep x-axis tight
     y_pad = (y_max - y_min) * 0.05
-    x_limits = [x_min - x_pad, x_max + x_pad]
+    x_limits = [x_min, x_max]
     y_limits = [y_min - y_pad, y_max + y_pad]
     
     for idx, (result, corr_data) in enumerate(zip(all_results, correlations_list)):
@@ -376,8 +372,9 @@ def create_lick_correlation_subplots(all_results, correlations_list):
         # Adjust tick label sizes
         ax.tick_params(axis='both', which='major', labelsize=9)
         
-        # Add grid
-        ax.grid(True, linestyle='--', alpha=0.7)
+        # Remove top and right spines
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
     
     plt.show()
     
@@ -432,10 +429,9 @@ def create_speed_correlation_subplots(all_results, correlations_list):
     
     x_min, x_max = min(all_rewards), max(all_rewards)
     y_min, y_max = min(all_speeds), max(all_speeds)
-    # Add 5% padding to the limits
-    x_pad = (x_max - x_min) * 0.05
+    # Add padding only to y-axis, keep x-axis tight
     y_pad = (y_max - y_min) * 0.05
-    x_limits = [x_min - x_pad, x_max + x_pad]
+    x_limits = [x_min, x_max]
     y_limits = [y_min - y_pad, y_max + y_pad]
     
     for idx, (result, corr_data) in enumerate(zip(all_results, correlations_list)):
@@ -506,8 +502,9 @@ def create_speed_correlation_subplots(all_results, correlations_list):
         # Adjust tick label sizes
         ax.tick_params(axis='both', which='major', labelsize=9)
         
-        # Add grid
-        ax.grid(True, linestyle='--', alpha=0.7)
+        # Remove top and right spines
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
     
     plt.show()
     
@@ -576,10 +573,9 @@ def create_correlation_subplots(all_results, correlations_list):
     if all_rewards and all_weights:  # Only if we have valid data
         x_min, x_max = min(all_rewards), max(all_rewards)
         y_min, y_max = min(all_weights), max(all_weights)
-        # Add 5% padding to the limits
-        x_pad = (x_max - x_min) * 0.05
+        # Add padding only to y-axis, keep x-axis tight
         y_pad = (y_max - y_min) * 0.05
-        x_limits = [x_min - x_pad, x_max + x_pad]
+        x_limits = [x_min, x_max]
         y_limits = [y_min - y_pad, y_max + y_pad]
     
     for idx, (result, corr_data) in enumerate(zip(valid_mice, correlations_list)):
@@ -660,8 +656,9 @@ def create_correlation_subplots(all_results, correlations_list):
             # Adjust tick label sizes
             ax.tick_params(axis='both', which='major', labelsize=9)
             
-            # Add grid
-            ax.grid(True, linestyle='--', alpha=0.7)
+            # Remove top and right spines
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
     
     # Show the complete figure
     plt.show()
@@ -681,7 +678,7 @@ def create_correlation_subplots(all_results, correlations_list):
     plt.close(fig)
 
 def calculate_correlations(all_results):
-    """Calculate correlations between behavioral metrics and cohort data."""
+    """Calculate correlations between behavioral metrics and cohort data (if available)."""
     correlations = []
     
     for result in all_results:
@@ -689,6 +686,22 @@ def calculate_correlations(all_results):
         daily_metrics = result['daily_metrics']
         cohort_metrics = result['cohort_metrics']
         
+        # Initialize correlation entry with mouse ID
+        corr_entry = {'mouse': mouse}
+        
+        # Calculate behavioral correlations (always available)
+        if len(daily_metrics) >= 2:
+            # Speed vs Rewards
+            corr_speed = stats.pearsonr(daily_metrics['reward_count'], daily_metrics['avg_speed'])
+            corr_entry['reward_vs_speed_correlation'] = corr_speed[0]
+            corr_entry['reward_vs_speed_p_value'] = corr_speed[1]
+            
+            # Licks vs Rewards
+            corr_licks = stats.pearsonr(daily_metrics['reward_count'], daily_metrics['lick_count'])
+            corr_entry['reward_vs_lick_correlation'] = corr_licks[0]
+            corr_entry['reward_vs_lick_p_value'] = corr_licks[1]
+        
+        # Calculate weight correlations only if cohort data exists
         if cohort_metrics is not None:
             print(f"\n=== DATA ALIGNMENT CHECK FOR MOUSE {mouse} ===")
             
@@ -745,24 +758,13 @@ def calculate_correlations(all_results):
                 if len(valid_data) >= 2:  # Need at least 2 points for correlation
                     # Calculate correlations between daily rewards and percent weight loss
                     corr_rewards = stats.pearsonr(valid_data['reward_count'], valid_data['Value'])
-                    # Calculate correlations between speed and rewards
-                    corr_speed = stats.pearsonr(valid_data['reward_count'], valid_data['avg_speed'])
-                    # Calculate correlations between licks and rewards
-                    corr_licks = stats.pearsonr(valid_data['reward_count'], valid_data['lick_count'])
-                    # print("\nCorrelation based on valid data points:")
-                    # print(valid_data[['day', 'reward_count', 'Value', 'avg_speed', 'lick_count']].to_string())
+                    corr_entry['reward_vs_weight_loss_correlation'] = corr_rewards[0]
+                    corr_entry['reward_vs_weight_loss_p_value'] = corr_rewards[1]
                 else:
-                    print("\nWARNING: Not enough valid data points for correlation")
-                
-                correlations.append({
-                    'mouse': mouse,
-                    'reward_vs_weight_loss_correlation': corr_rewards[0],
-                    'reward_vs_weight_loss_p_value': corr_rewards[1],
-                    'reward_vs_speed_correlation': corr_speed[0],
-                    'reward_vs_speed_p_value': corr_speed[1],
-                    'reward_vs_lick_correlation': corr_licks[0],
-                    'reward_vs_lick_p_value': corr_licks[1]
-                })
+                    print("\nWARNING: Not enough valid data points for weight correlation")
+        
+        # Add this mouse's correlations to the list
+        correlations.append(corr_entry)
     
     return pd.DataFrame(correlations)
 
@@ -782,15 +784,24 @@ def main():
         print("\nSelected behavior files for mice:", 
               ", ".join([os.path.basename(path).split("_")[0] for path in behavior_paths]))
 
-    # Then, select the cohort data file
-    cohort_paths = filedialog.askopenfilename(  # Note: Changed to askopenfilename (singular)
-        title='Select the cohort data file (must contain ID and Sex columns)',
-        filetypes=[('CSV files', '*.csv'), ('All files', '*.*')],
-        initialdir=os.getcwd()
+    # Ask if user wants to include cohort data
+    include_cohort = messagebox.askyesno(
+        "Include Cohort Data?",
+        "Do you want to include cohort data (weight measurements)?\n\n" +
+        "Select 'Yes' to include weight correlations.\n" +
+        "Select 'No' to analyze only behavioral metrics (speed, licks, rewards)."
     )
     
-    # Convert single path to list for compatibility with rest of code
-    cohort_paths = [cohort_paths] if cohort_paths else []
+    cohort_paths = []
+    if include_cohort:
+        # Select the cohort data file
+        cohort_path = filedialog.askopenfilename(
+            title='Select the cohort data file (must contain ID and Sex columns)',
+            filetypes=[('CSV files', '*.csv'), ('All files', '*.*')],
+            initialdir=os.getcwd()
+        )
+        # Convert single path to list for compatibility with rest of code
+        cohort_paths = [cohort_path] if cohort_path else []
     
     if behavior_paths:
         # Analyze data and get results (markers will be determined by sex in the analyze_mouse_data function)
@@ -908,29 +919,60 @@ def main():
                     'Parameter': 'Mouse ID',
                     'Value': row['mouse']
                 })
-                corr_data.append({
-                    'Section': 'Correlation Results',
-                    'Parameter': 'Correlation Coefficient',
-                    'Value': row['reward_vs_weight_loss_correlation']
-                })
-                corr_data.append({
-                    'Section': 'Correlation Results',
-                    'Parameter': 'P-value',
-                    'Value': row['reward_vs_weight_loss_p_value']
-                })
+                
+                # Add weight correlation if available
+                if 'reward_vs_weight_loss_correlation' in row:
+                    corr_data.append({
+                        'Section': 'Correlation Results',
+                        'Parameter': 'Weight vs Rewards Correlation',
+                        'Value': row['reward_vs_weight_loss_correlation']
+                    })
+                    corr_data.append({
+                        'Section': 'Correlation Results',
+                        'Parameter': 'Weight vs Rewards P-value',
+                        'Value': row['reward_vs_weight_loss_p_value']
+                    })
+                
+                # Add speed correlation (always available)
+                if 'reward_vs_speed_correlation' in row:
+                    corr_data.append({
+                        'Section': 'Correlation Results',
+                        'Parameter': 'Speed vs Rewards Correlation',
+                        'Value': row['reward_vs_speed_correlation']
+                    })
+                    corr_data.append({
+                        'Section': 'Correlation Results',
+                        'Parameter': 'Speed vs Rewards P-value',
+                        'Value': row['reward_vs_speed_p_value']
+                    })
+                
+                # Add lick correlation (always available)
+                if 'reward_vs_lick_correlation' in row:
+                    corr_data.append({
+                        'Section': 'Correlation Results',
+                        'Parameter': 'Licks vs Rewards Correlation',
+                        'Value': row['reward_vs_lick_correlation']
+                    })
+                    corr_data.append({
+                        'Section': 'Correlation Results',
+                        'Parameter': 'Licks vs Rewards P-value',
+                        'Value': row['reward_vs_lick_p_value']
+                    })
+                
                 combined_data.append(pd.DataFrame(corr_data))
         
-        # Add daily data section
-        daily_data = []
-        for merged in merged_data_all:
-            for _, row in merged.iterrows():
-                daily_data.append({
-                    'Section': 'Daily Data',
-                    'Parameter': f"{row['Mouse_ID']} - Day {row['day']}",
-                    'Rewards': row['reward_count'],
-                    'Weight_Loss': row['Value']
-                })
-        combined_data.append(pd.DataFrame(daily_data))
+        # Add daily data section (only if cohort data was included)
+        if merged_data_all:
+            daily_data = []
+            for merged in merged_data_all:
+                for _, row in merged.iterrows():
+                    daily_data.append({
+                        'Section': 'Daily Data',
+                        'Parameter': f"{row['Mouse_ID']} - Day {row['day']}",
+                        'Rewards': row['reward_count'],
+                        'Weight_Loss': row['Value']
+                    })
+            combined_data.append(pd.DataFrame(daily_data))
         
         # Combine all sections
         final_df = pd.concat(combined_data, ignore_index=True)
@@ -947,13 +989,12 @@ def main():
             # print("\nCorrelation Results:")
             # print(correlations_df.to_string(index=False))
             
-            # Create weight loss correlation subplots
-            create_correlation_subplots(all_results, correlations_df.to_dict('records'))
+            # Create weight loss correlation subplots only if cohort data was provided
+            if cohort_paths:
+                create_correlation_subplots(all_results, correlations_df.to_dict('records'))
             
-            # Create speed correlation subplots
+            # Always create speed and lick correlation subplots (behavioral data only)
             create_speed_correlation_subplots(all_results, correlations_df.to_dict('records'))
-            
-            # Create lick count correlation subplots
             create_lick_correlation_subplots(all_results, correlations_df.to_dict('records'))
             
             # # Print speed correlation results
