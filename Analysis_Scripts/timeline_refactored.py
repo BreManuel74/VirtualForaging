@@ -546,18 +546,21 @@ def match_puff_zones_to_events(trial_log_df, punish_texture_change_time_first):
     
     print("\n=== MATCHING PUFF ZONES TO DELIVERY EVENTS ===")
     
-    # Collect all puff zone entries
+    # Collect all puff zone entries using FIRST puff per zone from pre-computed array
     all_puff_zones = []
     for trial_idx in range(len(trial_log_df)):
         texture_hist = safe_literal_eval(trial_log_df.iloc[trial_idx]['texture_history'])
-        texture_times = safe_literal_eval(trial_log_df.iloc[trial_idx]['texture_change_time'])
         
-        for i, texture in enumerate(texture_hist):
-            if texture == "assets/punish_mean100.jpg" and i < len(texture_times):
-                zone_entry_time = texture_times[i]
-                if pd.notna(zone_entry_time) and zone_entry_time > 0:
+        # Only include trials with punish texture
+        if len(texture_hist) > 0 and texture_hist[0] == "assets/punish_mean100.jpg":
+            # Use the corresponding entry from punish_texture_change_time_first
+            zone_entry_time = punish_texture_change_time_first[len(all_puff_zones)]
+            if not pd.isna(zone_entry_time) and zone_entry_time != '':
+                try:
+                    zone_entry_time = float(zone_entry_time)
                     all_puff_zones.append((trial_idx, zone_entry_time))
-                    break  # Only first puff per zone
+                except (ValueError, TypeError):
+                    continue
     
     print(f"Found {len(all_puff_zones)} puff zone entries")
     
@@ -569,6 +572,17 @@ def match_puff_zones_to_events(trial_log_df, punish_texture_change_time_first):
             puff_events.append((trial_idx, puff_event))
     
     print(f"Found {len(puff_events)} puff delivery events")
+    
+    # Debug: show first few puff events
+    if len(puff_events) > 0:
+        print("\nFirst 5 puff events (trial_idx, puff_event_time):")
+        for i, (trial_idx, puff_time) in enumerate(puff_events[:5]):
+            print(f"  {i}: Trial {trial_idx} | Puff: {puff_time:.3f}s")
+    
+    if len(all_puff_zones) > 0:
+        print("\nFirst 5 puff zones (trial_idx, zone_entry_time):")
+        for i, (trial_idx, zone_time) in enumerate(all_puff_zones[:5]):
+            print(f"  {i}: Trial {trial_idx} | Zone: {zone_time:.3f}s")
     
     # Sort by timestamp
     all_puff_zones.sort(key=lambda x: x[1])
@@ -587,7 +601,7 @@ def match_puff_zones_to_events(trial_log_df, punish_texture_change_time_first):
                 continue
             if zone_entry_time <= puff_event_time:
                 time_diff = puff_event_time - zone_entry_time
-                if time_diff < best_time_diff and time_diff < 2.0:  # Within 2 seconds
+                if time_diff < best_time_diff and time_diff < 15.0:  # Within 15 seconds
                     best_match = i
                     best_time_diff = time_diff
         
@@ -595,6 +609,16 @@ def match_puff_zones_to_events(trial_log_df, punish_texture_change_time_first):
             zone_trial_idx, zone_entry_time = all_puff_zones[best_match]
             puff_zone_trials.append((zone_trial_idx, zone_entry_time, puff_event_time))
             matched_zones.add(best_match)
+        else:
+            # Debug: why no match?
+            if len(all_puff_zones) > 0:
+                # Find closest zone (even if outside criteria)
+                closest_zone_idx = min(range(len(all_puff_zones)), 
+                                      key=lambda i: abs(all_puff_zones[i][1] - puff_event_time))
+                closest_zone_time = all_puff_zones[closest_zone_idx][1]
+                time_diff = puff_event_time - closest_zone_time
+                print(f"  No match for puff {puff_event_time:.3f}s (trial {puff_trial_idx})")
+                print(f"    Closest zone: {closest_zone_time:.3f}s, diff: {time_diff:.3f}s")
     
     # Add unmatched zones
     for i, (zone_trial_idx, zone_entry_time) in enumerate(all_puff_zones):
@@ -605,6 +629,16 @@ def match_puff_zones_to_events(trial_log_df, punish_texture_change_time_first):
     
     valid_deliveries = sum(1 for _, _, p in puff_zone_trials if pd.notna(p) and p > 0)
     print(f"Successfully matched {valid_deliveries}/{len(puff_zone_trials)} puff zones to deliveries")
+    
+    # Debug: show first few matches
+    if len(puff_zone_trials) > 0:
+        print("\nFirst 5 puff zone matches (trial_idx, zone_entry_time, puff_event_time):")
+        for i, (trial_idx, zone_entry, puff_event) in enumerate(puff_zone_trials[:5]):
+            puff_str = f"{puff_event:.3f}" if pd.notna(puff_event) and puff_event > 0 else "None"
+            delay = puff_event - zone_entry if pd.notna(puff_event) and puff_event > 0 else None
+            delay_str = f" (delay: {delay:.3f}s)" if delay is not None else ""
+            print(f"  {i}: Trial {trial_idx} | Zone: {zone_entry:.3f}s | Puff: {puff_str}{delay_str}")
+    
     print("=== END PUFF ZONE MATCHING ===\n")
     
     return puff_zone_trials
@@ -869,8 +903,8 @@ def plot_raster_heatmap(windows_padded, aligned_time, event_trials, title,
         ytick_positions = list(range(n_trials))
         ytick_labels = [str(trial_num) for trial_num in actual_trial_indices]
     else:
-        # Show approximately 10 labels for larger datasets
-        step = max(1, n_trials // 10)
+        # Show approximately 5-6 labels for larger datasets
+        step = max(1, n_trials // 5)
         ytick_positions = list(range(0, n_trials, step))
         ytick_labels = [str(actual_trial_indices[pos]) for pos in ytick_positions]
     
@@ -889,6 +923,7 @@ def plot_raster_heatmap(windows_padded, aligned_time, event_trials, title,
     
     # Add delivery markers on zone entry plots (green lines showing when delivery happened)
     if show_delivery_markers:
+        markers_drawn = 0
         for raster_row_idx, (trial_idx, zone_entry_time, event_time) in enumerate(event_trials):
             if pd.notna(event_time) and event_time > 0:
                 # Calculate delay between zone entry and delivery
@@ -900,6 +935,8 @@ def plot_raster_heatmap(windows_padded, aligned_time, event_trials, title,
                     ax.plot([delivery_position, delivery_position], 
                            [raster_row_idx - 0.4, raster_row_idx + 0.4], 
                            color='green', linestyle='-', alpha=0.8, linewidth=3.0)
+                    markers_drawn += 1
+        print(f"  Drew {markers_drawn} delivery markers (out of {len(event_trials)} trials)")
     
     # Add individual zone entry lines if requested (for delivery-centered plots)
     if show_zone_entries:
@@ -1590,8 +1627,8 @@ def analyze_puff_zones(puff_zone_trials, trial_log_df, capacitive_df, treadmill_
             f'Treadmill Speed Raster: Individual Trials Aligned to Puff Zone Entry (n={len(puff_zone_trials)} trials)',
             'Treadmill Speed (cm/s)', 'coolwarm', output_folder,
             'treadmill_speed_raster_puff_zones',
-            vmin=-20,
-            vmax=20,
+            vmin=-30,
+            vmax=30,
             center_time=0, event_label="Puff Zone Entry",
             show_delivery_markers=True, center_line_color='black'
         )
@@ -1698,6 +1735,359 @@ def analyze_puff_deliveries(puff_zone_trials, trial_log_df, cap_time, cap_val, s
 
 
 # ============================================================================
+# ANALYSIS FUNCTIONS: PROBE EVENTS
+# ============================================================================
+
+def analyze_probe_events(trial_log_df, capacitive_df, treadmill_interp, output_folder, window=5):
+    """Analyze probe events with treadmill speed and capacitive value alignment
+    
+    Args:
+        trial_log_df: Trial log DataFrame
+        capacitive_df: Capacitive sensor DataFrame
+        treadmill_interp: Interpolated treadmill speed data
+        output_folder: Directory for saving figures
+        window: Time window in seconds (default: 5)
+    """
+    # Check if probe events exist
+    if 'probe_time' not in trial_log_df.columns:
+        print("No 'probe_time' column found in trial_log_df. Skipping probe analysis.")
+        return
+    
+    probe_event_times = pd.to_numeric(trial_log_df['probe_time'], errors='coerce').dropna()
+    probe_event_times = probe_event_times[~np.isnan(probe_event_times)]
+    
+    if len(probe_event_times) == 0:
+        print("No probe events found in the data. Skipping probe analysis.")
+        return
+    
+    print(f"\nAnalyzing {len(probe_event_times)} probe events...")
+    
+    # Convert probe times to numpy array
+    probe_event_times = np.array(probe_event_times, dtype=float)
+    
+    # Extract base arrays
+    cap_time = capacitive_df['elapsed_time'].values
+    cap_val = capacitive_df['capacitive_value'].values
+    speed_val = treadmill_interp.values
+    
+    # --- Capacitive Value aligned to probe events ---
+    cap_probe_windows = []
+    for pt in probe_event_times:
+        mask = (cap_time >= pt - window) & (cap_time <= pt + window)
+        cap_segment = cap_val[mask]
+        cap_probe_windows.append(cap_segment)
+    
+    # Pad all segments to the same length
+    max_probe_len = max(len(seg) for seg in cap_probe_windows) if cap_probe_windows else 0
+    
+    if max_probe_len == 0:
+        print("No valid probe event data found for alignment analysis.")
+        return
+    
+    cap_probe_windows_padded = np.array([
+        np.pad(seg.astype(float), (0, max_probe_len - len(seg)), constant_values=np.nan)
+        for seg in cap_probe_windows
+    ])
+    
+    # --- Treadmill Speed aligned to probe events ---
+    speed_probe_windows = []
+    for pt in probe_event_times:
+        mask = (cap_time >= pt - window) & (cap_time <= pt + window)
+        speed_segment = speed_val[mask]
+        speed_probe_windows.append(speed_segment)
+    
+    # Pad speed segments to the same length
+    speed_probe_windows_padded = np.array([
+        np.pad(seg.astype(float), (0, max_probe_len - len(seg)), constant_values=np.nan)
+        for seg in speed_probe_windows
+    ])
+    
+    # Create a common time axis centered at 0
+    aligned_time_probe = np.linspace(-window, window, max_probe_len)
+    
+    # --- Combined Subplots: Treadmill Speed and Capacitive Value aligned to probe events ---
+    fig, axs = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
+    
+    n_probes = cap_probe_windows_padded.shape[0]
+    
+    # --- Plot 1: Treadmill Speed aligned to probe events ---
+    mean_speed_probe = np.nanmean(speed_probe_windows_padded, axis=0)
+    sem_speed_probe = np.nanstd(speed_probe_windows_padded, axis=0) / np.sqrt(
+        np.sum(~np.isnan(speed_probe_windows_padded), axis=0)
+    )
+    axs[0].plot(aligned_time_probe, mean_speed_probe, color='purple', label=f'Mean Speed (n={n_probes})', linewidth=1.5)
+    axs[0].fill_between(
+        aligned_time_probe, 
+        mean_speed_probe - sem_speed_probe, 
+        mean_speed_probe + sem_speed_probe,
+        color='purple', alpha=0.2, label='SEM'
+    )
+    axs[0].axvline(0, color='black', linestyle='--', label='Probe Event (t=0)', linewidth=1.5)
+    axs[0].set_ylabel('Speed (cm/s)')
+    axs[0].set_title('Treadmill Speed Aligned to Probe Events')
+    axs[0].legend(loc='upper right')
+    axs[0].set_xlim(-window, window)
+    axs[0].spines['top'].set_visible(False)
+    axs[0].spines['right'].set_visible(False)
+    
+    # --- Plot 2: Capacitive Value aligned to probe events ---
+    mean_cap_probe = np.nanmean(cap_probe_windows_padded, axis=0)
+    sem_cap_probe = np.nanstd(cap_probe_windows_padded, axis=0) / np.sqrt(
+        np.sum(~np.isnan(cap_probe_windows_padded), axis=0)
+    )
+    axs[1].plot(aligned_time_probe, mean_cap_probe, color='C0', label=f'Mean Capacitive Value (n={n_probes})', linewidth=1.5)
+    axs[1].fill_between(
+        aligned_time_probe,
+        mean_cap_probe - sem_cap_probe,
+        mean_cap_probe + sem_cap_probe,
+        color='C0', alpha=0.2, label='SEM'
+    )
+    axs[1].axvline(0, color='black', linestyle='--', label='Probe Event (t=0)', linewidth=1.5)
+    axs[1].set_xlabel('Time from Probe Event (s)')
+    axs[1].set_ylabel('Capacitive Value (a.u.)')
+    axs[1].set_title('Capacitive Value Aligned to Probe Events')
+    axs[1].legend(loc='upper right')
+    axs[1].set_xlim(-window, window)
+    axs[1].set_ylim(bottom=0)
+    axs[1].spines['top'].set_visible(False)
+    axs[1].spines['right'].set_visible(False)
+    axs[1].set_xticks(np.arange(-window, window + 1, 1))
+    
+    plt.tight_layout()
+    save_figure(fig, "probe_event_analysis", output_folder)
+    plt.show()
+    
+    print(f"Probe event analysis complete: {n_probes} events analyzed")
+
+
+def match_probe_to_revert_times(trial_log_df, texture_data):
+    """Match probe times with texture revert times (approximately 1 second before probe)
+    
+    Args:
+        trial_log_df: Trial log DataFrame
+        texture_data: Dictionary with processed texture data
+        
+    Returns:
+        tuple: (probe_revert_array, all_revert_times) or (None, revert_times_array)
+    """
+    # Collect all texture_revert times from all trials
+    all_revert_times = []
+    for trial_idx in range(len(trial_log_df)):
+        revert_list = safe_literal_eval(trial_log_df.iloc[trial_idx]['texture_revert'])
+        for revert_time in revert_list:
+            if not pd.isna(revert_time) and revert_time != '':
+                try:
+                    all_revert_times.append(float(revert_time))
+                except (ValueError, TypeError):
+                    continue
+    all_revert_times = np.array(all_revert_times)
+    
+    # Check if probe_time column exists
+    if 'probe_time' not in trial_log_df.columns:
+        print("No 'probe_time' column found. Skipping probe-revert matching.")
+        return None, all_revert_times
+    
+    # Extract probe times
+    probe_times = pd.to_numeric(trial_log_df['probe_time'], errors='coerce').dropna().values
+    
+    if len(probe_times) == 0:
+        print("No valid probe times found. Skipping probe-revert matching.")
+        return None, all_revert_times
+    
+    if len(all_revert_times) == 0:
+        print("No valid texture revert times found. Cannot match with probe times.")
+        return None, all_revert_times
+    
+    # Match each probe_time with closest texture_revert_time ~1 second before
+    probe_revert_matches = []
+    tolerance = 0.5  # Allow ±0.5 seconds around the 1-second target
+    
+    for probe_time in probe_times:
+        # Find revert times that occur before the probe time
+        candidate_reverts = all_revert_times[all_revert_times < probe_time]
+        
+        if len(candidate_reverts) > 0:
+            # Calculate time differences (probe_time - revert_time)
+            time_diffs = probe_time - candidate_reverts
+            
+            # Find revert times approximately 1 second before (within tolerance)
+            target_diff = 1.0
+            valid_matches = np.abs(time_diffs - target_diff) <= tolerance
+            
+            if np.any(valid_matches):
+                # Get the closest match to exactly 1 second before
+                valid_diffs = time_diffs[valid_matches]
+                valid_reverts = candidate_reverts[valid_matches]
+                closest_idx = np.argmin(np.abs(valid_diffs - target_diff))
+                matched_revert = valid_reverts[closest_idx]
+                actual_diff = time_diffs[valid_matches][closest_idx]
+            else:
+                # If no matches within tolerance, find closest revert before probe
+                closest_idx = np.argmin(time_diffs)
+                matched_revert = candidate_reverts[closest_idx]
+                actual_diff = time_diffs[closest_idx]
+        else:
+            matched_revert = np.nan
+            actual_diff = np.nan
+        
+        probe_revert_matches.append([probe_time, matched_revert, actual_diff])
+    
+    probe_revert_array = np.array(probe_revert_matches)
+    
+    successful_matches = np.sum(~np.isnan(probe_revert_array[:, 1]))
+    if successful_matches == 0:
+        print("Warning: No successful matches between probe times and revert times.")
+    
+    return probe_revert_array, all_revert_times
+
+
+def analyze_simulated_probe_events(trial_log_df, probe_revert_array, all_revert_times,
+                                   capacitive_df, treadmill_interp, output_folder, window=5):
+    """Analyze simulated probe events for unpaired revert times
+    
+    Args:
+        trial_log_df: Trial log DataFrame
+        probe_revert_array: Array of matched probe-revert pairs
+        all_revert_times: All texture revert times
+        capacitive_df: Capacitive sensor DataFrame
+        treadmill_interp: Interpolated treadmill speed
+        output_folder: Directory for saving figures
+        window: Time window in seconds
+    """
+    # Check if probe events exist in data
+    if 'probe_time' not in trial_log_df.columns:
+        print("No 'probe_time' column found. Skipping simulated probe analysis.")
+        return
+    
+    # Find unpaired revert times
+    if probe_revert_array is not None and len(probe_revert_array) > 0:
+        # Get matched revert times
+        matched_revert_times = probe_revert_array[:, 1]
+        matched_revert_times = matched_revert_times[~np.isnan(matched_revert_times)]
+        
+        # Find unpaired revert times
+        unpaired_revert_times = []
+        tolerance_match = 1e-6
+        
+        for revert_time in all_revert_times:
+            is_matched = np.any(np.abs(matched_revert_times - revert_time) < tolerance_match)
+            if not is_matched:
+                unpaired_revert_times.append(revert_time)
+        
+        unpaired_revert_times = np.array(unpaired_revert_times)
+        
+        if len(unpaired_revert_times) == 0:
+            print("All revert times matched with probe events. No simulated probes needed.")
+            return
+    elif len(all_revert_times) > 0:
+        # No probe analysis performed but we have revert times
+        unpaired_revert_times = all_revert_times.copy()
+    else:
+        print("No revert times found. Skipping simulated probe analysis.")
+        return
+    
+    print(f"\nAnalyzing {len(unpaired_revert_times)} simulated probe events (unpaired reverts)...")
+    
+    # Create simulated probe times (1 second after each unpaired revert)
+    simulated_probe_times = unpaired_revert_times + 1.0
+    
+    # Extract base arrays
+    cap_time = capacitive_df['elapsed_time'].values
+    cap_val = capacitive_df['capacitive_value'].values
+    speed_val = treadmill_interp.values
+    
+    # --- Capacitive Value aligned to simulated probes ---
+    cap_sim_windows = []
+    for sim_probe_time in simulated_probe_times:
+        mask = (cap_time >= sim_probe_time - window) & (cap_time <= sim_probe_time + window)
+        cap_segment = cap_val[mask]
+        cap_sim_windows.append(cap_segment)
+    
+    # Check for valid windows
+    if not cap_sim_windows or max(len(seg) for seg in cap_sim_windows) == 0:
+        print("Warning: No valid data windows for simulated probe analysis.")
+        return
+    
+    # Pad segments
+    max_sim_len = max(len(seg) for seg in cap_sim_windows)
+    cap_sim_windows_padded = np.array([
+        np.pad(seg.astype(float), (0, max_sim_len - len(seg)), constant_values=np.nan)
+        for seg in cap_sim_windows
+    ])
+    
+    # --- Treadmill Speed aligned to simulated probes ---
+    speed_sim_windows = []
+    for sim_probe_time in simulated_probe_times:
+        mask = (cap_time >= sim_probe_time - window) & (cap_time <= sim_probe_time + window)
+        speed_segment = speed_val[mask]
+        speed_sim_windows.append(speed_segment)
+    
+    speed_sim_windows_padded = np.array([
+        np.pad(seg.astype(float), (0, max_sim_len - len(seg)), constant_values=np.nan)
+        for seg in speed_sim_windows
+    ])
+    
+    # Create aligned time axis
+    aligned_time_sim = np.linspace(-window, window, max_sim_len)
+    
+    # --- Create Combined Plot ---
+    fig, axs = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
+    
+    n_sim_probes = cap_sim_windows_padded.shape[0]
+    
+    # --- Plot 1: Treadmill Speed ---
+    mean_speed_sim = np.nanmean(speed_sim_windows_padded, axis=0)
+    sem_speed_sim = np.nanstd(speed_sim_windows_padded, axis=0) / np.sqrt(
+        np.sum(~np.isnan(speed_sim_windows_padded), axis=0)
+    )
+    axs[0].plot(aligned_time_sim, mean_speed_sim, color='purple', 
+                label=f'Mean Speed (n={n_sim_probes})', linewidth=1.5)
+    axs[0].fill_between(
+        aligned_time_sim,
+        mean_speed_sim - sem_speed_sim,
+        mean_speed_sim + sem_speed_sim,
+        color='purple', alpha=0.2, label='SEM'
+    )
+    axs[0].axvline(0, color='black', linestyle='--', label='Simulated Probe (t=0)', linewidth=1.5)
+    axs[0].set_ylabel('Speed (cm/s)')
+    axs[0].set_title('Treadmill Speed Aligned to Simulated Probe Events (1s after unpaired reverts)')
+    axs[0].legend(loc='upper right')
+    axs[0].set_xlim(-window, window)
+    axs[0].spines['top'].set_visible(False)
+    axs[0].spines['right'].set_visible(False)
+    
+    # --- Plot 2: Capacitive Value ---
+    mean_cap_sim = np.nanmean(cap_sim_windows_padded, axis=0)
+    sem_cap_sim = np.nanstd(cap_sim_windows_padded, axis=0) / np.sqrt(
+        np.sum(~np.isnan(cap_sim_windows_padded), axis=0)
+    )
+    axs[1].plot(aligned_time_sim, mean_cap_sim, color='C0', 
+                label=f'Mean Capacitive Value (n={n_sim_probes})', linewidth=1.5)
+    axs[1].fill_between(
+        aligned_time_sim,
+        mean_cap_sim - sem_cap_sim,
+        mean_cap_sim + sem_cap_sim,
+        color='C0', alpha=0.2, label='SEM'
+    )
+    axs[1].axvline(0, color='black', linestyle='--', label='Simulated Probe (t=0)', linewidth=1.5)
+    axs[1].set_xlabel('Time from Simulated Probe Event (s)')
+    axs[1].set_ylabel('Capacitive Value (a.u.)')
+    axs[1].set_title('Capacitive Value Aligned to Simulated Probe Events (1s after unpaired reverts)')
+    axs[1].legend(loc='upper right')
+    axs[1].set_xlim(-window, window)
+    axs[1].set_ylim(bottom=0)
+    axs[1].spines['top'].set_visible(False)
+    axs[1].spines['right'].set_visible(False)
+    axs[1].set_xticks(np.arange(-window, window + 1, 1))
+    
+    plt.tight_layout()
+    save_figure(fig, "simulated_probe_events", output_folder)
+    plt.show()
+    
+    print(f"Simulated probe analysis complete: {n_sim_probes} events analyzed")
+
+
+# ============================================================================
 # MAIN EXECUTION
 # ============================================================================
 
@@ -1784,7 +2174,26 @@ def main():
             treadmill_interp, pupil_diameter_interp, output_folder
         )
     
-    # Step 9: Summary
+    # Step 9: Analyze probe events
+    print("\nAnalyzing probe events...")
+    analyze_probe_events(
+        data['trial_log'], data['capacitive'], treadmill_interp, output_folder
+    )
+    
+    # Step 10: Match probe times to revert times and analyze simulated probes
+    print("\nMatching probe events to texture revert times...")
+    probe_revert_array, all_revert_times = match_probe_to_revert_times(
+        data['trial_log'], texture_data
+    )
+    
+    if probe_revert_array is not None or len(all_revert_times) > 0:
+        print("\nAnalyzing simulated probe events...")
+        analyze_simulated_probe_events(
+            data['trial_log'], probe_revert_array, all_revert_times,
+            data['capacitive'], treadmill_interp, output_folder
+        )
+    
+    # Step 11: Summary
     print("\n" + "=" * 60)
     print("ANALYSIS COMPLETE")
     print("=" * 60)
