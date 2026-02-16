@@ -381,6 +381,42 @@ def interpolate_treadmill_to_capacitive(treadmill_df, capacitive_df):
     )
 
 
+def interpolate_treadmill_distance_to_capacitive(treadmill_df, capacitive_df):
+    """Interpolate treadmill distance to match capacitive timeline
+    
+    Finds the first non-zero distance value and subtracts it from all distances
+    to get the distance moved in meters.
+    
+    Args:
+        treadmill_df: Treadmill DataFrame
+        capacitive_df: Capacitive DataFrame
+        
+    Returns:
+        pd.Series: Interpolated treadmill distance moved in meters
+    """
+    # Find the first non-zero distance value
+    non_zero_distances = treadmill_df['distance'][treadmill_df['distance'] != 0]
+    
+    if len(non_zero_distances) > 0:
+        start_distance = non_zero_distances.iloc[0]
+    else:
+        # If all distances are zero, use 0 as start distance
+        start_distance = 0
+    
+    # Create adjusted distance values (distance moved from start)
+    distance_moved = treadmill_df['distance'] - start_distance
+    
+    # Interpolate to capacitive timeline and convert to meters
+    return pd.Series(
+        data=np.interp(
+            capacitive_df['elapsed_time'],
+            treadmill_df['global_time'],
+            distance_moved
+        ) / 1000.0,
+        index=capacitive_df['elapsed_time']
+    )
+
+
 def process_pupil_data(pupil_df, frame_log_df, capacitive_df):
     """Process pupil diameter data and interpolate to capacitive timeline
     
@@ -689,44 +725,47 @@ def create_aligned_windows(time_array, data_array, event_times, window_size=5):
 # PLOTTING FUNCTIONS: TIMELINE
 # ============================================================================
 
-def plot_main_timeline(capacitive_df, treadmill_interp, pupil_diameter_interp,
+def plot_main_timeline(capacitive_df, treadmill_interp, treadmill_distance_interp, pupil_diameter_interp,
                        trial_log_df, texture_data, has_pupil_data, output_folder):
     """Create the main timeline plot with all data streams
     
     Args:
         capacitive_df: Capacitive sensor DataFrame
         treadmill_interp: Interpolated treadmill speed
+        treadmill_distance_interp: Interpolated treadmill distance
         pupil_diameter_interp: Interpolated pupil diameter (or None)
         trial_log_df: Trial log DataFrame
         texture_data: Dictionary with processed texture data
         has_pupil_data: Whether pupil data is available
         output_folder: Directory to save figures
     """
-    num_plots = 3 if has_pupil_data and pupil_diameter_interp is not None else 2
-    fig, axs = plt.subplots(num_plots, 1, figsize=(14, 10 if num_plots == 3 else 8), sharex=True)
+    # Determine number of plots: treadmill speed, distance, capacitive, and optionally pupil
+    num_plots = 4 if has_pupil_data and pupil_diameter_interp is not None else 3
+    fig, axs = plt.subplots(num_plots, 1, figsize=(14, 12 if num_plots == 4 else 10), sharex=True)
     
     # Ensure axs is always a list
-    if num_plots == 2:
-        axs = [axs[0], axs[1]]
-    else:
-        axs = [axs[0], axs[1], axs[2]]
+    axs = list(axs) if num_plots > 1 else [axs]
     
     # Get event times
     reward_times = pd.to_numeric(trial_log_df['reward_event'], errors='coerce').dropna()
     puff_times = pd.to_numeric(trial_log_df['puff_event'], errors='coerce').dropna() if 'puff_event' in trial_log_df.columns else pd.Series([])
     probe_times = pd.to_numeric(trial_log_df['probe_time'], errors='coerce').dropna() if 'probe_time' in trial_log_df.columns else pd.Series([])
     
-    # Plot treadmill data (top subplot)
+    # Plot treadmill speed (top subplot)
     plot_treadmill_timeline(axs[0], capacitive_df, treadmill_interp, reward_times, 
                            puff_times, probe_times, texture_data, has_more_plots=True)
     
-    # Plot capacitive data (middle or bottom subplot)
-    plot_capacitive_timeline(axs[1], capacitive_df, reward_times, puff_times, probe_times, 
+    # Plot treadmill distance (second subplot)
+    plot_treadmill_distance_timeline(axs[1], capacitive_df, treadmill_distance_interp, reward_times,
+                                     puff_times, probe_times, texture_data, has_more_plots=True)
+    
+    # Plot capacitive data (third subplot)
+    plot_capacitive_timeline(axs[2], capacitive_df, reward_times, puff_times, probe_times, 
                              texture_data, "Capacitive", show_xlabel=not has_pupil_data)
     
-    # Plot pupil data if available
-    if num_plots == 3 and pupil_diameter_interp is not None:
-        plot_pupil_timeline(axs[2], capacitive_df, pupil_diameter_interp, reward_times,
+    # Plot pupil data if available (fourth subplot)
+    if num_plots == 4 and pupil_diameter_interp is not None:
+        plot_pupil_timeline(axs[3], capacitive_df, pupil_diameter_interp, reward_times,
                           puff_times, probe_times, texture_data)
     
     # Set x-axis limits
@@ -737,7 +776,7 @@ def plot_main_timeline(capacitive_df, treadmill_interp, pupil_diameter_interp,
     
     setup_plot_style(axs)
     plt.tight_layout()
-    save_figure(fig, f"timeline_{'treadmill_capacitive_pupil' if num_plots == 3 else 'treadmill_and_capacitive'}", 
+    save_figure(fig, f"timeline_{'all_data' if num_plots == 4 else 'speed_distance_capacitive'}", 
                 output_folder)
     plt.show()
 
@@ -779,6 +818,26 @@ def plot_treadmill_timeline(ax, capacitive_df, treadmill_interp, reward_times,
     ax.set_ylabel('Speed (cm/s)')
     ax.set_title('Interpolated Treadmill Speed Over Time with Reward and Puff Events')
     ax.legend(loc='upper right')
+
+
+def plot_treadmill_distance_timeline(ax, capacitive_df, treadmill_distance_interp, reward_times, 
+                                     puff_times, probe_times, texture_data, has_more_plots=False):
+    """Plot treadmill distance data with event markers"""
+    ax.plot(capacitive_df['elapsed_time'], treadmill_distance_interp, 
+            label='Treadmill Distance (interpolated)', color='teal')
+    
+    # Add event markers
+    add_event_markers(ax, reward_times, puff_times, probe_times)
+    
+    # Highlight reward and punish intervals
+    add_texture_intervals(ax, texture_data)
+    
+    if not has_more_plots:
+        ax.set_xlabel('Elapsed Time (s)')
+    ax.set_ylabel('Distance (m)')
+    ax.set_title('Interpolated Treadmill Distance Over Time with Reward and Puff Events')
+    ax.legend(loc='upper right')
+    ax.set_ylim(bottom=0)
 
 
 def plot_pupil_timeline(ax, capacitive_df, pupil_diameter_interp, reward_times,
@@ -1482,8 +1541,8 @@ def analyze_reward_zones(reward_zone_trials, trial_log_df, capacitive_df, treadm
             f'Treadmill Speed Raster: Individual Trials Aligned to Reward Zone Entry (n={len(reward_zone_trials)} trials)',
             'Treadmill Speed (cm/s)', 'coolwarm', output_folder, 
             'treadmill_speed_raster_reward_zones',
-            vmin=-20,
-            vmax=20,
+            vmin=-30,
+            vmax=30,
             center_time=0, event_label="Reward Zone Entry",
             show_delivery_markers=True, center_line_color='black'
         )
@@ -1564,8 +1623,8 @@ def analyze_reward_deliveries(reward_zone_trials, trial_log_df, cap_time, cap_va
             f'Treadmill Speed Raster: Individual Trials Aligned to Reward Delivery (n={len(all_reward_delivery_trials)} trials)',
             'Treadmill Speed (cm/s)', 'coolwarm', output_folder,
             'treadmill_speed_raster_reward_delivery_centered',
-            vmin=-20,
-            vmax=20,
+            vmin=-30,
+            vmax=30,
             center_time=0, event_label="Reward Delivery",
             show_zone_entries=True, zone_entry_color='black', center_line_color='green'
         )
@@ -2121,6 +2180,11 @@ def main():
         data['treadmill'], data['capacitive']
     )
     
+    print("Interpolating treadmill distance to capacitive timeline...")
+    treadmill_distance_interp = interpolate_treadmill_distance_to_capacitive(
+        data['treadmill'], data['capacitive']
+    )
+    
     # Step 5: Process pupil data (if available)
     pupil_diameter_interp = None
     if has_pupil_data:
@@ -2132,7 +2196,7 @@ def main():
     # Step 6: Plot main timeline
     print("\nGenerating main timeline plot...")
     plot_main_timeline(
-        data['capacitive'], treadmill_interp, pupil_diameter_interp,
+        data['capacitive'], treadmill_interp, treadmill_distance_interp, pupil_diameter_interp,
         data['trial_log'], texture_data, has_pupil_data, output_folder
     )
     
