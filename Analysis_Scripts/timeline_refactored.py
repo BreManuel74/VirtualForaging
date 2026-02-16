@@ -1021,7 +1021,7 @@ def plot_raster_heatmap(windows_padded, aligned_time, event_trials, title,
 # ============================================================================
 
 def plot_average_traces_reward(reward_zone_trials, trial_log_df, capacitive_df, 
-                               treadmill_interp, pupil_diameter_interp, output_folder, window=5):
+                               treadmill_interp, pupil_diameter_interp, output_folder, window=5, cap_vmax=None):
     """Plot average traces (mean ± SEM) for reward zone and delivery events
     
     Args:
@@ -1032,6 +1032,7 @@ def plot_average_traces_reward(reward_zone_trials, trial_log_df, capacitive_df,
         pupil_diameter_interp: Interpolated pupil diameter (or None)
         output_folder: Directory to save figures
         window: Window size in seconds
+        cap_vmax: Maximum value for capacitive y-axis (optional)
     """
     if len(reward_zone_trials) == 0:
         print("No reward zones for average trace analysis")
@@ -1116,7 +1117,10 @@ def plot_average_traces_reward(reward_zone_trials, trial_log_df, capacitive_df,
     axs[1].set_title('Capacitive Value Aligned to Reward Event')
     axs[1].legend()
     axs[1].set_xlim(-5, 5)
-    axs[1].set_ylim(bottom=0)
+    if cap_vmax is not None:
+        axs[1].set_ylim(0, cap_vmax)
+    else:
+        axs[1].set_ylim(bottom=0)
     axs[1].spines['top'].set_visible(False)
     axs[1].spines['right'].set_visible(False)
     
@@ -1215,7 +1219,7 @@ def plot_average_traces_reward(reward_zone_trials, trial_log_df, capacitive_df,
 
 
 def plot_average_traces_puff(puff_zone_trials, trial_log_df, capacitive_df,
-                             treadmill_interp, pupil_diameter_interp, output_folder, window=5):
+                             treadmill_interp, pupil_diameter_interp, output_folder, window=5, cap_vmax=None):
     """Plot average traces (mean ± SEM) for puff zone and delivery events
     
     Args:
@@ -1226,6 +1230,7 @@ def plot_average_traces_puff(puff_zone_trials, trial_log_df, capacitive_df,
         pupil_diameter_interp: Interpolated pupil diameter (or None)
         output_folder: Directory to save figures
         window: Window size in seconds
+        cap_vmax: Maximum value for capacitive y-axis (optional)
     """
     if len(puff_zone_trials) == 0:
         print("No puff zones for average trace analysis")
@@ -1349,7 +1354,10 @@ def plot_average_traces_puff(puff_zone_trials, trial_log_df, capacitive_df,
         axs[1].set_ylabel('Capacitive Value (a.u.)')
         axs[1].set_title(f'Average Capacitive Value Aligned to Puff Events (n={puff_event_capacitive_data["n_events"]})')
         axs[1].legend()
-        axs[1].set_ylim(bottom=0)
+        if cap_vmax is not None:
+            axs[1].set_ylim(0, cap_vmax)
+        else:
+            axs[1].set_ylim(bottom=0)
     else:
         axs[1].text(0.5, 0.5, 'No puff event data available\nfor capacitive analysis',
                    horizontalalignment='center', verticalalignment='center',
@@ -1511,10 +1519,13 @@ def analyze_reward_zones(reward_zone_trials, trial_log_df, capacitive_df, treadm
         pupil_diameter_interp: Interpolated pupil diameter (or None)
         output_folder: Directory to save figures
         window: Window size in seconds
+        
+    Returns:
+        tuple: (cap_vmin, cap_vmax) - Scale for capacitive plots
     """
     if len(reward_zone_trials) == 0:
         print("No reward zones found. Skipping reward zone analysis.")
-        return
+        return (0, 5000)  # Default scale
     
     print(f"\n=== ANALYZING {len(reward_zone_trials)} REWARD ZONES ===")
     
@@ -1533,6 +1544,45 @@ def analyze_reward_zones(reward_zone_trials, trial_log_df, capacitive_df, treadm
     cap_windows, aligned_time_cap = create_aligned_windows(
         cap_time, cap_val, zone_entry_times, window
     )
+    
+    # Calculate capacitive scale from reward EVENT average trace (mean + SEM)
+    # Get all reward event times from trial log to match what's shown in average trace plots
+    reward_event_times = pd.to_numeric(trial_log_df['reward_event'], errors='coerce').dropna()
+    reward_event_times = reward_event_times[~np.isnan(reward_event_times)].values
+    
+    if len(reward_event_times) > 0:
+        # Create capacitive windows aligned to reward events
+        cap_event_windows = []
+        for rt in reward_event_times:
+            mask = (cap_time >= rt - window) & (cap_time <= rt + window)
+            cap_segment = cap_val[mask]
+            cap_event_windows.append(cap_segment)
+        
+        if cap_event_windows and max(len(seg) for seg in cap_event_windows) > 0:
+            max_event_len = max(len(seg) for seg in cap_event_windows)
+            cap_event_windows_padded = np.array([
+                np.pad(seg.astype(float), (0, max_event_len - len(seg)), constant_values=np.nan)
+                for seg in cap_event_windows
+            ])
+            
+            # Calculate mean and SEM (matching what's plotted in average traces)
+            mean_event_vals = np.nanmean(cap_event_windows_padded, axis=0)
+            sem_event_vals = np.nanstd(cap_event_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(cap_event_windows_padded), axis=0))
+            
+            # Use the maximum of (mean + SEM) as the upper limit
+            cap_vmin = 0
+            cap_vmax = np.nanmax(mean_event_vals + sem_event_vals)
+            
+            # Ensure cap_vmax is valid
+            if np.isnan(cap_vmax) or cap_vmax <= 0:
+                cap_vmax = 5000
+            print(f"Capacitive scale calculated from reward event average trace: vmin={cap_vmin:.2f}, vmax={cap_vmax:.2f}")
+        else:
+            cap_vmin, cap_vmax = 0, 5000
+            print("Using default capacitive scale: vmin=0, vmax=5000")
+    else:
+        cap_vmin, cap_vmax = 0, 5000
+        print("No reward events found. Using default capacitive scale: vmin=0, vmax=5000")
     
     # Plot raster for treadmill speed at zone entry
     if speed_windows is not None:
@@ -1554,6 +1604,8 @@ def analyze_reward_zones(reward_zone_trials, trial_log_df, capacitive_df, treadm
             f'Capacitive (Licking) Raster: Individual Trials Aligned to Reward Zone Entry (n={len(reward_zone_trials)} trials)',
             'Capacitive Value (a.u.)', 'binary', output_folder,
             'capacitive_raster_reward_zones',
+            vmin=cap_vmin,
+            vmax=cap_vmax,
             center_time=0, event_label="Reward Zone Entry",
             show_delivery_markers=True, center_line_color='blue'
         )
@@ -1561,11 +1613,13 @@ def analyze_reward_zones(reward_zone_trials, trial_log_df, capacitive_df, treadm
     # Analyze reward deliveries - pass trial_log_df to get ALL reward events
     print(f"Analyzing reward deliveries...")
     analyze_reward_deliveries(reward_zone_trials, trial_log_df, cap_time, cap_val, speed_val,
-                             pupil_diameter_interp, output_folder, window)
+                             pupil_diameter_interp, output_folder, window, cap_vmin, cap_vmax)
+    
+    return (cap_vmin, cap_vmax)
 
 
 def analyze_reward_deliveries(reward_zone_trials, trial_log_df, cap_time, cap_val, speed_val,
-                              pupil_diameter_interp, output_folder, window=5):
+                              pupil_diameter_interp, output_folder, window=5, cap_vmin=0, cap_vmax=5000):
     """Analyze data aligned to reward delivery times
     
     Args:
@@ -1578,6 +1632,8 @@ def analyze_reward_deliveries(reward_zone_trials, trial_log_df, cap_time, cap_va
         pupil_diameter_interp: Interpolated pupil diameter
         output_folder: Directory to save figures
         window: Window size in seconds
+        cap_vmin: Minimum value for capacitive colormap scale
+        cap_vmax: Maximum value for capacitive colormap scale
     """
     # Get ALL reward events from trial log (not just matched ones)
     all_reward_events = []
@@ -1635,6 +1691,8 @@ def analyze_reward_deliveries(reward_zone_trials, trial_log_df, cap_time, cap_va
             f'Capacitive (Licking) Raster: Individual Trials Aligned to Reward Delivery (n={len(all_reward_delivery_trials)} trials)',
             'Capacitive Value (a.u.)', 'binary', output_folder,
             'capacitive_raster_reward_delivery_centered',
+            vmin=cap_vmin,
+            vmax=cap_vmax,
             center_time=0, event_label="Reward Delivery",
             show_zone_entries=True, zone_entry_color='blue', center_line_color='green'
         )
@@ -1645,7 +1703,7 @@ def analyze_reward_deliveries(reward_zone_trials, trial_log_df, cap_time, cap_va
 # ============================================================================
 
 def analyze_puff_zones(puff_zone_trials, trial_log_df, capacitive_df, treadmill_interp, 
-                       pupil_diameter_interp, output_folder, window=10):
+                       pupil_diameter_interp, output_folder, window=10, cap_vmin=0, cap_vmax=5000):
     """Analyze data aligned to puff zone entries and deliveries
     
     Args:
@@ -1656,6 +1714,8 @@ def analyze_puff_zones(puff_zone_trials, trial_log_df, capacitive_df, treadmill_
         pupil_diameter_interp: Interpolated pupil diameter (or None)
         output_folder: Directory to save figures
         window: Window size in seconds
+        cap_vmin: Minimum value for capacitive colormap scale
+        cap_vmax: Maximum value for capacitive colormap scale
     """
     if len(puff_zone_trials) == 0:
         print("No puff zones found. Skipping puff zone analysis.")
@@ -1698,6 +1758,8 @@ def analyze_puff_zones(puff_zone_trials, trial_log_df, capacitive_df, treadmill_
             f'Capacitive (Licking) Raster: Individual Trials Aligned to Puff Zone Entry (n={len(puff_zone_trials)} trials)',
             'Capacitive Value (a.u.)', 'binary', output_folder,
             'capacitive_raster_puff_zones',
+            vmin=cap_vmin,
+            vmax=cap_vmax,
             center_time=0, event_label="Puff Zone Entry",
             show_delivery_markers=True, center_line_color='blue'
         )
@@ -1710,11 +1772,11 @@ def analyze_puff_zones(puff_zone_trials, trial_log_df, capacitive_df, treadmill_
         print(f"Analyzing puff deliveries...")
         # Note: Pass puff_zone_trials and trial_log_df so we can include ALL puff events
         analyze_puff_deliveries(puff_zone_trials, trial_log_df, cap_time, cap_val, speed_val,
-                               output_folder, window)
+                               output_folder, window, cap_vmin, cap_vmax)
 
 
 def analyze_puff_deliveries(puff_zone_trials, trial_log_df, cap_time, cap_val, speed_val,
-                            output_folder, window=10):
+                            output_folder, window=10, cap_vmin=0, cap_vmax=5000):
     """Analyze data aligned to puff delivery times
     
     Args:
@@ -1726,6 +1788,8 @@ def analyze_puff_deliveries(puff_zone_trials, trial_log_df, cap_time, cap_val, s
         speed_val: Treadmill speed array
         output_folder: Directory to save figures
         window: Window size in seconds
+        cap_vmin: Minimum value for capacitive colormap scale
+        cap_vmax: Maximum value for capacitive colormap scale
     """
     # Check if puff_event column exists
     if 'puff_event' not in trial_log_df.columns:
@@ -1788,6 +1852,8 @@ def analyze_puff_deliveries(puff_zone_trials, trial_log_df, cap_time, cap_val, s
             f'Capacitive (Licking) Raster: Individual Trials Aligned to Puff Delivery (n={len(all_puff_delivery_trials)} trials)',
             'Capacitive Value (a.u.)', 'binary', output_folder,
             'capacitive_raster_puff_delivery_centered',
+            vmin=cap_vmin,
+            vmax=cap_vmax,
             center_time=0, event_label="Puff Delivery",
             show_zone_entries=True, zone_entry_color='blue', center_line_color='green'
         )
@@ -1797,7 +1863,7 @@ def analyze_puff_deliveries(puff_zone_trials, trial_log_df, cap_time, cap_val, s
 # ANALYSIS FUNCTIONS: PROBE EVENTS
 # ============================================================================
 
-def analyze_probe_events(trial_log_df, capacitive_df, treadmill_interp, output_folder, window=5):
+def analyze_probe_events(trial_log_df, capacitive_df, treadmill_interp, output_folder, window=5, cap_vmax=None):
     """Analyze probe events with treadmill speed and capacitive value alignment
     
     Args:
@@ -1806,6 +1872,7 @@ def analyze_probe_events(trial_log_df, capacitive_df, treadmill_interp, output_f
         treadmill_interp: Interpolated treadmill speed data
         output_folder: Directory for saving figures
         window: Time window in seconds (default: 5)
+        cap_vmax: Maximum value for capacitive y-axis (optional)
     """
     # Check if probe events exist
     if 'probe_time' not in trial_log_df.columns:
@@ -1907,7 +1974,10 @@ def analyze_probe_events(trial_log_df, capacitive_df, treadmill_interp, output_f
     axs[1].set_title('Capacitive Value Aligned to Probe Events')
     axs[1].legend(loc='upper right')
     axs[1].set_xlim(-window, window)
-    axs[1].set_ylim(bottom=0)
+    if cap_vmax is not None:
+        axs[1].set_ylim(0, cap_vmax)
+    else:
+        axs[1].set_ylim(bottom=0)
     axs[1].spines['top'].set_visible(False)
     axs[1].spines['right'].set_visible(False)
     axs[1].set_xticks(np.arange(-window, window + 1, 1))
@@ -2001,7 +2071,7 @@ def match_probe_to_revert_times(trial_log_df, texture_data):
 
 
 def analyze_simulated_probe_events(trial_log_df, probe_revert_array, all_revert_times,
-                                   capacitive_df, treadmill_interp, output_folder, window=5):
+                                   capacitive_df, treadmill_interp, output_folder, window=5, cap_vmax=None):
     """Analyze simulated probe events for unpaired revert times
     
     Args:
@@ -2012,6 +2082,7 @@ def analyze_simulated_probe_events(trial_log_df, probe_revert_array, all_revert_
         treadmill_interp: Interpolated treadmill speed
         output_folder: Directory for saving figures
         window: Time window in seconds
+        cap_vmax: Maximum value for capacitive y-axis (optional)
     """
     # Check if probe events exist in data
     if 'probe_time' not in trial_log_df.columns:
@@ -2134,7 +2205,10 @@ def analyze_simulated_probe_events(trial_log_df, probe_revert_array, all_revert_
     axs[1].set_title('Capacitive Value Aligned to Simulated Probe Events (1s after unpaired reverts)')
     axs[1].legend(loc='upper right')
     axs[1].set_xlim(-window, window)
-    axs[1].set_ylim(bottom=0)
+    if cap_vmax is not None:
+        axs[1].set_ylim(0, cap_vmax)
+    else:
+        axs[1].set_ylim(bottom=0)
     axs[1].spines['top'].set_visible(False)
     axs[1].spines['right'].set_visible(False)
     axs[1].set_xticks(np.arange(-window, window + 1, 1))
@@ -2206,8 +2280,11 @@ def main():
         data['trial_log'], texture_data['reward_texture_change_time']
     )
     
+    # Initialize capacitive scale with defaults
+    cap_vmin, cap_vmax = 0, 5000
+    
     if len(reward_zone_trials) > 0:
-        analyze_reward_zones(
+        cap_vmin, cap_vmax = analyze_reward_zones(
             reward_zone_trials, data['trial_log'], data['capacitive'], treadmill_interp,
             pupil_diameter_interp, output_folder
         )
@@ -2216,10 +2293,10 @@ def main():
         print("\nCreating reward average trace plots...")
         plot_average_traces_reward(
             reward_zone_trials, data['trial_log'], data['capacitive'],
-            treadmill_interp, pupil_diameter_interp, output_folder
+            treadmill_interp, pupil_diameter_interp, output_folder, cap_vmax=cap_vmax
         )
     
-    # Step 8: Match and analyze puff zones
+    # Step 8: Match and analyze puff zones (using capacitive scale from reward analysis)
     print("\nAnalyzing puff zones...")
     puff_zone_trials = match_puff_zones_to_events(
         data['trial_log'], texture_data['punish_texture_change_time_first']
@@ -2228,20 +2305,20 @@ def main():
     if len(puff_zone_trials) > 0:
         analyze_puff_zones(
             puff_zone_trials, data['trial_log'], data['capacitive'], treadmill_interp,
-            pupil_diameter_interp, output_folder
+            pupil_diameter_interp, output_folder, window=10, cap_vmin=cap_vmin, cap_vmax=cap_vmax
         )
         
         # Create average trace plots for puffs
         print("\nCreating puff average trace plots...")
         plot_average_traces_puff(
             puff_zone_trials, data['trial_log'], data['capacitive'],
-            treadmill_interp, pupil_diameter_interp, output_folder
+            treadmill_interp, pupil_diameter_interp, output_folder, cap_vmax=cap_vmax
         )
     
-    # Step 9: Analyze probe events
+    # Step 9: Analyze probe events (using capacitive scale from reward analysis)
     print("\nAnalyzing probe events...")
     analyze_probe_events(
-        data['trial_log'], data['capacitive'], treadmill_interp, output_folder
+        data['trial_log'], data['capacitive'], treadmill_interp, output_folder, cap_vmax=cap_vmax
     )
     
     # Step 10: Match probe times to revert times and analyze simulated probes
@@ -2254,7 +2331,7 @@ def main():
         print("\nAnalyzing simulated probe events...")
         analyze_simulated_probe_events(
             data['trial_log'], probe_revert_array, all_revert_times,
-            data['capacitive'], treadmill_interp, output_folder
+            data['capacitive'], treadmill_interp, output_folder, cap_vmax=cap_vmax
         )
     
     # Step 11: Summary
