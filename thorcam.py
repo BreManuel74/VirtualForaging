@@ -12,6 +12,84 @@ import time
 from pathlib import Path
 from global_stopwatch import Stopwatch
 
+def auto_adjust_exposure(mmc, camera_device, target_mean_8bit=120, tolerance_8bit=10, max_iterations=15):
+    """
+    Automatically adjust camera exposure to achieve optimal brightness.
+    
+    Args:
+        mmc: Micro-Manager core instance
+        camera_device: Name of the camera device
+        target_mean_8bit: Target mean pixel value in 8-bit space (0-255, typically 100-140 is good)
+        tolerance_8bit: Acceptable deviation from target in 8-bit space
+        max_iterations: Maximum adjustment iterations
+    """
+    # Get bit depth and calculate target in native bit depth
+    bit_depth = mmc.getImageBitDepth()
+    max_value = (2 ** bit_depth) - 1
+    
+    # Scale target to native bit depth
+    target_mean = (target_mean_8bit / 255.0) * max_value
+    tolerance = (tolerance_8bit / 255.0) * max_value
+    
+    print(f"Camera bit depth: {bit_depth}-bit (max value: {max_value})")
+    print(f"Auto-adjusting exposure for optimal brightness (target: {target_mean_8bit} in 8-bit = {target_mean:.0f} in {bit_depth}-bit)...")
+    
+    # Get current exposure and valid range
+    current_exposure = float(mmc.getProperty(camera_device, "Exposure"))
+    
+    # Try to get exposure limits (if available)
+    try:
+        min_exposure = float(mmc.getPropertyLowerLimit(camera_device, "Exposure"))
+        max_exposure = float(mmc.getPropertyUpperLimit(camera_device, "Exposure"))
+    except:
+        # If limits aren't available, use reasonable defaults
+        min_exposure = 0.1
+        max_exposure = 100.0
+    
+    print(f"Initial exposure: {current_exposure} ms (range: {min_exposure}-{max_exposure} ms)")
+    print(f"Target brightness: {target_mean:.0f} / {max_value} ({target_mean_8bit} / 255 in 8-bit)")
+    
+    for iteration in range(max_iterations):
+        # Capture a test frame
+        mmc.snapImage()
+        image = mmc.getImage()
+        
+        # Calculate mean brightness
+        mean_brightness = np.mean(image)
+        
+        print(f"Iteration {iteration + 1}: Exposure={current_exposure:.2f} ms, Mean brightness={mean_brightness:.1f}")
+        
+        # Check if we're within tolerance
+        if abs(mean_brightness - target_mean) <= tolerance:
+            print(f"✓ Optimal exposure found: {current_exposure:.2f} ms (brightness: {mean_brightness:.1f})")
+            return current_exposure
+        
+        # Adjust exposure based on brightness
+        if mean_brightness < target_mean - tolerance:
+            # Image too dark, increase exposure
+            adjustment_factor = min((target_mean / mean_brightness), 2.0)  # Cap at 2x increase per step
+            new_exposure = current_exposure * adjustment_factor
+        else:
+            # Image too bright, decrease exposure
+            adjustment_factor = max((target_mean / mean_brightness), 0.5)  # Cap at 0.5x decrease per step
+            new_exposure = current_exposure * adjustment_factor
+        
+        # Clamp to valid range
+        new_exposure = max(min_exposure, min(new_exposure, max_exposure))
+        
+        # Check if we're stuck at limits
+        if new_exposure == current_exposure:
+            print(f"⚠ Exposure at limit ({current_exposure:.2f} ms), cannot improve further")
+            return current_exposure
+        
+        # Apply new exposure
+        current_exposure = new_exposure
+        mmc.setProperty(camera_device, "Exposure", current_exposure)
+        time.sleep(0.1)  # Allow camera to adjust
+    
+    print(f"⚠ Max iterations reached. Final exposure: {current_exposure:.2f} ms (brightness: {mean_brightness:.1f})")
+    return current_exposure
+
 def main():
     global_stopwatch = Stopwatch()
     
@@ -35,11 +113,22 @@ def main():
 
     # Initialize the Micro-Manager core
     mmc = pymmcore_plus.CMMCorePlus()
-    mmc.loadSystemConfiguration(r"C:\Users\Sipe_Lab\Downloads\MMConfig_thorcam.cfg")
+    mmc.loadSystemConfiguration(r"C:\Program Files\Micro-Manager-2.0\ThorCam.cfg")
     mmc.setCameraDevice(camera_device)
-    # Set camera exposure lower to make the image dimmer
-    mmc.setProperty(camera_device, "Exposure", 4)  # Set to your desired value in ms (e.g., 1 for minimum)
-
+    
+    # Auto-adjust exposure for optimal brightness
+    auto_adjust_exposure(mmc, camera_device, target_mean_8bit=105, tolerance_8bit=10)
+    
+    # Detect bit depth for normalization
+    bit_depth = mmc.getImageBitDepth()
+    
+    # Calculate normalization factor to convert to 8-bit
+    if bit_depth > 8:
+        normalization_factor = (2 ** bit_depth - 1) / 255.0
+        print(f"Normalizing {bit_depth}-bit to 8-bit (dividing by {normalization_factor:.2f})")
+    else:
+        normalization_factor = 1.0
+    
     #print(mmc.getDevicePropertyNames(camera_device))
 
     # Video output settings
@@ -86,12 +175,18 @@ def main():
                     image = mmc.popNextImage()  # Retrieve the next image
                     frame = np.reshape(image, (frame_height, frame_width))  # Reshape to 2D array
                     
+                    # Normalize to 8-bit if needed
+                    if normalization_factor > 1.0:
+                        frame_8bit = (frame / normalization_factor).astype(np.uint8)
+                    else:
+                        frame_8bit = frame.astype(np.uint8)
+                    
                     # Always show live view
-                    cv2.imshow("Live View", frame.astype(np.uint8))
+                    cv2.imshow("Live View", frame_8bit)
                     cv2.waitKey(1)
                     
                     # Save frame
-                    video_writer.write(frame.astype(np.uint8))
+                    video_writer.write(frame_8bit)
                     saved_frames += 1
                     
                     # Write time and frame number to text file
@@ -115,7 +210,14 @@ def main():
         while mmc.getRemainingImageCount() > 0:
             image = mmc.popNextImage()  # Retrieve the next image
             frame = np.reshape(image, (frame_height, frame_width))  # Reshape to 2D array
-            video_writer.write(frame.astype(np.uint8))  # Write frame to video
+            
+            # Normalize to 8-bit if needed
+            if normalization_factor > 1.0:
+                frame_8bit = (frame / normalization_factor).astype(np.uint8)
+            else:
+                frame_8bit = frame.astype(np.uint8)
+            
+            video_writer.write(frame_8bit)  # Write frame to video
             num_frames += 1
             log_file.write(f"{global_stopwatch.get_elapsed_time():.2f}\t{num_frames}\n")
             log_file.flush()
