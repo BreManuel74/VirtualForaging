@@ -117,17 +117,18 @@ def main():
     mmc.setCameraDevice(camera_device)
     
     # Auto-adjust exposure for optimal brightness
-    auto_adjust_exposure(mmc, camera_device, target_mean_8bit=105, tolerance_8bit=10)
+    auto_adjust_exposure(mmc, camera_device, target_mean_8bit=110, tolerance_8bit=10)
     
-    # Detect bit depth for normalization
+    # Detect bit depth for fast conversion to 8-bit using bit shift
     bit_depth = mmc.getImageBitDepth()
     
-    # Calculate normalization factor to convert to 8-bit
+    # Use bit shift for fast conversion (integer operation, not float division)
     if bit_depth > 8:
-        normalization_factor = (2 ** bit_depth - 1) / 255.0
-        print(f"Normalizing {bit_depth}-bit to 8-bit (dividing by {normalization_factor:.2f})")
+        bit_shift = bit_depth - 8
+        print(f"Camera: {bit_depth}-bit, converting to 8-bit using right shift by {bit_shift} bits")
     else:
-        normalization_factor = 1.0
+        bit_shift = 0
+        print(f"Camera: {bit_depth}-bit, no conversion needed")
     
     #print(mmc.getDevicePropertyNames(camera_device))
 
@@ -157,6 +158,11 @@ def main():
         frame_interval = 1.0 / fps  # Time between frames at desired FPS
         next_frame_time = time.time()  # When to capture next frame
         saved_frames = 0
+        
+        # Performance: reduce GUI updates and batch log writes
+        display_interval = 10  # Update display every N frames (2x per second at 20fps)
+        log_buffer = []  # Buffer log entries
+        log_flush_interval = 40  # Flush every N frames (2x per second)
 
         while True:
             if os.path.exists(stop_file):
@@ -175,23 +181,27 @@ def main():
                     image = mmc.popNextImage()  # Retrieve the next image
                     frame = np.reshape(image, (frame_height, frame_width))  # Reshape to 2D array
                     
-                    # Normalize to 8-bit if needed
-                    if normalization_factor > 1.0:
-                        frame_8bit = (frame / normalization_factor).astype(np.uint8)
+                    # Convert to 8-bit using FAST bit shift (not slow division)
+                    if bit_shift > 0:
+                        frame_8bit = (frame >> bit_shift).astype(np.uint8)
                     else:
                         frame_8bit = frame.astype(np.uint8)
                     
-                    # Always show live view
-                    cv2.imshow("Live View", frame_8bit)
-                    cv2.waitKey(1)
-                    
-                    # Save frame
+                    # Save frame first (priority)
                     video_writer.write(frame_8bit)
                     saved_frames += 1
                     
-                    # Write time and frame number to text file
-                    log_file.write(f"{global_stopwatch.get_elapsed_time():.2f}\t{saved_frames}\n")
-                    log_file.flush()
+                    # Live view disabled for performance testing
+                    # if saved_frames % display_interval == 0:
+                    #     cv2.imshow("Live View", frame_8bit)
+                    #     cv2.waitKey(1)
+                    
+                    # Buffer log entries and flush periodically
+                    log_buffer.append(f"{global_stopwatch.get_elapsed_time():.2f}\t{saved_frames}\n")
+                    if saved_frames % log_flush_interval == 0:
+                        log_file.writelines(log_buffer)
+                        log_file.flush()
+                        log_buffer.clear()
                     
                     # Calculate next frame time - add frame_interval to the original next_frame_time
                     # This prevents drift that could occur if we used current_time + frame_interval
@@ -205,15 +215,20 @@ def main():
             # Small sleep to prevent busy-waiting, but short enough to not miss frame times
             time.sleep(0.0005)
     finally:
+        # Flush any remaining log entries
+        if log_buffer:
+            log_file.writelines(log_buffer)
+            log_file.flush()
+        
         # Process any remaining frames in the buffer before stopping
         print("Processing remaining frames in buffer...")
         while mmc.getRemainingImageCount() > 0:
             image = mmc.popNextImage()  # Retrieve the next image
             frame = np.reshape(image, (frame_height, frame_width))  # Reshape to 2D array
             
-            # Normalize to 8-bit if needed
-            if normalization_factor > 1.0:
-                frame_8bit = (frame / normalization_factor).astype(np.uint8)
+            # Convert to 8-bit using FAST bit shift
+            if bit_shift > 0:
+                frame_8bit = (frame >> bit_shift).astype(np.uint8)
             else:
                 frame_8bit = frame.astype(np.uint8)
             
