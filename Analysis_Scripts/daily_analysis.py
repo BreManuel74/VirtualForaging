@@ -7,11 +7,17 @@ import pandas as pd
 import ast
 import numpy as np
 import os
+import sys
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
 from scipy.stats import norm
 import tkinter as tk
 from tkinter import filedialog
+
+# Add Analysis_Scripts to path to import lick detection algorithm
+script_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, script_dir)
+import lick_detection_algorithm as lda
 
 class LickAnalysis:
     def __init__(self, trial_log_path, capacitive_path):
@@ -21,10 +27,22 @@ class LickAnalysis:
         self.trial_log_df = pd.read_csv(trial_log_path, engine='python')
         self.capacitive_df = pd.read_csv(capacitive_path, comment='/', engine='python')
 
-        self.lick_cutoff = (self.capacitive_df['capacitive_value'].quantile(0.99)) / 2
-        print(f"Using lick cutoff value: {self.lick_cutoff}")
-        self.lick_bout_times = self.capacitive_df.loc[
-            self.capacitive_df['capacitive_value'] > self.lick_cutoff, 'elapsed_time'
+        # Use KDE-based lick detection algorithm with dynamic threshold
+        cap_df = self.capacitive_df.copy()
+        cap_df['Time_sec'] = cap_df['elapsed_time']
+        
+        # Compute KDE normalization
+        kde_value = lda.compute_KDE(cap_df, 'capacitive_value')
+        cap_df = lda.compute_KDE_normalizations(cap_df, 'capacitive_value', kde_value)
+        
+        # Detect lick events using dynamic threshold (max_deviation / 2)
+        events_df, threshold_used = lda.detect_events_above_threshold(cap_df, 'capacitive_value', threshold=None)
+        
+        print(f"Using dynamic lick threshold: {threshold_used:.4f}")
+        
+        # Extract times where lick events were detected
+        self.lick_bout_times = events_df.loc[
+            events_df['capacitive_value_event'] == True, 'Time_sec'
         ].values
 
     @staticmethod
