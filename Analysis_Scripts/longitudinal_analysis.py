@@ -561,18 +561,37 @@ def analyze_mouse_data(data_files, markers, starting_conditions, save_lick_plots
         
         # Day-by-day comparison
         print(f"\nDay-by-Day Comparison:")
+        print(f"  (Showing all comparisons with sample sizes and p-values)")
         for day in range(max_days):
             male_day = male_rewards_per_min[:, day]
             female_day = female_rewards_per_min[:, day]
             male_day = male_day[~np.isnan(male_day)]
             female_day = female_day[~np.isnan(female_day)]
             
-            if len(male_day) > 1 and len(female_day) > 1:
+            n_male = len(male_day)
+            n_female = len(female_day)
+            mean_male = np.mean(male_day) if n_male > 0 else np.nan
+            mean_female = np.mean(female_day) if n_female > 0 else np.nan
+            
+            if n_male > 1 and n_female > 1:
                 t_stat, p_value = stats.ttest_ind(male_day, female_day)
-                if p_value < 0.05:
+                
+                sig_marker = ""
+                if p_value < 0.001:
+                    sig_marker = " ***"
                     sex_sig_days.append((day, t_stat, p_value))
-                    sig_marker = "***" if p_value < 0.001 else "**" if p_value < 0.01 else "*"
-                    print(f"  Day {day}: t={t_stat:.3f}, p={p_value:.4f} {sig_marker}")
+                elif p_value < 0.01:
+                    sig_marker = " **"
+                    sex_sig_days.append((day, t_stat, p_value))
+                elif p_value < 0.05:
+                    sig_marker = " *"
+                    sex_sig_days.append((day, t_stat, p_value))
+                else:
+                    sig_marker = " ns"
+                
+                print(f"  Day {day}: n_male={n_male}, n_female={n_female}, Mean_male={mean_male:.3f}, Mean_female={mean_female:.3f}, t={t_stat:.3f}, p={p_value:.4f}{sig_marker}")
+            elif n_male > 0 or n_female > 0:
+                print(f"  Day {day}: n_male={n_male}, n_female={n_female} - Insufficient data (need n>1 for both groups)")
         
         if not sex_sig_days:
             print(f"  No significant differences found at individual days (p < 0.05)")
@@ -688,39 +707,72 @@ def analyze_mouse_data(data_files, markers, starting_conditions, save_lick_plots
         
         # Day-by-day comparisons
         print(f"\nDay-by-Day Comparisons:")
-        # Get padded data for each condition
+        print(f"  (Showing all comparisons with sample sizes and p-values)")
+        # First find the global maximum length across all conditions
+        global_max_len = max(max(len(r) for r in rewards_list) for rewards_list in condition_groups.values())
+        
+        # Pad all conditions to the same global maximum length
         condition_padded = {}
         for condition, rewards_list in condition_groups.items():
-            max_len = max(len(r) for r in rewards_list)
-            condition_padded[condition] = np.array([np.pad(r, (0, max_len - len(r)), 
+            condition_padded[condition] = np.array([np.pad(r, (0, global_max_len - len(r)), 
                                                     constant_values=np.nan) for r in rewards_list])
         
-        max_len = max(arr.shape[1] for arr in condition_padded.values())
-        
-        for day in range(max_len):
+        has_any_comparison = False
+        for day in range(global_max_len):
             day_sig = False
+            day_has_test = False
             for i in range(len(conditions_list)):
                 for j in range(i + 1, len(conditions_list)):
                     cond1 = conditions_list[i]
                     cond2 = conditions_list[j]
                     
-                    cond1_day = condition_padded[cond1][:, day] if day < condition_padded[cond1].shape[1] else np.array([])
-                    cond2_day = condition_padded[cond2][:, day] if day < condition_padded[cond2].shape[1] else np.array([])
+                    cond1_day = condition_padded[cond1][:, day]
+                    cond2_day = condition_padded[cond2][:, day]
                     
                     cond1_day = cond1_day[~np.isnan(cond1_day)]
                     cond2_day = cond2_day[~np.isnan(cond2_day)]
                     
-                    if len(cond1_day) > 1 and len(cond2_day) > 1:
+                    n1 = len(cond1_day)
+                    n2 = len(cond2_day)
+                    
+                    # Calculate means for display
+                    mean1 = np.mean(cond1_day) if n1 > 0 else np.nan
+                    mean2 = np.mean(cond2_day) if n2 > 0 else np.nan
+                    
+                    if n1 > 1 and n2 > 1:
+                        # Can perform t-test
                         t_stat, p_value = stats.ttest_ind(cond1_day, cond2_day)
-                        if p_value < 0.05:
+                        day_has_test = True
+                        has_any_comparison = True
+                        
+                        sig_marker = ""
+                        if p_value < 0.001:
+                            sig_marker = " ***"
                             if not day_sig:
                                 condition_reward_sig_days.append(day)
                                 day_sig = True
-                            sig_marker = "***" if p_value < 0.001 else "**" if p_value < 0.01 else "*"
-                            print(f"  Day {day} ({cond1} vs {cond2}): t={t_stat:.3f}, p={p_value:.4f} {sig_marker}")
+                        elif p_value < 0.01:
+                            sig_marker = " **"
+                            if not day_sig:
+                                condition_reward_sig_days.append(day)
+                                day_sig = True
+                        elif p_value < 0.05:
+                            sig_marker = " *"
+                            if not day_sig:
+                                condition_reward_sig_days.append(day)
+                                day_sig = True
+                        else:
+                            sig_marker = " ns"
+                        
+                        print(f"  Day {day} ({cond1} vs {cond2}): n1={n1}, n2={n2}, Mean1={mean1:.3f}, Mean2={mean2:.3f}, t={t_stat:.3f}, p={p_value:.4f}{sig_marker}")
+                    elif n1 > 0 or n2 > 0:
+                        # Insufficient sample size
+                        print(f"  Day {day} ({cond1} vs {cond2}): n1={n1}, n2={n2} - Insufficient data (need n>1 for both groups)")
         
-        if not condition_reward_sig_days:
-            print(f"  No significant differences found at individual days (p < 0.05)")
+        if not has_any_comparison:
+            print(f"  No day-by-day comparisons possible (insufficient data)")
+        elif not condition_reward_sig_days:
+            print(f"\n  Summary: No significant differences found at individual days (p < 0.05)")
     else:
         print("  Only one condition found - cannot perform comparison")
     print("=" * 70 + "\n")
@@ -830,39 +882,72 @@ def analyze_mouse_data(data_files, markers, starting_conditions, save_lick_plots
         
         # Day-by-day comparisons
         print(f"\nDay-by-Day Comparisons:")
-        # Get padded data for each condition
+        print(f"  (Showing all comparisons with sample sizes and p-values)")
+        # First find the global maximum length across all conditions
+        global_max_len = max(max(len(s) for s in speed_list) for speed_list in condition_speed_groups.values())
+        
+        # Pad all conditions to the same global maximum length
         condition_speed_padded = {}
         for condition, speed_list in condition_speed_groups.items():
-            max_len = max(len(s) for s in speed_list)
-            condition_speed_padded[condition] = np.array([np.pad(s, (0, max_len - len(s)), 
+            condition_speed_padded[condition] = np.array([np.pad(s, (0, global_max_len - len(s)), 
                                                          constant_values=np.nan) for s in speed_list])
         
-        max_len = max(arr.shape[1] for arr in condition_speed_padded.values())
-        
-        for day in range(max_len):
+        has_any_comparison = False
+        for day in range(global_max_len):
             day_sig = False
+            day_has_test = False
             for i in range(len(conditions_list)):
                 for j in range(i + 1, len(conditions_list)):
                     cond1 = conditions_list[i]
                     cond2 = conditions_list[j]
                     
-                    cond1_day = condition_speed_padded[cond1][:, day] if day < condition_speed_padded[cond1].shape[1] else np.array([])
-                    cond2_day = condition_speed_padded[cond2][:, day] if day < condition_speed_padded[cond2].shape[1] else np.array([])
+                    cond1_day = condition_speed_padded[cond1][:, day]
+                    cond2_day = condition_speed_padded[cond2][:, day]
                     
                     cond1_day = cond1_day[~np.isnan(cond1_day)]
                     cond2_day = cond2_day[~np.isnan(cond2_day)]
                     
-                    if len(cond1_day) > 1 and len(cond2_day) > 1:
+                    n1 = len(cond1_day)
+                    n2 = len(cond2_day)
+                    
+                    # Calculate means for display
+                    mean1 = np.mean(cond1_day) if n1 > 0 else np.nan
+                    mean2 = np.mean(cond2_day) if n2 > 0 else np.nan
+                    
+                    if n1 > 1 and n2 > 1:
+                        # Can perform t-test
                         t_stat, p_value = stats.ttest_ind(cond1_day, cond2_day)
-                        if p_value < 0.05:
+                        day_has_test = True
+                        has_any_comparison = True
+                        
+                        sig_marker = ""
+                        if p_value < 0.001:
+                            sig_marker = " ***"
                             if not day_sig:
                                 condition_speed_sig_days.append(day)
                                 day_sig = True
-                            sig_marker = "***" if p_value < 0.001 else "**" if p_value < 0.01 else "*"
-                            print(f"  Day {day} ({cond1} vs {cond2}): t={t_stat:.3f}, p={p_value:.4f} {sig_marker}")
+                        elif p_value < 0.01:
+                            sig_marker = " **"
+                            if not day_sig:
+                                condition_speed_sig_days.append(day)
+                                day_sig = True
+                        elif p_value < 0.05:
+                            sig_marker = " *"
+                            if not day_sig:
+                                condition_speed_sig_days.append(day)
+                                day_sig = True
+                        else:
+                            sig_marker = " ns"
+                        
+                        print(f"  Day {day} ({cond1} vs {cond2}): n1={n1}, n2={n2}, Mean1={mean1:.3f} cm/s, Mean2={mean2:.3f} cm/s, t={t_stat:.3f}, p={p_value:.4f}{sig_marker}")
+                    elif n1 > 0 or n2 > 0:
+                        # Insufficient sample size
+                        print(f"  Day {day} ({cond1} vs {cond2}): n1={n1}, n2={n2} - Insufficient data (need n>1 for both groups)")
         
-        if not condition_speed_sig_days:
-            print(f"  No significant differences found at individual days (p < 0.05)")
+        if not has_any_comparison:
+            print(f"  No day-by-day comparisons possible (insufficient data)")
+        elif not condition_speed_sig_days:
+            print(f"\n  Summary: No significant differences found at individual days (p < 0.05)")
     else:
         print("  Only one condition found - cannot perform comparison")
     print("=" * 70 + "\n")
