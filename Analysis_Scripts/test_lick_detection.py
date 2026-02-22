@@ -204,6 +204,27 @@ def main():
     )
     
     print("\n✓ Visualization displayed")
+    
+    # Ask if user wants to save the figure
+    save_input = input("\nSave figure? (y/n) [default=n]: ").strip().lower()
+    if save_input in ['y', 'yes']:
+        # Default output filename based on input CSV
+        default_output = os.path.splitext(csv_path)[0] + '_lick_analysis.svg'
+        output_path = input(f"Enter output path [default={default_output}]: ").strip()
+        
+        if not output_path:
+            output_path = default_output
+        
+        # Ensure .svg extension
+        if not output_path.lower().endswith('.svg'):
+            output_path += '.svg'
+        
+        try:
+            fig.savefig(output_path, format='svg', bbox_inches='tight')
+            print(f"✓ Figure saved to: {output_path}")
+        except Exception as e:
+            print(f"✗ Error saving figure: {e}")
+    
     print(f"\nAnalysis complete for: {filename}")
     print("="*60 + "\n")
 

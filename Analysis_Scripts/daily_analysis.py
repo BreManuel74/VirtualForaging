@@ -951,10 +951,10 @@ class DPrimePlotter:
         else:
             fig3 = ax.figure
             
-        rects1 = ax.bar(x - 1.5*width, hits, width, label='Hits', color='green')
-        rects2 = ax.bar(x - 0.5*width, misses, width, label='Misses', color='red')
-        rects3 = ax.bar(x + 0.5*width, correct_rejections, width, label='Correct Rejections', color='blue')
-        rects4 = ax.bar(x + 1.5*width, false_alarms, width, label='False Alarms', color='orange')
+        rects1 = ax.bar(x - 1.5*width, hits, width, label='Hits', color='blue')
+        rects2 = ax.bar(x - 0.5*width, misses, width, label='Misses', color='powderblue', edgecolor='powderblue')
+        rects3 = ax.bar(x + 0.5*width, correct_rejections, width, label='Correct Rejections', color='salmon', edgecolor='salmon')
+        rects4 = ax.bar(x + 1.5*width, false_alarms, width, label='False Alarms', color='red', edgecolor='red')
 
         ax.set_ylabel('Count')
         ax.set_title('Hits, Misses, Correct Rejections, False Alarms by Quarter')

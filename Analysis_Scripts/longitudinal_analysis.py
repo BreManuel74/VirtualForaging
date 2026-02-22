@@ -156,8 +156,8 @@ def analyze_mouse_data(data_files, markers, starting_conditions, save_lick_plots
                 # Read the treadmill data from the file path
                 treadmill_data = pd.read_csv(row['treadmill'])
                 
-                # Calculate average speed for this date
-                avg_speed = treadmill_data['speed'].mean()
+                # Calculate average speed for this date (convert from mm/s to cm/s)
+                avg_speed = treadmill_data['speed'].mean() / 10.0
                 
                 # Read capacitive data for lick detection
                 capacitive_data = pd.read_csv(row['capacitive'])
@@ -317,8 +317,8 @@ def analyze_mouse_data(data_files, markers, starting_conditions, save_lick_plots
     # Configure speed plot
     plt.figure(speed_fig.number)
     plt.title('Average Speed Over Time')
-    plt.xlabel('Day')
-    plt.ylabel('Average Speed')
+    plt.xlabel('Training Day')
+    plt.ylabel('Average Speed (cm/s)')
     plt.grid(False)
     ax = plt.gca()
     ax.tick_params(axis='both', direction='in')
@@ -368,7 +368,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, save_lick_plots
     # Configure lick count plot
     plt.figure(lick_fig.number)
     plt.title('Lick Counts Over Time')
-    plt.xlabel('Day')
+    plt.xlabel('Training Day')
     plt.ylabel('Number of Licks')
     plt.grid(False)
     ax = plt.gca()
@@ -384,8 +384,8 @@ def analyze_mouse_data(data_files, markers, starting_conditions, save_lick_plots
     
     # Configure reward count plot
     plt.figure(reward_fig.number)
-    plt.title('Number of Rewards Over Time')
-    plt.xlabel('Day')
+    plt.title('Total Reward Count Over Time')
+    plt.xlabel('Training Day')
     plt.ylabel('Number of Rewards')
     plt.grid(False)
     ax = plt.gca()
@@ -515,8 +515,8 @@ def analyze_mouse_data(data_files, markers, starting_conditions, save_lick_plots
 
     # Configure sex-specific rewards plot
     plt.title('Sex-Specific Average Rewards Per Minute')
-    plt.xlabel('Day')
-    plt.ylabel('Rewards per Minute (Mean ± SEM)')
+    plt.xlabel('Training Day')
+    plt.ylabel('Average Rewards per Minute')
     plt.grid(False)
     ax = plt.gca()
     ax.tick_params(axis='both', direction='in')
@@ -568,8 +568,8 @@ def analyze_mouse_data(data_files, markers, starting_conditions, save_lick_plots
     
     # Configure condition-based rewards plot
     plt.title('Average Rewards Per Minute by Starting Condition')
-    plt.xlabel('Day')
-    plt.ylabel('Rewards per Minute (Mean ± SEM)')
+    plt.xlabel('Training Day')
+    plt.ylabel('Average Rewards per Minute')
     plt.grid(False)
     ax = plt.gca()
     ax.tick_params(axis='both', direction='in')
@@ -619,8 +619,8 @@ def analyze_mouse_data(data_files, markers, starting_conditions, save_lick_plots
     
     # Configure condition-based speed plot
     plt.title('Average Speed by Starting Condition')
-    plt.xlabel('Day')
-    plt.ylabel('Average Speed (Mean ± SEM)')
+    plt.xlabel('Training Day')
+    plt.ylabel('Average Speed (cm/s)')
     plt.grid(False)
     ax = plt.gca()
     ax.tick_params(axis='both', direction='in')
@@ -707,7 +707,7 @@ def main():
                 continue
         
         # Ask if user wants to save lick detection plots
-        print("\n" + "=" * 60)
+       # print("\n" + "=" * 60)
         save_lick_plots_input = input("Generate lick detection plots for each session? (yes/no): ").lower().strip()
         save_lick_plots = save_lick_plots_input.startswith('y')
         
@@ -723,7 +723,7 @@ def main():
                 save_lick_plots = False
             else:
                 print(f"Lick detection plots will be saved to: {output_dir}")
-        print("=" * 60 + "\n")
+        #print("=" * 60 + "\n")
             
         # Analyze data and plot results
         speed_fig, sensitivity_fig, lick_fig, reward_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, condition_speed_fig, level_fig, all_results = analyze_mouse_data(

@@ -66,21 +66,19 @@ class LickAnalysis:
     def prepare_arrays(self):
         """Extract reward zone (stay zone) entry times directly from trial log.
         
+        Only extracts the FIRST zone entry per trial, excluding re-entries.
+        Re-entries should not be counted as misses or included in analyses.
+        
         Returns:
-            reward_texture_change_time: 2D array of stay zone entry times (reward zones)
+            reward_texture_change_time: 1D array of FIRST stay zone entry time per trial
         """
         stay_texture_change_time = self.trial_log_df['stay_texture_change_time'].apply(self.safe_literal_eval)
         
-        # Find maximum number of zones per trial
-        max_len = stay_texture_change_time.apply(len).max()
+        # Extract only the FIRST entry per trial (exclude re-entries)
+        first_entries = stay_texture_change_time.apply(lambda x: x[0] if len(x) > 0 else np.nan)
         
-        def pad_list(lst, length):
-            return lst + [np.nan] * (length - len(lst))
-        
-        # Pad all rows to same length and convert to 2D array
-        reward_texture_change_time = np.array(
-            stay_texture_change_time.apply(lambda x: pad_list(x, max_len)).tolist()
-        )
+        # Convert to 1D array (reshape to maintain compatibility with existing code)
+        reward_texture_change_time = first_entries.values.reshape(-1, 1)
         
         return reward_texture_change_time
 
@@ -341,21 +339,19 @@ class SpeedAnalysis:
     def prepare_arrays(self):
         """Extract punish zone (go zone) entry times directly from trial log.
         
+        Only extracts the FIRST zone entry per trial, excluding re-entries.
+        Re-entries should not be counted as false alarms or included in analyses.
+        
         Returns:
-            punish_texture_change_time: 2D array of go zone entry times (punish zones)
+            punish_texture_change_time: 1D array of FIRST go zone entry time per trial
         """
         go_texture_change_time = self.trial_log_df['go_texture_change_time'].apply(self.safe_literal_eval)
         
-        # Find maximum number of zones per trial
-        max_len = go_texture_change_time.apply(len).max()
+        # Extract only the FIRST entry per trial (exclude re-entries)
+        first_entries = go_texture_change_time.apply(lambda x: x[0] if len(x) > 0 else np.nan)
         
-        def pad_list(lst, length):
-            return lst + [np.nan] * (length - len(lst))
-        
-        # Pad all rows to same length and convert to 2D array
-        punish_texture_change_time = np.array(
-            go_texture_change_time.apply(lambda x: pad_list(x, max_len)).tolist()
-        )
+        # Convert to 1D array (reshape to maintain compatibility with existing code)
+        punish_texture_change_time = first_entries.values.reshape(-1, 1)
         
         return punish_texture_change_time
 
@@ -1688,29 +1684,31 @@ if __name__ == "__main__":
     # Prompt for row index
     row_index = int(input("Enter the row index (0-based) to update in the CSV: "))
 
-    # Calculate the number of trials as the total number of zone entries (both reward and punish zones)
+    # Calculate the number of trials as the number of trials with at least one zone entry
+    # (excluding re-entries - only counting first entry per trial)
     def count_total_trials(trial_log_df):
-        def safe_count(val):
+        def has_zone_entry(val):
             try:
                 if pd.isna(val) or val == '':
                     return 0
                 if isinstance(val, list):
-                    return len(val)
+                    return 1 if len(val) > 0 else 0
                 if isinstance(val, str):
                     # Try to parse as list
                     import ast
                     parsed = ast.literal_eval(val)
                     if isinstance(parsed, list):
-                        return len(parsed)
+                        return 1 if len(parsed) > 0 else 0
                     return 1
                 return 1
             except Exception:
-                return 1
+                return 0
         
-        # Count entries in both stay (reward) and go (punish) zones
-        stay_count = trial_log_df['stay_texture_change_time'].apply(safe_count).sum()
-        go_count = trial_log_df['go_texture_change_time'].apply(safe_count).sum()
-        return stay_count + go_count
+        # Count trials with at least one stay (reward) or go (punish) zone entry
+        # Note: We only count FIRST entries, not re-entries
+        stay_trials = trial_log_df['stay_texture_change_time'].apply(has_zone_entry).sum()
+        go_trials = trial_log_df['go_texture_change_time'].apply(has_zone_entry).sum()
+        return stay_trials + go_trials
 
     trial_log_df = pd.read_csv(trial_log_path, engine='python')
     n_trials = count_total_trials(trial_log_df)

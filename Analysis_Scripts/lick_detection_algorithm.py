@@ -201,8 +201,8 @@ def detect_events_above_threshold(
     if threshold is None:
         max_deviation = deviations.max()
         threshold = max_deviation / 2.0
-        print(f"[Dynamic Threshold] Max deviation: {max_deviation:.4f}")
-        print(f"[Dynamic Threshold] Calculated threshold: {threshold:.4f} (max/2)")
+        # print(f"[Dynamic Threshold] Max deviation: {max_deviation:.4f}")
+        # print(f"[Dynamic Threshold] Calculated threshold: {threshold:.4f} (max/2)")
     
     # Find peaks in the deviation signal using scipy.signal.find_peaks
     peaks, _ = find_peaks(clean_deviations, height=threshold, distance=1)
