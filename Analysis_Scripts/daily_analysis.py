@@ -937,7 +937,7 @@ class LickPlotter:
     
 class DPrimePlotter:
     @staticmethod
-    def plot_hits_misses_cr_fa_bar(df_quarters, df_puff_quarters, ax=None):
+    def plot_hits_misses_cr_fa_bar(df_quarters, df_puff_quarters, dprime_values=None, ax=None):
         hits = [0 if pd.isna(df_quarters[f'Q{i+1}_hits'].iloc[i]) else df_quarters[f'Q{i+1}_hits'].iloc[i] for i in range(4)]
         misses = [0 if pd.isna(df_quarters[f'Q{i+1}_misses'].iloc[i]) else df_quarters[f'Q{i+1}_misses'].iloc[i] for i in range(4)]
         correct_rejections = [0 if pd.isna(df_puff_quarters[f'Q{i+1}_correct_rejections'].iloc[i]) else df_puff_quarters[f'Q{i+1}_correct_rejections'].iloc[i] for i in range(4)]
@@ -961,7 +961,29 @@ class DPrimePlotter:
         ax.set_xticks(x)
         ax.set_xticklabels(quarters_labels)
         ax.set_xlim(-0.5, len(x) - 0.5)
-        ax.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+        
+        # Create first legend for bar categories
+        first_legend = ax.legend(loc='center left', bbox_to_anchor=(1, 0.5))
+        
+        # Add second legend for d-prime values if provided
+        if dprime_values is not None:
+            # Create text for d-prime legend
+            dprime_text_lines = ["d' values:"]
+            for i, dprime in enumerate(dprime_values):
+                if pd.isna(dprime):
+                    dprime_text_lines.append(f"Q{i+1}: N/A")
+                else:
+                    dprime_text_lines.append(f"Q{i+1}: {dprime:.2f}")
+            
+            # Create a text box for d-prime values
+            dprime_text = '\n'.join(dprime_text_lines)
+            ax.text(1.02, 0.15, dprime_text, transform=ax.transAxes,
+                   fontsize=10, verticalalignment='top',
+                   bbox=dict(boxstyle='round', facecolor='white', alpha=0.5))
+            
+            # Add the first legend back so both are visible
+            ax.add_artist(first_legend)
+        
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.yaxis.set_major_locator(MaxNLocator(integer=True))
@@ -1658,6 +1680,11 @@ if __name__ == "__main__":
     
     plt.figure()  # Clear any lingering figure references
     
+    # Set font parameters for SVG to ensure text is saved as editable text
+    plt.rcParams['font.family'] = 'sans-serif'
+    plt.rcParams['font.sans-serif'] = ['Arial']
+    plt.rcParams['svg.fonttype'] = 'none'
+    
     # Create and explicitly save the D-Prime plot
     try:
         plt.close('dprime')  # Close any existing figure with this name
@@ -1665,7 +1692,7 @@ if __name__ == "__main__":
         pass
     fig_dprime = plt.figure(figsize=(10, 5), num='dprime')
     ax_dprime = fig_dprime.add_subplot(111)
-    DPrimePlotter.plot_hits_misses_cr_fa_bar(df_quarters, df_puff_quarters, ax=ax_dprime)
+    DPrimePlotter.plot_hits_misses_cr_fa_bar(df_quarters, df_puff_quarters, dprime_values=dprime_values, ax=ax_dprime)
     plt.tight_layout()
     save_figure(fig_dprime, "dprime_hits_misses_chart")
     
