@@ -44,6 +44,7 @@ class TrialLogging:
             'texture_history': np.full(max_trials, np.nan, dtype=object),
             'go_texture_change_time': np.full(max_trials, np.nan),
             'stay_texture_change_time': np.full(max_trials, np.nan),
+            'zone_re_entry_time': np.full(max_trials, np.nan),
             'stay_zone_active_state': pd.array([pd.NA] * max_trials, dtype='boolean'),
             'segments_until_revert': np.full(max_trials, np.nan),
             'go_texture_revert_time': np.full(max_trials, np.nan),
@@ -110,6 +111,9 @@ class TrialLogging:
 
     def log_stay_zone_active_state(self, state: bool) -> None:
         self._append_value('stay_zone_active_state', state)
+
+    def log_zone_re_entry_time(self, t: float) -> None:
+        self._append_value('zone_re_entry_time', float(t))
 
 class DataGenerator:
     """

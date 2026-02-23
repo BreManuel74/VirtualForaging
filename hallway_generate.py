@@ -1457,6 +1457,7 @@ class MousePortal(ShowBase):
                 # Re-log this re-entry time to GO/STAY-specific change column
                 elapsed_time = global_stopwatch.get_elapsed_time()
                 self.texture_time_history = np.append(self.texture_time_history, round(elapsed_time, 2))
+                self.trial_logger.log_zone_re_entry_time(round(elapsed_time, 2))
                 if self.current_texture == go_texture:
                     self.trial_logger.log_go_texture_change_time(round(elapsed_time, 2))
                 elif self.current_texture == stop_texture:
