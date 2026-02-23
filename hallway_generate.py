@@ -1434,9 +1434,9 @@ class MousePortal(ShowBase):
         # Get current segments at camera position using get_middle_segments
         middle_left, middle_right = corridor.get_middle_segments(4)
         if middle_right:  # Using right wall instead of left
-            self.current_texture = middle_right[2].getTexture().getFilename()
-            self.former_texture = middle_right[1].getTexture().getFilename()
-            self.current_segment_flag = corridor.get_segment_flag(middle_right[2])
+            self.current_texture = middle_right[3].getTexture().getFilename()
+            self.former_texture = middle_right[2].getTexture().getFilename()
+            self.current_segment_flag = corridor.get_segment_flag(middle_right[3])
 
             if self.current_texture == stop_texture and self.current_segment_flag == True:
                 self.enter_stay_time = global_stopwatch.get_elapsed_time()
