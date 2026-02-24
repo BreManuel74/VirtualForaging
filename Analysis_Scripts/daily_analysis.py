@@ -14,6 +14,13 @@ from scipy.stats import norm, ttest_rel
 import tkinter as tk
 from tkinter import filedialog
 
+# Configure matplotlib for SVG output with editable text
+plt.rcParams['font.family'] = 'sans-serif'
+plt.rcParams['font.sans-serif'] = ['Arial']
+plt.rcParams['svg.fonttype'] = 'none'  # Save text as actual text, not paths
+plt.rcParams['xtick.direction'] = 'in'  # Tick marks face inward
+plt.rcParams['ytick.direction'] = 'in'
+
 # Add Analysis_Scripts to path to import lick detection algorithm
 script_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, script_dir)
@@ -1676,6 +1683,226 @@ if __name__ == "__main__":
             lick_reward_pvalues.append(np.nan)
             lick_reward_tstats.append(np.nan)
 
+    # -------- PERFORM SESSION-WIDE T-TESTS (COLLAPSED ACROSS QUARTERS) --------
+    print("\n" + "="*60)
+    print("SESSION-WIDE T-TEST RESULTS (All Quarters Combined)")
+    print("="*60)
+
+    # Lick rewards - combine all quarters
+    all_licks_during_reward = []
+    all_licks_before_reward_zone = []
+    for q_data in quarter_data:
+        all_licks_during_reward.extend(q_data.get('licks_before_reward_list', []))
+        all_licks_before_reward_zone.extend(q_data.get('licks_before_reward_zone_list', []))
+
+    print(f"\nLick Rewards (Session-Wide):")
+    print(f"  N pairs: {len(all_licks_during_reward)}")
+    print(f"  Mean licks during reward zones: {np.mean(all_licks_during_reward) if all_licks_during_reward else 'N/A'}")
+    print(f"  Mean licks before reward zones: {np.mean(all_licks_before_reward_zone) if all_licks_before_reward_zone else 'N/A'}")
+
+    session_lick_t_stat = np.nan
+    session_lick_p_value = np.nan
+    if len(all_licks_during_reward) >= 2 and len(all_licks_before_reward_zone) >= 2 and len(all_licks_during_reward) == len(all_licks_before_reward_zone):
+        try:
+            t_stat, p_value = ttest_rel(all_licks_during_reward, all_licks_before_reward_zone)
+            session_lick_t_stat = t_stat
+            session_lick_p_value = p_value
+            print(f"  t-statistic: {t_stat:.4f}")
+            print(f"  p-value: {p_value:.4f}")
+            if p_value < 0.05:
+                print(f"  Result: SIGNIFICANT (p < 0.05)")
+            else:
+                print(f"  Result: Not significant")
+        except Exception as e:
+            print(f"  Warning: Could not perform t-test: {e}")
+    else:
+        print(f"  Insufficient data for t-test")
+
+    # Speed rewards - combine all quarters
+    all_speeds_during_reward = []
+    all_speeds_before_reward_zone = []
+    for q_data in speed_quarter_data:
+        speeds_during = q_data.get('speeds_before_reward_list', [])
+        speeds_before = q_data.get('speeds_before_reward_zone_list', [])
+        all_speeds_during_reward.extend([s for s in speeds_during if not np.isnan(s)])
+        all_speeds_before_reward_zone.extend([s for s in speeds_before if not np.isnan(s)])
+
+    print(f"\nSpeed Rewards (Session-Wide):")
+    print(f"  N pairs: {len(all_speeds_during_reward)}")
+    print(f"  Mean speed during reward zones: {np.mean(all_speeds_during_reward) if all_speeds_during_reward else 'N/A'}")
+    print(f"  Mean speed before reward zones: {np.mean(all_speeds_before_reward_zone) if all_speeds_before_reward_zone else 'N/A'}")
+
+    session_speed_reward_t_stat = np.nan
+    session_speed_reward_p_value = np.nan
+    if len(all_speeds_during_reward) >= 2 and len(all_speeds_before_reward_zone) >= 2 and len(all_speeds_during_reward) == len(all_speeds_before_reward_zone):
+        try:
+            t_stat, p_value = ttest_rel(all_speeds_during_reward, all_speeds_before_reward_zone)
+            session_speed_reward_t_stat = t_stat
+            session_speed_reward_p_value = p_value
+            print(f"  t-statistic: {t_stat:.4f}")
+            print(f"  p-value: {p_value:.4f}")
+            if p_value < 0.05:
+                print(f"  Result: SIGNIFICANT (p < 0.05)")
+            else:
+                print(f"  Result: Not significant")
+        except Exception as e:
+            print(f"  Warning: Could not perform t-test: {e}")
+    else:
+        print(f"  Insufficient data for t-test")
+
+    # Speed puffs - combine all quarters
+    all_speeds_during_puff = []
+    all_speeds_before_puff_zone = []
+    for q_data in puff_quarter_data:
+        speeds_during = q_data.get('speeds_before_puff_list', [])
+        speeds_before = q_data.get('speeds_before_puff_zone_list', [])
+        all_speeds_during_puff.extend([s for s in speeds_during if not np.isnan(s)])
+        all_speeds_before_puff_zone.extend([s for s in speeds_before if not np.isnan(s)])
+
+    print(f"\nSpeed Puffs (Session-Wide):")
+    print(f"  N pairs: {len(all_speeds_during_puff)}")
+    print(f"  Mean speed during puff zones: {np.mean(all_speeds_during_puff) if all_speeds_during_puff else 'N/A'}")
+    print(f"  Mean speed before puff zones: {np.mean(all_speeds_before_puff_zone) if all_speeds_before_puff_zone else 'N/A'}")
+
+    session_speed_puff_t_stat = np.nan
+    session_speed_puff_p_value = np.nan
+    if len(all_speeds_during_puff) >= 2 and len(all_speeds_before_puff_zone) >= 2 and len(all_speeds_during_puff) == len(all_speeds_before_puff_zone):
+        try:
+            t_stat, p_value = ttest_rel(all_speeds_during_puff, all_speeds_before_puff_zone)
+            session_speed_puff_t_stat = t_stat
+            session_speed_puff_p_value = p_value
+            print(f"  t-statistic: {t_stat:.4f}")
+            print(f"  p-value: {p_value:.4f}")
+            if p_value < 0.05:
+                print(f"  Result: SIGNIFICANT (p < 0.05)")
+            else:
+                print(f"  Result: Not significant")
+        except Exception as e:
+            print(f"  Warning: Could not perform t-test: {e}")
+    else:
+        print(f"  Insufficient data for t-test")
+
+    print("="*60)
+
+    # -------- CREATE SESSION-WIDE COMPARISON BAR PLOTS --------
+    
+    # Helper function to determine significance stars
+    def get_significance_stars(p_value):
+        """Return significance stars based on p-value: *** p<0.001, ** p<0.01, * p<0.05"""
+        if pd.isna(p_value):
+            return ""
+        elif p_value < 0.001:
+            return "***"
+        elif p_value < 0.01:
+            return "**"
+        elif p_value < 0.05:
+            return "*"
+        else:
+            return ""
+    
+    # Create figure with 3 subplots (one for each metric type)
+    fig_session_ttest, axs_session = plt.subplots(1, 3, figsize=(18, 5))
+    
+    # Plot 1: Lick Rewards Session-Wide Comparison
+    if len(all_licks_during_reward) > 0 and len(all_licks_before_reward_zone) > 0:
+        means_lick = [np.mean(all_licks_before_reward_zone), np.mean(all_licks_during_reward)]
+        sems_lick = [
+            np.std(all_licks_before_reward_zone) / np.sqrt(len(all_licks_before_reward_zone)),
+            np.std(all_licks_during_reward) / np.sqrt(len(all_licks_during_reward))
+        ]
+        x_pos = [0, 1]
+        bars = axs_session[0].bar(x_pos, means_lick, yerr=sems_lick, capsize=5, 
+                                    color=['#1f77b4', '#ff7f0e'], alpha=0.7, edgecolor='black')
+        axs_session[0].set_xticks(x_pos)
+        axs_session[0].set_xticklabels(['Before\nReward Zone', 'During\nReward Zone'])
+        axs_session[0].set_ylabel('Average Licks', fontsize=12)
+        axs_session[0].set_title('Lick Rewards: Session-Wide Comparison', fontsize=12, fontweight='bold')
+        axs_session[0].spines['top'].set_visible(False)
+        axs_session[0].spines['right'].set_visible(False)
+        
+        # Add significance stars
+        sig_stars = get_significance_stars(session_lick_p_value)
+        if sig_stars:
+            max_height = max(means_lick[0] + sems_lick[0], means_lick[1] + sems_lick[1])
+            axs_session[0].text(0.5, max_height * 1.1, sig_stars, ha='center', va='bottom', fontsize=20, fontweight='bold')
+            axs_session[0].plot([0, 1], [max_height * 1.05, max_height * 1.05], 'k-', linewidth=1)
+        
+        # Add n and p-value text
+        axs_session[0].text(0.5, -0.15, f'n = {len(all_licks_during_reward)}\np = {session_lick_p_value:.4f}' if not pd.isna(session_lick_p_value) else f'n = {len(all_licks_during_reward)}',
+                           ha='center', va='top', transform=axs_session[0].transAxes, fontsize=10)
+    else:
+        axs_session[0].text(0.5, 0.5, 'Insufficient Data', ha='center', va='center', 
+                           transform=axs_session[0].transAxes, fontsize=12)
+        axs_session[0].set_title('Lick Rewards: Session-Wide Comparison', fontsize=12, fontweight='bold')
+    
+    # Plot 2: Speed Rewards Session-Wide Comparison
+    if len(all_speeds_during_reward) > 0 and len(all_speeds_before_reward_zone) > 0:
+        means_speed_reward = [np.mean(all_speeds_before_reward_zone), np.mean(all_speeds_during_reward)]
+        sems_speed_reward = [
+            np.std(all_speeds_before_reward_zone) / np.sqrt(len(all_speeds_before_reward_zone)),
+            np.std(all_speeds_during_reward) / np.sqrt(len(all_speeds_during_reward))
+        ]
+        x_pos = [0, 1]
+        bars = axs_session[1].bar(x_pos, means_speed_reward, yerr=sems_speed_reward, capsize=5,
+                                    color=['#2ca02c', '#d62728'], alpha=0.7, edgecolor='black')
+        axs_session[1].set_xticks(x_pos)
+        axs_session[1].set_xticklabels(['Before\nReward Zone', 'During\nReward Zone'])
+        axs_session[1].set_ylabel('Average Speed (cm/s)', fontsize=12)
+        axs_session[1].set_title('Speed Rewards: Session-Wide Comparison', fontsize=12, fontweight='bold')
+        axs_session[1].spines['top'].set_visible(False)
+        axs_session[1].spines['right'].set_visible(False)
+        
+        # Add significance stars
+        sig_stars = get_significance_stars(session_speed_reward_p_value)
+        if sig_stars:
+            max_height = max(means_speed_reward[0] + sems_speed_reward[0], means_speed_reward[1] + sems_speed_reward[1])
+            axs_session[1].text(0.5, max_height * 1.1, sig_stars, ha='center', va='bottom', fontsize=20, fontweight='bold')
+            axs_session[1].plot([0, 1], [max_height * 1.05, max_height * 1.05], 'k-', linewidth=1)
+        
+        # Add n and p-value text
+        axs_session[1].text(0.5, -0.15, f'n = {len(all_speeds_during_reward)}\np = {session_speed_reward_p_value:.4f}' if not pd.isna(session_speed_reward_p_value) else f'n = {len(all_speeds_during_reward)}',
+                           ha='center', va='top', transform=axs_session[1].transAxes, fontsize=10)
+    else:
+        axs_session[1].text(0.5, 0.5, 'Insufficient Data', ha='center', va='center',
+                           transform=axs_session[1].transAxes, fontsize=12)
+        axs_session[1].set_title('Speed Rewards: Session-Wide Comparison', fontsize=12, fontweight='bold')
+    
+    # Plot 3: Speed Puffs Session-Wide Comparison
+    if len(all_speeds_during_puff) > 0 and len(all_speeds_before_puff_zone) > 0:
+        means_speed_puff = [np.mean(all_speeds_before_puff_zone), np.mean(all_speeds_during_puff)]
+        sems_speed_puff = [
+            np.std(all_speeds_before_puff_zone) / np.sqrt(len(all_speeds_before_puff_zone)),
+            np.std(all_speeds_during_puff) / np.sqrt(len(all_speeds_during_puff))
+        ]
+        x_pos = [0, 1]
+        bars = axs_session[2].bar(x_pos, means_speed_puff, yerr=sems_speed_puff, capsize=5,
+                                    color=['#9467bd', '#8c564b'], alpha=0.7, edgecolor='black')
+        axs_session[2].set_xticks(x_pos)
+        axs_session[2].set_xticklabels(['Before\nPuff Zone', 'During\nPuff Zone'])
+        axs_session[2].set_ylabel('Average Speed (cm/s)', fontsize=12)
+        axs_session[2].set_title('Speed Puffs: Session-Wide Comparison', fontsize=12, fontweight='bold')
+        axs_session[2].spines['top'].set_visible(False)
+        axs_session[2].spines['right'].set_visible(False)
+        
+        # Add significance stars
+        sig_stars = get_significance_stars(session_speed_puff_p_value)
+        if sig_stars:
+            max_height = max(means_speed_puff[0] + sems_speed_puff[0], means_speed_puff[1] + sems_speed_puff[1])
+            axs_session[2].text(0.5, max_height * 1.1, sig_stars, ha='center', va='bottom', fontsize=20, fontweight='bold')
+            axs_session[2].plot([0, 1], [max_height * 1.05, max_height * 1.05], 'k-', linewidth=1)
+        
+        # Add n and p-value text
+        axs_session[2].text(0.5, -0.15, f'n = {len(all_speeds_during_puff)}\np = {session_speed_puff_p_value:.4f}' if not pd.isna(session_speed_puff_p_value) else f'n = {len(all_speeds_during_puff)}',
+                           ha='center', va='top', transform=axs_session[2].transAxes, fontsize=10)
+    else:
+        axs_session[2].text(0.5, 0.5, 'Insufficient Data', ha='center', va='center',
+                           transform=axs_session[2].transAxes, fontsize=12)
+        axs_session[2].set_title('Speed Puffs: Session-Wide Comparison', fontsize=12, fontweight='bold')
+    
+    plt.tight_layout()
+    save_figure(fig_session_ttest, "session_wide_ttest_comparisons")
+    
+    plt.figure()  # Clear any lingering figure references
 
 
                      ##########D PRIME ANALYSIS SECTION##########
@@ -1817,30 +2044,30 @@ if __name__ == "__main__":
 
 
 
-    # Create t-test results summary table
+    # Create t-test results summary table (including session-wide results)
     ttest_summary = pd.DataFrame({
-        'Quarter': [f'Q{i+1}' for i in range(4)],
-        'Lick_t_stat': [f"{t:.4f}" if not pd.isna(t) else "N/A" for t in lick_reward_tstats],
-        'Lick_p_value': [f"{p:.4f}" if not pd.isna(p) else "N/A" for p in lick_reward_pvalues],
-        'Lick_sig': ["*" if not pd.isna(p) and p < 0.05 else "" for p in lick_reward_pvalues],
-        'Speed_Reward_t_stat': [f"{t:.4f}" if not pd.isna(t) else "N/A" for t in speed_reward_tstats],
-        'Speed_Reward_p_value': [f"{p:.4f}" if not pd.isna(p) else "N/A" for p in speed_reward_pvalues],
-        'Speed_Reward_sig': ["*" if not pd.isna(p) and p < 0.05 else "" for p in speed_reward_pvalues],
-        'Speed_Puff_t_stat': [f"{t:.4f}" if not pd.isna(t) else "N/A" for t in speed_puff_tstats],
-        'Speed_Puff_p_value': [f"{p:.4f}" if not pd.isna(p) else "N/A" for p in speed_puff_pvalues],
-        'Speed_Puff_sig': ["*" if not pd.isna(p) and p < 0.05 else "" for p in speed_puff_pvalues]
+        'Quarter': [f'Q{i+1}' for i in range(4)] + ['Session'],
+        'Lick_t_stat': [f"{t:.4f}" if not pd.isna(t) else "N/A" for t in lick_reward_tstats] + [f"{session_lick_t_stat:.4f}" if not pd.isna(session_lick_t_stat) else "N/A"],
+        'Lick_p_value': [f"{p:.4f}" if not pd.isna(p) else "N/A" for p in lick_reward_pvalues] + [f"{session_lick_p_value:.4f}" if not pd.isna(session_lick_p_value) else "N/A"],
+        'Lick_sig': [get_significance_stars(p) for p in lick_reward_pvalues] + [get_significance_stars(session_lick_p_value)],
+        'Speed_Reward_t_stat': [f"{t:.4f}" if not pd.isna(t) else "N/A" for t in speed_reward_tstats] + [f"{session_speed_reward_t_stat:.4f}" if not pd.isna(session_speed_reward_t_stat) else "N/A"],
+        'Speed_Reward_p_value': [f"{p:.4f}" if not pd.isna(p) else "N/A" for p in speed_reward_pvalues] + [f"{session_speed_reward_p_value:.4f}" if not pd.isna(session_speed_reward_p_value) else "N/A"],
+        'Speed_Reward_sig': [get_significance_stars(p) for p in speed_reward_pvalues] + [get_significance_stars(session_speed_reward_p_value)],
+        'Speed_Puff_t_stat': [f"{t:.4f}" if not pd.isna(t) else "N/A" for t in speed_puff_tstats] + [f"{session_speed_puff_t_stat:.4f}" if not pd.isna(session_speed_puff_t_stat) else "N/A"],
+        'Speed_Puff_p_value': [f"{p:.4f}" if not pd.isna(p) else "N/A" for p in speed_puff_pvalues] + [f"{session_speed_puff_p_value:.4f}" if not pd.isna(session_speed_puff_p_value) else "N/A"],
+        'Speed_Puff_sig': [get_significance_stars(p) for p in speed_puff_pvalues] + [get_significance_stars(session_speed_puff_p_value)]
     })
     
     print("\n" + "="*60)
     print("T-TEST SUMMARY TABLE")
     print("="*60)
     print(ttest_summary.to_string(index=False))
-    print("\n* indicates p < 0.05 (significant)")
+    print("\n*** p < 0.001, ** p < 0.01, * p < 0.05")
     print("="*60)
     
     # fig, axs = plt.subplots(3, 1, figsize=(14, 18))
     
-    fig_tables, axs_tables = plt.subplots(4, 1, figsize=(14, 12))
+    fig_tables, axs_tables = plt.subplots(3, 1, figsize=(14, 9))
 
     # speed_fig, axs_speed = plt.subplots(2, 1, figsize=(14, 12))
 
@@ -1869,29 +2096,36 @@ if __name__ == "__main__":
         'no_reward_licks_after',
         'n_no_reward_zones',
     ], ax=axs_tables[0])
+
+    # Save the tables figure (all three tables combined)
+    save_figure(fig_tables, "combined_metrics_tables")
     
-    # Plot t-test results table
-    axs_tables[3].axis('off')
-    ttest_table = axs_tables[3].table(
+    plt.figure()  # Clear any lingering figure references
+    
+    # Create separate figure for t-test results
+    fig_ttest = plt.figure(figsize=(12, 4), num='ttest_results')
+    ax_ttest = fig_ttest.add_subplot(111)
+    ax_ttest.axis('off')
+    ttest_table = ax_ttest.table(
         cellText=ttest_summary.values,
         colLabels=ttest_summary.columns,
         loc='center',
         cellLoc='center'
     )
     ttest_table.auto_set_font_size(False)
-    ttest_table.set_fontsize(8)
+    ttest_table.set_fontsize(9)
     ttest_table.auto_set_column_width(col=list(range(len(ttest_summary.columns))))
-    axs_tables[3].set_title("T-Test Results by Quarter (* = p < 0.05)", fontsize=12, fontweight='bold')
-
-    # Save the tables figure (all four tables combined)
-    save_figure(fig_tables, "combined_metrics_tables")
+    
+    # Make the session-wide row stand out with bold text or different color
+    for i in range(len(ttest_summary.columns)):
+        ttest_table[(5, i)].set_facecolor('#E8E8E8')  # Light gray background for session row
+        ttest_table[(5, i)].set_text_props(weight='bold')
+    
+    ax_ttest.set_title("T-Test Results: Quarter-by-Quarter and Session-Wide (*** p<0.001, ** p<0.01, * p<0.05)", fontsize=12, fontweight='bold', pad=20)
+    plt.tight_layout()
+    save_figure(fig_ttest, "ttest_results_table")
     
     plt.figure()  # Clear any lingering figure references
-    
-    # Set font parameters for SVG to ensure text is saved as editable text
-    plt.rcParams['font.family'] = 'sans-serif'
-    plt.rcParams['font.sans-serif'] = ['Arial']
-    plt.rcParams['svg.fonttype'] = 'none'
     
     # Create and explicitly save the D-Prime plot
     try:
