@@ -21,6 +21,13 @@ from tkinter import filedialog
 import tkinter as tk
 import matplotlib.cm as cm
 
+# Configure matplotlib for SVG output with editable text
+plt.rcParams['font.family'] = 'sans-serif'
+plt.rcParams['font.sans-serif'] = ['Arial']
+plt.rcParams['svg.fonttype'] = 'none'  # Save text as actual text, not paths
+plt.rcParams['xtick.direction'] = 'in'  # Tick marks face inward
+plt.rcParams['ytick.direction'] = 'in'
+
 
 # ============================================================================
 # UTILITY FUNCTIONS
@@ -1104,6 +1111,7 @@ def plot_average_traces_reward(reward_zone_trials, trial_log_df, capacitive_df,
     axs[0].set_title('Treadmill Speed Aligned to Reward Zone Onset')
     axs[0].legend()
     axs[0].set_xlim(-5, 5)
+    axs[0].set_ylim(bottom=0)
     axs[0].spines['top'].set_visible(False)
     axs[0].spines['right'].set_visible(False)
     
@@ -1339,6 +1347,7 @@ def plot_average_traces_puff(puff_zone_trials, trial_log_df, capacitive_df,
     axs[0].set_title(f'Average Treadmill Speed Aligned to Puff Zone Entry Times (n={n_puff_events})')
     axs[0].legend()
     axs[0].set_xlim(-5, 5)
+    axs[0].set_ylim(bottom=0)
     axs[0].spines['top'].set_visible(False)
     axs[0].spines['right'].set_visible(False)
     
@@ -1390,6 +1399,7 @@ def plot_average_traces_puff(puff_zone_trials, trial_log_df, capacitive_df,
     
     axs[2].set_xlabel('Time from Puff Event (s)')
     axs[2].set_xlim(-5, 5)
+    axs[2].set_ylim(bottom=0)
     axs[2].set_xticks(np.arange(-5, 6, 1))
     axs[2].spines['top'].set_visible(False)
     axs[2].spines['right'].set_visible(False)
@@ -1953,6 +1963,7 @@ def analyze_probe_events(trial_log_df, capacitive_df, treadmill_interp, output_f
     axs[0].set_title('Treadmill Speed Aligned to Probe Events')
     axs[0].legend(loc='upper right')
     axs[0].set_xlim(-window, window)
+    axs[0].set_ylim(bottom=0)
     axs[0].spines['top'].set_visible(False)
     axs[0].spines['right'].set_visible(False)
     
@@ -2183,6 +2194,7 @@ def analyze_simulated_probe_events(trial_log_df, probe_revert_array, all_revert_
     axs[0].set_title('Treadmill Speed Aligned to Simulated Probe Events (1s after unpaired reverts)')
     axs[0].legend(loc='upper right')
     axs[0].set_xlim(-window, window)
+    axs[0].set_ylim(bottom=0)
     axs[0].spines['top'].set_visible(False)
     axs[0].spines['right'].set_visible(False)
     
