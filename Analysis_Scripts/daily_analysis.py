@@ -10,7 +10,7 @@ import os
 import sys
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
-from scipy.stats import norm
+from scipy.stats import norm, ttest_rel
 import tkinter as tk
 from tkinter import filedialog
 
@@ -290,7 +290,10 @@ class LickAnalysis:
             "ratio_licks_before_reward_to_before_zone": ratio_licks_before_reward_to_before_zone,
             "no_reward_licks_before": avg_no_reward_licks_before,
             "no_reward_licks_after": avg_no_reward_licks_after,
-            "n_no_reward_zones": len(no_reward_zones)
+            "n_no_reward_zones": len(no_reward_zones),
+            # Raw data for t-tests
+            "licks_before_reward_list": licks_before_reward,
+            "licks_before_reward_zone_list": licks_before_reward_zone
         }
     @staticmethod
     def get_reward_zone_times_for_rewards(reward_times, reward_zone_times):
@@ -557,7 +560,10 @@ class SpeedAnalysis:
             "no_reward_speed_before": avg_no_reward_speed_before,
             "no_reward_speed_after": avg_no_reward_speed_after,
             "ratio_speed_before_reward_to_before_zone": ratio_speed_before_reward_to_before_zone,
-            "n_no_reward_zones": len(no_reward_zones)
+            "n_no_reward_zones": len(no_reward_zones),
+            # Raw data for t-tests
+            "speeds_before_reward_list": speeds_before_reward,
+            "speeds_before_reward_zone_list": speeds_before_reward_zone
         }
 
     def compute_puff_speed_metrics_for_window(self, start_time, end_time, puff_times=None, matched_puff_zone_times=None):
@@ -661,7 +667,10 @@ class SpeedAnalysis:
             "no_puff_speed_after": avg_no_puff_speed_after,
             "n_no_puff_zones": len(no_puff_zones),
             "n_no_reward_zones": np.nan,  # Not relevant here, but for merge compatibility
-            "ratio_speed_puffs": ratio_speed_puffs
+            "ratio_speed_puffs": ratio_speed_puffs,
+            # Raw data for t-tests
+            "speeds_before_puff_list": speeds_before_puff,
+            "speeds_before_puff_zone_list": speeds_before_puff_zone
         }
     @staticmethod
     def get_puff_zone_times_for_puffs(puff_times, punish_zone_times):
@@ -722,6 +731,22 @@ class LickMetricsAppender:
 
         df.to_csv(self.csv_path, index=False)
         #print(f"Updated row {row_index} with lick reward quarter ratios in {os.path.basename(self.csv_path)}.")
+
+    def append_lick_reward_pvalues(self, row_index, pvalues):
+        df = pd.read_csv(self.csv_path)
+        # Ensure columns exist
+        for i in range(4):
+            col = f'LickRewardPValue_Q{i+1}'
+            if col not in df.columns:
+                df[col] = np.nan
+
+        # Write p-values, rounding to 4 decimals
+        for i, pval in enumerate(pvalues):
+            col = f'LickRewardPValue_Q{i+1}'
+            value = np.nan if pd.isna(pval) else round(pval, 4)
+            df.at[row_index, col] = value
+
+        df.to_csv(self.csv_path, index=False)
 
 class DPrimeAppender:
     def __init__(self, csv_path):
@@ -832,6 +857,38 @@ class SpeedMetricsAppender:
 
         df.to_csv(self.csv_path, index=False)
         #print(f"Updated row {row_index} with speed puff quarter ratios in {os.path.basename(self.csv_path)}.")
+
+    def append_speed_reward_pvalues(self, row_index, pvalues):
+        df = pd.read_csv(self.csv_path)
+        # Ensure columns exist
+        for i in range(4):
+            col = f'SpeedRewardPValue_Q{i+1}'
+            if col not in df.columns:
+                df[col] = np.nan
+
+        # Write p-values, rounding to 4 decimals
+        for i, pval in enumerate(pvalues):
+            col = f'SpeedRewardPValue_Q{i+1}'
+            value = np.nan if pd.isna(pval) else round(pval, 4)
+            df.at[row_index, col] = value
+
+        df.to_csv(self.csv_path, index=False)
+
+    def append_speed_puff_pvalues(self, row_index, pvalues):
+        df = pd.read_csv(self.csv_path)
+        # Ensure columns exist
+        for i in range(4):
+            col = f'SpeedPuffPValue_Q{i+1}'
+            if col not in df.columns:
+                df[col] = np.nan
+
+        # Write p-values, rounding to 4 decimals
+        for i, pval in enumerate(pvalues):
+            col = f'SpeedPuffPValue_Q{i+1}'
+            value = np.nan if pd.isna(pval) else round(pval, 4)
+            df.at[row_index, col] = value
+
+        df.to_csv(self.csv_path, index=False)
 
 class SessionLengthAppender:
     def __init__(self, csv_path):
@@ -1372,6 +1429,46 @@ if __name__ == "__main__":
     df_speed_quarters = pd.DataFrame(speed_quarter_data)
     #print("DEBUG: df_speed_quarters before adding columns:", df_speed_quarters)
 
+    # -------- PERFORM T-TESTS FOR SPEED REWARD METRICS --------
+    speed_reward_pvalues = []
+    speed_reward_tstats = []
+    print("\n" + "="*60)
+    print("SPEED REWARD T-TEST RESULTS")
+    print("="*60)
+    for i, q_data in enumerate(speed_quarter_data):
+        speeds_before_reward = q_data.get('speeds_before_reward_list', [])
+        speeds_before_zone = q_data.get('speeds_before_reward_zone_list', [])
+        
+        # Remove NaN values from both lists
+        speeds_before_reward_clean = [s for s in speeds_before_reward if not np.isnan(s)]
+        speeds_before_zone_clean = [s for s in speeds_before_zone if not np.isnan(s)]
+        
+        print(f"\nQuarter {i+1}:")
+        print(f"  N pairs: {len(speeds_before_reward_clean)}")
+        print(f"  Mean speed during reward zone: {np.mean(speeds_before_reward_clean) if speeds_before_reward_clean else 'N/A'}")
+        print(f"  Mean speed before reward zone: {np.mean(speeds_before_zone_clean) if speeds_before_zone_clean else 'N/A'}")
+        
+        # Perform paired t-test if we have enough data
+        if len(speeds_before_reward_clean) >= 2 and len(speeds_before_zone_clean) >= 2 and len(speeds_before_reward_clean) == len(speeds_before_zone_clean):
+            try:
+                t_stat, p_value = ttest_rel(speeds_before_reward_clean, speeds_before_zone_clean)
+                speed_reward_pvalues.append(p_value)
+                speed_reward_tstats.append(t_stat)
+                print(f"  t-statistic: {t_stat:.4f}")
+                print(f"  p-value: {p_value:.4f}")
+                if p_value < 0.05:
+                    print(f"  Result: SIGNIFICANT (p < 0.05)")
+                else:
+                    print(f"  Result: Not significant")
+            except Exception as e:
+                print(f"  Warning: Could not perform t-test: {e}")
+                speed_reward_pvalues.append(np.nan)
+                speed_reward_tstats.append(np.nan)
+        else:
+            print(f"  Insufficient data for t-test (need at least 2 pairs)")
+            speed_reward_pvalues.append(np.nan)
+            speed_reward_tstats.append(np.nan)
+
     # --- Puff-based speed analysis per quarter ---
     puff_quarters = speed_analysis.get_puff_quarters()
     punish_texture_change_time = speed_analysis.prepare_arrays()
@@ -1416,6 +1513,47 @@ if __name__ == "__main__":
 
     # Convert puff quarter data to DataFrame
     df_puff_quarters = pd.DataFrame(puff_quarter_data)
+    
+    # -------- PERFORM T-TESTS FOR SPEED PUFF METRICS --------
+    speed_puff_pvalues = []
+    speed_puff_tstats = []
+    print("\n" + "="*60)
+    print("SPEED PUFF T-TEST RESULTS")
+    print("="*60)
+    for i, q_data in enumerate(puff_quarter_data):
+        speeds_before_puff = q_data.get('speeds_before_puff_list', [])
+        speeds_before_zone = q_data.get('speeds_before_puff_zone_list', [])
+        
+        # Remove NaN values from both lists
+        speeds_before_puff_clean = [s for s in speeds_before_puff if not np.isnan(s)]
+        speeds_before_zone_clean = [s for s in speeds_before_zone if not np.isnan(s)]
+        
+        print(f"\nQuarter {i+1}:")
+        print(f"  N pairs: {len(speeds_before_puff_clean)}")
+        print(f"  Mean speed during puff zone: {np.mean(speeds_before_puff_clean) if speeds_before_puff_clean else 'N/A'}")
+        print(f"  Mean speed before puff zone: {np.mean(speeds_before_zone_clean) if speeds_before_zone_clean else 'N/A'}")
+        
+        # Perform paired t-test if we have enough data
+        if len(speeds_before_puff_clean) >= 2 and len(speeds_before_zone_clean) >= 2 and len(speeds_before_puff_clean) == len(speeds_before_zone_clean):
+            try:
+                t_stat, p_value = ttest_rel(speeds_before_puff_clean, speeds_before_zone_clean)
+                speed_puff_pvalues.append(p_value)
+                speed_puff_tstats.append(t_stat)
+                print(f"  t-statistic: {t_stat:.4f}")
+                print(f"  p-value: {p_value:.4f}")
+                if p_value < 0.05:
+                    print(f"  Result: SIGNIFICANT (p < 0.05)")
+                else:
+                    print(f"  Result: Not significant")
+            except Exception as e:
+                print(f"  Warning: Could not perform t-test: {e}")
+                speed_puff_pvalues.append(np.nan)
+                speed_puff_tstats.append(np.nan)
+        else:
+            print(f"  Insufficient data for t-test (need at least 2 pairs)")
+            speed_puff_pvalues.append(np.nan)
+            speed_puff_tstats.append(np.nan)
+    
     # Before merging, rename puff columns
     puff_cols = [
         'average_speed_before_puff',
@@ -1501,6 +1639,42 @@ if __name__ == "__main__":
 
     # Create DataFrame
     df_quarters = pd.DataFrame(quarter_data)
+
+    # -------- PERFORM T-TESTS FOR LICK METRICS --------
+    lick_reward_pvalues = []
+    lick_reward_tstats = []
+    print("\n" + "="*60)
+    print("LICK REWARD T-TEST RESULTS")
+    print("="*60)
+    for i, q_data in enumerate(quarter_data):
+        licks_before_reward = q_data.get('licks_before_reward_list', [])
+        licks_before_zone = q_data.get('licks_before_reward_zone_list', [])
+        
+        print(f"\nQuarter {i+1}:")
+        print(f"  N pairs: {len(licks_before_reward)}")
+        print(f"  Licks during reward zone: {licks_before_reward}")
+        print(f"  Licks before reward zone: {licks_before_zone}")
+        
+        # Perform paired t-test if we have enough data
+        if len(licks_before_reward) >= 2 and len(licks_before_zone) >= 2 and len(licks_before_reward) == len(licks_before_zone):
+            try:
+                t_stat, p_value = ttest_rel(licks_before_reward, licks_before_zone)
+                lick_reward_pvalues.append(p_value)
+                lick_reward_tstats.append(t_stat)
+                print(f"  t-statistic: {t_stat:.4f}")
+                print(f"  p-value: {p_value:.4f}")
+                if p_value < 0.05:
+                    print(f"  Result: SIGNIFICANT (p < 0.05)")
+                else:
+                    print(f"  Result: Not significant")
+            except Exception as e:
+                print(f"  Warning: Could not perform t-test: {e}")
+                lick_reward_pvalues.append(np.nan)
+                lick_reward_tstats.append(np.nan)
+        else:
+            print(f"  Insufficient data for t-test (need at least 2 pairs)")
+            lick_reward_pvalues.append(np.nan)
+            lick_reward_tstats.append(np.nan)
 
 
 
@@ -1643,9 +1817,30 @@ if __name__ == "__main__":
 
 
 
+    # Create t-test results summary table
+    ttest_summary = pd.DataFrame({
+        'Quarter': [f'Q{i+1}' for i in range(4)],
+        'Lick_t_stat': [f"{t:.4f}" if not pd.isna(t) else "N/A" for t in lick_reward_tstats],
+        'Lick_p_value': [f"{p:.4f}" if not pd.isna(p) else "N/A" for p in lick_reward_pvalues],
+        'Lick_sig': ["*" if not pd.isna(p) and p < 0.05 else "" for p in lick_reward_pvalues],
+        'Speed_Reward_t_stat': [f"{t:.4f}" if not pd.isna(t) else "N/A" for t in speed_reward_tstats],
+        'Speed_Reward_p_value': [f"{p:.4f}" if not pd.isna(p) else "N/A" for p in speed_reward_pvalues],
+        'Speed_Reward_sig': ["*" if not pd.isna(p) and p < 0.05 else "" for p in speed_reward_pvalues],
+        'Speed_Puff_t_stat': [f"{t:.4f}" if not pd.isna(t) else "N/A" for t in speed_puff_tstats],
+        'Speed_Puff_p_value': [f"{p:.4f}" if not pd.isna(p) else "N/A" for p in speed_puff_pvalues],
+        'Speed_Puff_sig': ["*" if not pd.isna(p) and p < 0.05 else "" for p in speed_puff_pvalues]
+    })
+    
+    print("\n" + "="*60)
+    print("T-TEST SUMMARY TABLE")
+    print("="*60)
+    print(ttest_summary.to_string(index=False))
+    print("\n* indicates p < 0.05 (significant)")
+    print("="*60)
+    
     # fig, axs = plt.subplots(3, 1, figsize=(14, 18))
     
-    fig_tables, axs_tables = plt.subplots(3, 1, figsize=(14, 9))
+    fig_tables, axs_tables = plt.subplots(4, 1, figsize=(14, 12))
 
     # speed_fig, axs_speed = plt.subplots(2, 1, figsize=(14, 12))
 
@@ -1674,8 +1869,21 @@ if __name__ == "__main__":
         'no_reward_licks_after',
         'n_no_reward_zones',
     ], ax=axs_tables[0])
+    
+    # Plot t-test results table
+    axs_tables[3].axis('off')
+    ttest_table = axs_tables[3].table(
+        cellText=ttest_summary.values,
+        colLabels=ttest_summary.columns,
+        loc='center',
+        cellLoc='center'
+    )
+    ttest_table.auto_set_font_size(False)
+    ttest_table.set_fontsize(8)
+    ttest_table.auto_set_column_width(col=list(range(len(ttest_summary.columns))))
+    axs_tables[3].set_title("T-Test Results by Quarter (* = p < 0.05)", fontsize=12, fontweight='bold')
 
-    # Save the tables figure (all three tables combined)
+    # Save the tables figure (all four tables combined)
     save_figure(fig_tables, "combined_metrics_tables")
     
     plt.figure()  # Clear any lingering figure references
