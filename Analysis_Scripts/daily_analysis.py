@@ -2455,8 +2455,6 @@ if __name__ == "__main__":
     
     plt.tight_layout()
     save_figure(fig_session_ttest, "session_wide_ttest_comparisons")
-    
-    plt.figure()  # Clear any lingering figure references
 
     # Create t-test results summary table for ALL ZONES
     ttest_summary = pd.DataFrame({
@@ -2501,8 +2499,6 @@ if __name__ == "__main__":
     ax_ttest.set_title("T-Test Results: Quarter-by-Quarter and Session-Wide - All Zones (*** p<0.001, ** p<0.01, * p<0.05)", fontsize=12, fontweight='bold', pad=20)
     plt.tight_layout()
     save_figure(fig_ttest, "ttest_results_table")
-    
-    plt.figure()  # Clear any lingering figure references
 
     # -------- REWARD ZONES ONLY VERSION (HITS ONLY - ORIGINAL) --------
     
@@ -2615,8 +2611,6 @@ if __name__ == "__main__":
     
     plt.tight_layout()
     save_figure(fig_session_ttest_only, "session_wide_ttest_comparisons_REWARD_ONLY")
-    
-    plt.figure()  # Clear any lingering figure references
 
     # Create t-test results summary table for REWARD ZONES ONLY (ORIGINAL)
     ttest_summary_only = pd.DataFrame({
@@ -2661,8 +2655,6 @@ if __name__ == "__main__":
     ax_ttest_only.set_title("T-Test Results: Quarter-by-Quarter and Session-Wide - Reward Zones ONLY (*** p<0.001, ** p<0.01, * p<0.05)", fontsize=12, fontweight='bold', pad=20)
     plt.tight_layout()
     save_figure(fig_ttest_only, "ttest_results_table_REWARD_ONLY")
-    
-    plt.figure()  # Clear any lingering figure references
 
     # -------- NO-REWARD/NO-PUFF ZONES ONLY VERSION (MISSES ONLY) --------
     
@@ -2775,8 +2767,6 @@ if __name__ == "__main__":
     
     plt.tight_layout()
     save_figure(fig_session_ttest_misses, "session_wide_ttest_comparisons_MISSES_ONLY")
-    
-    plt.figure()  # Clear any lingering figure references
 
     # Create t-test results summary table for NO-REWARD/NO-PUFF ZONES ONLY
     ttest_summary_misses = pd.DataFrame({
@@ -2821,8 +2811,6 @@ if __name__ == "__main__":
     ax_ttest_misses.set_title("T-Test Results: Quarter-by-Quarter and Session-Wide - NO-REWARD/NO-PUFF Zones ONLY (*** p<0.001, ** p<0.01, * p<0.05)", fontsize=12, fontweight='bold', pad=20)
     plt.tight_layout()
     save_figure(fig_ttest_misses, "ttest_results_table_MISSES_ONLY")
-    
-    plt.figure()  # Clear any lingering figure references
 
 
                      ##########D PRIME ANALYSIS SECTION##########
@@ -3019,9 +3007,7 @@ if __name__ == "__main__":
 
     # Save the tables figure (all three tables combined)
     save_figure(fig_tables, "combined_metrics_tables")
-    
-    plt.figure()  # Clear any lingering figure references
-    
+
     # Create separate figure for t-test results
     fig_ttest = plt.figure(figsize=(12, 4), num='ttest_results')
     ax_ttest = fig_ttest.add_subplot(111)
@@ -3044,9 +3030,7 @@ if __name__ == "__main__":
     ax_ttest.set_title("T-Test Results: Quarter-by-Quarter and Session-Wide - All Zones (*** p<0.001, ** p<0.01, * p<0.05)", fontsize=12, fontweight='bold', pad=20)
     plt.tight_layout()
     save_figure(fig_ttest, "ttest_results_table")
-    
-    plt.figure()  # Clear any lingering figure references
-    
+
     # Create and explicitly save the D-Prime plot
     try:
         plt.close('dprime')  # Close any existing figure with this name
@@ -3057,9 +3041,7 @@ if __name__ == "__main__":
     DPrimePlotter.plot_hits_misses_cr_fa_bar(df_quarters, df_puff_quarters, dprime_values=dprime_values, ax=ax_dprime)
     plt.tight_layout()
     save_figure(fig_dprime, "dprime_hits_misses_chart")
-    
-    plt.figure()  # Clear any lingering figure references
-    
+
     # Create and explicitly save the speed percentage and rewards plot
     try:
         plt.close('speed')  # Close any existing figure with this name
