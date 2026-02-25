@@ -687,6 +687,38 @@ def match_puff_zones_to_events(trial_log_df, punish_texture_change_time_first):
     return puff_zone_trials
 
 
+def separate_hits_and_misses(reward_zone_trials):
+    """Separate reward zones into hits (rewarded) and misses (non-rewarded)
+    
+    Uses the exact same logic as daily_analysis.py: a zone is a "miss" if it does not
+    have a corresponding reward delivery event.
+    
+    Args:
+        reward_zone_trials: List of (trial_idx, zone_entry_time, reward_event_time) tuples
+        
+    Returns:
+        tuple: (hits_list, misses_list) where each is a list of (trial_idx, zone_entry_time) tuples
+    """
+    hits = []
+    misses = []
+    
+    for trial_idx, zone_entry_time, reward_event_time in reward_zone_trials:
+        # A "hit" is a zone with a valid reward delivery
+        # A "miss" is a zone without a reward delivery (NaN or invalid)
+        if pd.notna(reward_event_time) and reward_event_time > 0:
+            hits.append((trial_idx, zone_entry_time))
+        else:
+            misses.append((trial_idx, zone_entry_time))
+    
+    print(f"\n=== REWARD ZONE CLASSIFICATION ===")
+    print(f"Total reward zones: {len(reward_zone_trials)}")
+    print(f"Hits (rewarded zones): {len(hits)} ({len(hits)/len(reward_zone_trials)*100:.1f}%)")
+    print(f"Misses (non-rewarded zones): {len(misses)} ({len(misses)/len(reward_zone_trials)*100:.1f}%)")
+    print("=== END CLASSIFICATION ===\n")
+    
+    return hits, misses
+
+
 # ============================================================================
 # WINDOW EXTRACTION FUNCTIONS
 # ============================================================================
@@ -1067,7 +1099,7 @@ def plot_average_traces_reward(reward_zone_trials, trial_log_df, capacitive_df,
     
     aligned_time_speed = np.linspace(-window, window, max_speed_len)
     mean_speed = np.nanmean(speed_windows_padded, axis=0)
-    sem_speed = np.nanstd(speed_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(speed_windows_padded), axis=0))
+    sem_speed = np.nanstd(speed_windows_padded, axis=0, ddof=1) / np.sqrt(np.sum(~np.isnan(speed_windows_padded), axis=0))
     
     # Get reward event times
     reward_event_times_flat = pd.to_numeric(trial_log_df['reward_event'], errors='coerce').dropna()
@@ -1092,7 +1124,7 @@ def plot_average_traces_reward(reward_zone_trials, trial_log_df, capacitive_df,
     
     aligned_time_event = np.linspace(-window, window, max_event_len)
     mean_event_vals = np.nanmean(cap_event_windows_padded, axis=0)
-    sem_event_vals = np.nanstd(cap_event_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(cap_event_windows_padded), axis=0))
+    sem_event_vals = np.nanstd(cap_event_windows_padded, axis=0, ddof=1) / np.sqrt(np.sum(~np.isnan(cap_event_windows_padded), axis=0))
     
     # Create combined subplot figure
     num_plots = 3 if pupil_diameter_interp is not None else 2
@@ -1151,7 +1183,7 @@ def plot_average_traces_reward(reward_zone_trials, trial_log_df, capacitive_df,
         
         aligned_time_pupil = np.linspace(-window, window, max_pupil_len)
         mean_pupil = np.nanmean(pupil_zone_windows_padded, axis=0)
-        sem_pupil = np.nanstd(pupil_zone_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(pupil_zone_windows_padded), axis=0))
+        sem_pupil = np.nanstd(pupil_zone_windows_padded, axis=0, ddof=1) / np.sqrt(np.sum(~np.isnan(pupil_zone_windows_padded), axis=0))
         
         # Pupil aligned to reward events
         pupil_event_windows = []
@@ -1168,7 +1200,7 @@ def plot_average_traces_reward(reward_zone_trials, trial_log_df, capacitive_df,
         
         aligned_time_pupil_event = np.linspace(-window, window, max_pupil_event_len)
         mean_pupil_event = np.nanmean(pupil_event_windows_padded, axis=0)
-        sem_pupil_event = np.nanstd(pupil_event_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(pupil_event_windows_padded), axis=0))
+        sem_pupil_event = np.nanstd(pupil_event_windows_padded, axis=0, ddof=1) / np.sqrt(np.sum(~np.isnan(pupil_event_windows_padded), axis=0))
         
         # Create separate pupil figure with 2 subplots
         fig_pupil, axs_pupil = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
@@ -1271,7 +1303,7 @@ def plot_average_traces_puff(puff_zone_trials, trial_log_df, capacitive_df,
     aligned_time_puff = np.linspace(-window, window, max_puff_len)
     n_puff_events = speed_puff_windows_padded.shape[0]
     mean_speed_puff = np.nanmean(speed_puff_windows_padded, axis=0)
-    sem_speed_puff = np.nanstd(speed_puff_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(speed_puff_windows_padded), axis=0))
+    sem_speed_puff = np.nanstd(speed_puff_windows_padded, axis=0, ddof=1) / np.sqrt(np.sum(~np.isnan(speed_puff_windows_padded), axis=0))
     
     # Get puff event times
     puff_event_capacitive_data = None
@@ -1299,7 +1331,7 @@ def plot_average_traces_puff(puff_zone_trials, trial_log_df, capacitive_df,
                 aligned_time_puff_cap = np.linspace(-window, window, max_puff_cap_len)
                 n_puff_event_cap = cap_puff_event_windows_padded.shape[0]
                 mean_cap_puff_event = np.nanmean(cap_puff_event_windows_padded, axis=0)
-                sem_cap_puff_event = np.nanstd(cap_puff_event_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(cap_puff_event_windows_padded), axis=0))
+                sem_cap_puff_event = np.nanstd(cap_puff_event_windows_padded, axis=0, ddof=1) / np.sqrt(np.sum(~np.isnan(cap_puff_event_windows_padded), axis=0))
                 
                 puff_event_capacitive_data = {
                     'aligned_time': aligned_time_puff_cap,
@@ -1325,7 +1357,7 @@ def plot_average_traces_puff(puff_zone_trials, trial_log_df, capacitive_df,
                 aligned_time_puff_speed = np.linspace(-window, window, max_puff_speed_len)
                 n_puff_event_speed = speed_puff_event_windows_padded.shape[0]
                 mean_speed_puff_event = np.nanmean(speed_puff_event_windows_padded, axis=0)
-                sem_speed_puff_event = np.nanstd(speed_puff_event_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(speed_puff_event_windows_padded), axis=0))
+                sem_speed_puff_event = np.nanstd(speed_puff_event_windows_padded, axis=0, ddof=1) / np.sqrt(np.sum(~np.isnan(speed_puff_event_windows_padded), axis=0))
                 
                 puff_event_speed_data = {
                     'aligned_time': aligned_time_puff_speed,
@@ -1428,7 +1460,7 @@ def plot_average_traces_puff(puff_zone_trials, trial_log_df, capacitive_df,
         
         aligned_time_pupil_puff = np.linspace(-window_pupil, window_pupil, max_pupil_puff_len)
         mean_pupil_puff = np.nanmean(pupil_puff_windows_padded, axis=0)
-        sem_pupil_puff = np.nanstd(pupil_puff_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(pupil_puff_windows_padded), axis=0))
+        sem_pupil_puff = np.nanstd(pupil_puff_windows_padded, axis=0, ddof=1) / np.sqrt(np.sum(~np.isnan(pupil_puff_windows_padded), axis=0))
         n_puffs_pupil = pupil_puff_windows_padded.shape[0]
         
         # Pupil aligned to puff events (if available)
@@ -1453,7 +1485,7 @@ def plot_average_traces_puff(puff_zone_trials, trial_log_df, capacitive_df,
                     aligned_time_pupil_puff_event = np.linspace(-window_pupil, window_pupil, max_pupil_puff_event_len)
                     n_puffs_pupil_event = pupil_puff_event_windows_padded.shape[0]
                     mean_pupil_puff_event = np.nanmean(pupil_puff_event_windows_padded, axis=0)
-                    sem_pupil_puff_event = np.nanstd(pupil_puff_event_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(pupil_puff_event_windows_padded), axis=0))
+                    sem_pupil_puff_event = np.nanstd(pupil_puff_event_windows_padded, axis=0, ddof=1) / np.sqrt(np.sum(~np.isnan(pupil_puff_event_windows_padded), axis=0))
                     
                     pupil_puff_event_data = {
                         'time': aligned_time_pupil_puff_event,
@@ -1577,7 +1609,7 @@ def analyze_reward_zones(reward_zone_trials, trial_log_df, capacitive_df, treadm
             
             # Calculate mean and SEM (matching what's plotted in average traces)
             mean_event_vals = np.nanmean(cap_event_windows_padded, axis=0)
-            sem_event_vals = np.nanstd(cap_event_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(cap_event_windows_padded), axis=0))
+            sem_event_vals = np.nanstd(cap_event_windows_padded, axis=0, ddof=1) / np.sqrt(np.sum(~np.isnan(cap_event_windows_padded), axis=0))
             
             # Use the maximum of (mean + SEM) as the upper limit
             cap_vmin = 0
@@ -1706,6 +1738,172 @@ def analyze_reward_deliveries(reward_zone_trials, trial_log_df, cap_time, cap_va
             center_time=0, event_label="Reward Delivery",
             show_zone_entries=True, zone_entry_color='blue', center_line_color='green'
         )
+
+
+def analyze_reward_hits_vs_misses(reward_zone_trials, capacitive_df, treadmill_interp, 
+                                   output_folder, window=5):
+    """Analyze speed data separately for rewarded vs non-rewarded zones
+    
+    Uses the same logic as daily_analysis.py to identify misses (no-reward zones).
+    Creates average trace alignment plots (mean ± SEM) for hits and misses.
+    
+    Args:
+        reward_zone_trials: List of (trial_idx, zone_entry_time, reward_event_time) tuples
+        capacitive_df: Capacitive DataFrame (for time reference)
+        treadmill_interp: Interpolated treadmill speed
+        output_folder: Directory to save figures
+        window: Window size in seconds before/after zone entry (default 5)
+    """
+    if len(reward_zone_trials) == 0:
+        print("No reward zones to analyze")
+        return
+    
+    print(f"\n{'='*70}")
+    print("ANALYZING REWARD HITS VS MISSES (SPEED)")
+    print(f"{'='*70}")
+    
+    # Separate hits and misses
+    hits, misses = separate_hits_and_misses(reward_zone_trials)
+    
+    # Extract time and speed data
+    cap_time = capacitive_df['elapsed_time'].values
+    speed_val = treadmill_interp.values
+    
+    # Initialize variables for comparison plot
+    speed_windows_hits = None
+    speed_windows_misses = None
+    aligned_time_hits = None
+    aligned_time_misses = None
+    
+    # ========================================================================
+    # HITS (Rewarded Zones) Analysis
+    # ========================================================================
+    if len(hits) > 0:
+        print(f"\nAnalyzing HITS (rewarded zones): n={len(hits)}")
+        
+        # Extract zone entry times for hits
+        hit_zone_times = [zone_time for _, zone_time in hits]
+        
+        # Create aligned windows for speed
+        speed_windows_hits, aligned_time_hits = create_aligned_windows(
+            cap_time, speed_val, hit_zone_times, window
+        )
+        
+        # Plot average trace for hits
+        if speed_windows_hits is not None:
+            avg_speed_hits = np.nanmean(speed_windows_hits, axis=0)
+            sem_speed_hits = np.nanstd(speed_windows_hits, axis=0, ddof=1) / np.sqrt(np.sum(~np.isnan(speed_windows_hits), axis=0))
+            
+            fig, ax = plt.subplots(figsize=(10, 6))
+            ax.plot(aligned_time_hits, avg_speed_hits, color='darkblue', linewidth=2, label=f'Mean Speed (n={len(hits)})')
+            ax.fill_between(aligned_time_hits, 
+                           avg_speed_hits - sem_speed_hits,
+                           avg_speed_hits + sem_speed_hits,
+                           alpha=0.2, color='darkblue', label='SEM')
+            ax.axvline(x=0, color='red', linestyle='--', linewidth=2, label='Reward Zone Onset (t=0)')
+            ax.set_xlabel('Time from Reward Zone Onset (s)')
+            ax.set_ylabel('Treadmill Speed (cm/s)')
+            ax.set_title(f'Treadmill Speed: REWARDED Zones (Hits, n={len(hits)})')
+            ax.legend()
+            ax.set_xlim(-5, 5)
+            ax.set_ylim(bottom=0)
+            ax.set_xticks(np.arange(-5, 6, 1))
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+            plt.tight_layout()
+            save_figure(fig, 'speed_average_reward_hits', output_folder)
+            plt.show()
+    else:
+        print("No rewarded zones (hits) found")
+    
+    # ========================================================================
+    # MISSES (Non-Rewarded Zones) Analysis
+    # ========================================================================
+    if len(misses) > 0:
+        print(f"\nAnalyzing MISSES (non-rewarded zones): n={len(misses)}")
+        
+        # Extract zone entry times for misses
+        miss_zone_times = [zone_time for _, zone_time in misses]
+        
+        # Create aligned windows for speed
+        speed_windows_misses, aligned_time_misses = create_aligned_windows(
+            cap_time, speed_val, miss_zone_times, window
+        )
+        
+        # Plot average trace for misses
+        if speed_windows_misses is not None:
+            avg_speed_misses = np.nanmean(speed_windows_misses, axis=0)
+            sem_speed_misses = np.nanstd(speed_windows_misses, axis=0, ddof=1) / np.sqrt(np.sum(~np.isnan(speed_windows_misses), axis=0))
+            
+            fig, ax = plt.subplots(figsize=(10, 6))
+            ax.plot(aligned_time_misses, avg_speed_misses, color='deepskyblue', linewidth=2, label=f'Mean Speed (n={len(misses)})')
+            ax.fill_between(aligned_time_misses, 
+                           avg_speed_misses - sem_speed_misses,
+                           avg_speed_misses + sem_speed_misses,
+                           alpha=0.2, color='deepskyblue', label='SEM')
+            ax.axvline(x=0, color='red', linestyle='--', linewidth=2, label='Reward Zone Onset (t=0)')
+            ax.set_xlabel('Time from Reward Zone Onset (s)')
+            ax.set_ylabel('Treadmill Speed (cm/s)')
+            ax.set_title(f'Treadmill Speed: NON-REWARDED Zones (Misses, n={len(misses)})')
+            ax.legend()
+            ax.set_xlim(-5, 5)
+            ax.set_ylim(bottom=0)
+            ax.set_xticks(np.arange(-5, 6, 1))
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+            plt.tight_layout()
+            save_figure(fig, 'speed_average_reward_misses', output_folder)
+            plt.show()
+    else:
+        print("No non-rewarded zones (misses) found")
+    
+    # ========================================================================
+    # COMPARISON: Hits vs Misses
+    # ========================================================================
+    if len(hits) > 0 and len(misses) > 0:
+        print(f"\nCreating comparison plot: Hits vs Misses")
+        
+        # Need to ensure same time axis for comparison
+        if speed_windows_hits is not None and speed_windows_misses is not None:
+            avg_speed_hits = np.nanmean(speed_windows_hits, axis=0)
+            sem_speed_hits = np.nanstd(speed_windows_hits, axis=0, ddof=1) / np.sqrt(np.sum(~np.isnan(speed_windows_hits), axis=0))
+            
+            avg_speed_misses = np.nanmean(speed_windows_misses, axis=0)
+            sem_speed_misses = np.nanstd(speed_windows_misses, axis=0, ddof=1) / np.sqrt(np.sum(~np.isnan(speed_windows_misses), axis=0))
+            
+            fig, ax = plt.subplots(figsize=(12, 6))
+            
+            # Plot hits
+            ax.plot(aligned_time_hits, avg_speed_hits, color='darkblue', linewidth=2, label=f'Hits (n={len(hits)})')
+            ax.fill_between(aligned_time_hits, 
+                           avg_speed_hits - sem_speed_hits,
+                           avg_speed_hits + sem_speed_hits,
+                           alpha=0.2, color='darkblue')
+            
+            # Plot misses
+            ax.plot(aligned_time_misses, avg_speed_misses, color='deepskyblue', linewidth=2, label=f'Misses (n={len(misses)})')
+            ax.fill_between(aligned_time_misses, 
+                           avg_speed_misses - sem_speed_misses,
+                           avg_speed_misses + sem_speed_misses,
+                           alpha=0.2, color='deepskyblue')
+            
+            ax.axvline(x=0, color='red', linestyle='--', linewidth=2, label='Reward Zone Onset (t=0)')
+            ax.set_xlabel('Time from Reward Zone Onset (s)')
+            ax.set_ylabel('Treadmill Speed (cm/s)')
+            ax.set_title(f'Treadmill Speed Comparison: Rewarded (n={len(hits)}) vs Non-Rewarded (n={len(misses)}) Zones')
+            ax.legend()
+            ax.set_xlim(-5, 5)
+            ax.set_ylim(bottom=0)
+            ax.set_xticks(np.arange(-5, 6, 1))
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+            plt.tight_layout()
+            save_figure(fig, 'speed_comparison_hits_vs_misses', output_folder)
+            plt.show()
+    
+    print(f"\n{'='*70}")
+    print("HITS VS MISSES ANALYSIS COMPLETE")
+    print(f"{'='*70}\n")
 
 
 # ============================================================================
@@ -1948,7 +2146,7 @@ def analyze_probe_events(trial_log_df, capacitive_df, treadmill_interp, output_f
     
     # --- Plot 1: Treadmill Speed aligned to probe events ---
     mean_speed_probe = np.nanmean(speed_probe_windows_padded, axis=0)
-    sem_speed_probe = np.nanstd(speed_probe_windows_padded, axis=0) / np.sqrt(
+    sem_speed_probe = np.nanstd(speed_probe_windows_padded, axis=0, ddof=1) / np.sqrt(
         np.sum(~np.isnan(speed_probe_windows_padded), axis=0)
     )
     axs[0].plot(aligned_time_probe, mean_speed_probe, color='purple', label=f'Mean Speed (n={n_probes})', linewidth=1.5)
@@ -1969,7 +2167,7 @@ def analyze_probe_events(trial_log_df, capacitive_df, treadmill_interp, output_f
     
     # --- Plot 2: Capacitive Value aligned to probe events ---
     mean_cap_probe = np.nanmean(cap_probe_windows_padded, axis=0)
-    sem_cap_probe = np.nanstd(cap_probe_windows_padded, axis=0) / np.sqrt(
+    sem_cap_probe = np.nanstd(cap_probe_windows_padded, axis=0, ddof=1) / np.sqrt(
         np.sum(~np.isnan(cap_probe_windows_padded), axis=0)
     )
     axs[1].plot(aligned_time_probe, mean_cap_probe, color='C0', label=f'Mean Capacitive Value (n={n_probes})', linewidth=1.5)
@@ -2178,7 +2376,7 @@ def analyze_simulated_probe_events(trial_log_df, probe_revert_array, all_revert_
     
     # --- Plot 1: Treadmill Speed ---
     mean_speed_sim = np.nanmean(speed_sim_windows_padded, axis=0)
-    sem_speed_sim = np.nanstd(speed_sim_windows_padded, axis=0) / np.sqrt(
+    sem_speed_sim = np.nanstd(speed_sim_windows_padded, axis=0, ddof=1) / np.sqrt(
         np.sum(~np.isnan(speed_sim_windows_padded), axis=0)
     )
     axs[0].plot(aligned_time_sim, mean_speed_sim, color='purple', 
@@ -2200,7 +2398,7 @@ def analyze_simulated_probe_events(trial_log_df, probe_revert_array, all_revert_
     
     # --- Plot 2: Capacitive Value ---
     mean_cap_sim = np.nanmean(cap_sim_windows_padded, axis=0)
-    sem_cap_sim = np.nanstd(cap_sim_windows_padded, axis=0) / np.sqrt(
+    sem_cap_sim = np.nanstd(cap_sim_windows_padded, axis=0, ddof=1) / np.sqrt(
         np.sum(~np.isnan(cap_sim_windows_padded), axis=0)
     )
     axs[1].plot(aligned_time_sim, mean_cap_sim, color='C0', 
@@ -2306,6 +2504,12 @@ def main():
         plot_average_traces_reward(
             reward_zone_trials, data['trial_log'], data['capacitive'],
             treadmill_interp, pupil_diameter_interp, output_folder, cap_vmax=cap_vmax
+        )
+        
+        # Analyze hits vs misses separately (using same logic as daily_analysis.py)
+        print("\nAnalyzing reward hits vs misses (speed comparison)...")
+        analyze_reward_hits_vs_misses(
+            reward_zone_trials, data['capacitive'], treadmill_interp, output_folder, window=5
         )
     
     # Step 8: Match and analyze puff zones (using capacitive scale from reward analysis)
