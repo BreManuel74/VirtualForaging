@@ -1720,8 +1720,8 @@ def analyze_reward_zones(reward_zone_trials, trial_log_df, capacitive_df, treadm
             f'Treadmill Speed Raster: Individual Trials Aligned to Reward Zone Entry (n={len(reward_zone_trials)} trials)',
             'Treadmill Speed (cm/s)', 'coolwarm', output_folder, 
             'treadmill_speed_raster_reward_zones',
-            vmin=-30,
-            vmax=30,
+            vmin=-20,
+            vmax=20,
             center_time=0, event_label="Reward Zone Entry",
             show_delivery_markers=True, center_line_color='black'
         )
@@ -1808,8 +1808,8 @@ def analyze_reward_deliveries(reward_zone_trials, trial_log_df, cap_time, cap_va
             f'Treadmill Speed Raster: Individual Trials Aligned to Reward Delivery (n={len(all_reward_delivery_trials)} trials)',
             'Treadmill Speed (cm/s)', 'coolwarm', output_folder,
             'treadmill_speed_raster_reward_delivery_centered',
-            vmin=-30,
-            vmax=30,
+            vmin=-20,
+            vmax=20,
             center_time=0, event_label="Reward Delivery",
             show_zone_entries=True, zone_entry_color='black', center_line_color='green'
         )
@@ -1875,8 +1875,8 @@ def analyze_puff_zones(puff_zone_trials, trial_log_df, capacitive_df, treadmill_
             f'Treadmill Speed Raster: Individual Trials Aligned to Puff Zone Entry (n={len(puff_zone_trials)} trials)',
             'Treadmill Speed (cm/s)', 'coolwarm', output_folder,
             'treadmill_speed_raster_puff_zones',
-            vmin=-30,
-            vmax=30,
+            vmin=-20,
+            vmax=20,
             center_time=0, event_label="Puff Zone Entry",
             show_delivery_markers=True, center_line_color='black'
         )

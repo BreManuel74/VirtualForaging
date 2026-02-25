@@ -328,6 +328,9 @@ class SpeedAnalysis:
         self.trial_log_df = pd.read_csv(trial_log_path, engine='python')
         self.capacitive_df = pd.read_csv(capacitive_path, comment='/', engine='python')
         self.treadmill_df = pd.read_csv(treadmill_path, comment='/', engine='python')
+        
+        # Convert treadmill speed from mm/s to cm/s
+        self.treadmill_df['speed'] = self.treadmill_df['speed'] / 10
 
         # Interpolate treadmill speed to capacitive elapsed_time
         self.treadmill_interp = pd.Series(
