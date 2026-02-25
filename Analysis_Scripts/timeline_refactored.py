@@ -20,6 +20,7 @@ import os
 from tkinter import filedialog
 import tkinter as tk
 import matplotlib.cm as cm
+from scipy.stats import ttest_rel, ttest_ind
 
 # Configure matplotlib for SVG output with editable text
 plt.rcParams['font.family'] = 'sans-serif'
@@ -2068,6 +2069,31 @@ def analyze_puff_deliveries(puff_zone_trials, trial_log_df, cap_time, cap_val, s
 
 
 # ============================================================================
+# HELPER FUNCTIONS: STATISTICAL ANALYSIS
+# ============================================================================
+
+def get_significance_stars(p_value):
+    """Convert p-value to significance stars
+    
+    Args:
+        p_value: P-value from statistical test
+        
+    Returns:
+        str: Significance stars or empty string
+    """
+    if pd.isna(p_value):
+        return ''
+    elif p_value < 0.001:
+        return '***'
+    elif p_value < 0.01:
+        return '**'
+    elif p_value < 0.05:
+        return '*'
+    else:
+        return ''
+
+
+# ============================================================================
 # ANALYSIS FUNCTIONS: PROBE EVENTS
 # ============================================================================
 
@@ -2430,6 +2456,256 @@ def analyze_simulated_probe_events(trial_log_df, probe_revert_array, all_revert_
     print(f"Simulated probe analysis complete: {n_sim_probes} events analyzed")
 
 
+def compare_probe_vs_simulated_probe(trial_log_df, probe_revert_array, all_revert_times,
+                                     capacitive_df, treadmill_interp, output_folder, window=5):
+    """Compare probe events vs simulated probe events with t-tests
+    
+    Analyzes the average speed and capacitance in the 2 seconds after probe events
+    compared to 2 seconds after simulated probe events (unpaired reverts + 1s).
+    
+    Args:
+        trial_log_df: Trial log DataFrame
+        probe_revert_array: Array of matched probe-revert pairs
+        all_revert_times: All texture revert times
+        capacitive_df: Capacitive sensor DataFrame
+        treadmill_interp: Interpolated treadmill speed
+        output_folder: Directory for saving figures
+        window: Time window in seconds for context (display only)
+    """
+    # Check if probe events exist
+    if 'probe_time' not in trial_log_df.columns:
+        print("No 'probe_time' column found. Skipping probe comparison.")
+        return
+    
+    probe_event_times = pd.to_numeric(trial_log_df['probe_time'], errors='coerce').dropna()
+    probe_event_times = np.array(probe_event_times[~np.isnan(probe_event_times)], dtype=float)
+    
+    if len(probe_event_times) == 0:
+        print("No probe events found. Skipping probe comparison.")
+        return
+    
+    # Find unpaired revert times (simulated probes)
+    if probe_revert_array is not None and len(probe_revert_array) > 0:
+        matched_revert_times = probe_revert_array[:, 1]
+        matched_revert_times = matched_revert_times[~np.isnan(matched_revert_times)]
+        
+        unpaired_revert_times = []
+        tolerance_match = 1e-6
+        
+        for revert_time in all_revert_times:
+            is_matched = np.any(np.abs(matched_revert_times - revert_time) < tolerance_match)
+            if not is_matched:
+                unpaired_revert_times.append(revert_time)
+        
+        unpaired_revert_times = np.array(unpaired_revert_times)
+    elif len(all_revert_times) > 0:
+        unpaired_revert_times = all_revert_times.copy()
+    else:
+        print("No revert times found. Skipping probe comparison.")
+        return
+    
+    if len(unpaired_revert_times) == 0:
+        print("No unpaired revert times. Skipping probe comparison.")
+        return
+    
+    # Create simulated probe times (1 second after unpaired reverts)
+    simulated_probe_times = unpaired_revert_times + 1.0
+    
+    print(f"\n=== COMPARING PROBE VS SIMULATED PROBE EVENTS ===")
+    print(f"Probe events: {len(probe_event_times)}")
+    print(f"Simulated probe events: {len(simulated_probe_times)}")
+    
+    # Extract data arrays
+    cap_time = capacitive_df['elapsed_time'].values
+    cap_val = capacitive_df['capacitive_value'].values
+    speed_val = treadmill_interp.values
+    
+    # ========================================================================
+    # EXTRACT 2-SECOND POST-EVENT AVERAGES FOR PROBE EVENTS
+    # ========================================================================
+    
+    probe_speed_2s = []
+    probe_cap_2s = []
+    
+    for pt in probe_event_times:
+        # Extract 2 seconds after probe event (0 to 2s)
+        mask = (cap_time >= pt) & (cap_time <= pt + 2.0)
+        speed_segment = speed_val[mask]
+        cap_segment = cap_val[mask]
+        
+        if len(speed_segment) > 0:
+            probe_speed_2s.append(np.nanmean(speed_segment))
+        else:
+            probe_speed_2s.append(np.nan)
+        
+        if len(cap_segment) > 0:
+            probe_cap_2s.append(np.nanmean(cap_segment))
+        else:
+            probe_cap_2s.append(np.nan)
+    
+    probe_speed_2s = np.array(probe_speed_2s)
+    probe_cap_2s = np.array(probe_cap_2s)
+    
+    # Remove NaN values
+    valid_probe_speed = probe_speed_2s[~np.isnan(probe_speed_2s)]
+    valid_probe_cap = probe_cap_2s[~np.isnan(probe_cap_2s)]
+    
+    # ========================================================================
+    # EXTRACT 2-SECOND POST-EVENT AVERAGES FOR SIMULATED PROBE EVENTS
+    # ========================================================================
+    
+    sim_probe_speed_2s = []
+    sim_probe_cap_2s = []
+    
+    for sim_pt in simulated_probe_times:
+        # Extract 2 seconds after simulated probe event (0 to 2s)
+        mask = (cap_time >= sim_pt) & (cap_time <= sim_pt + 2.0)
+        speed_segment = speed_val[mask]
+        cap_segment = cap_val[mask]
+        
+        if len(speed_segment) > 0:
+            sim_probe_speed_2s.append(np.nanmean(speed_segment))
+        else:
+            sim_probe_speed_2s.append(np.nan)
+        
+        if len(cap_segment) > 0:
+            sim_probe_cap_2s.append(np.nanmean(cap_segment))
+        else:
+            sim_probe_cap_2s.append(np.nan)
+    
+    sim_probe_speed_2s = np.array(sim_probe_speed_2s)
+    sim_probe_cap_2s = np.array(sim_probe_cap_2s)
+    
+    # Remove NaN values
+    valid_sim_speed = sim_probe_speed_2s[~np.isnan(sim_probe_speed_2s)]
+    valid_sim_cap = sim_probe_cap_2s[~np.isnan(sim_probe_cap_2s)]
+    
+    # ========================================================================
+    # PERFORM T-TESTS
+    # ========================================================================
+    
+    # Speed comparison
+    if len(valid_probe_speed) > 0 and len(valid_sim_speed) > 0:
+        # Use independent samples t-test (not paired since different numbers of events)
+        if len(valid_probe_speed) >= 2 and len(valid_sim_speed) >= 2:
+            speed_t_stat, speed_p_value = ttest_ind(valid_probe_speed, valid_sim_speed)
+            print(f"\nSpeed (2s post-event):")
+            print(f"  Probe mean: {np.mean(valid_probe_speed):.2f} cm/s (n={len(valid_probe_speed)})")
+            print(f"  Simulated probe mean: {np.mean(valid_sim_speed):.2f} cm/s (n={len(valid_sim_speed)})")
+            print(f"  t-statistic: {speed_t_stat:.4f}")
+            print(f"  p-value: {speed_p_value:.6f}")
+        else:
+            speed_t_stat = np.nan
+            speed_p_value = np.nan
+            print(f"\nSpeed: Insufficient data for t-test")
+    else:
+        speed_t_stat = np.nan
+        speed_p_value = np.nan
+        print(f"\nSpeed: No valid data")
+    
+    # Capacitance comparison
+    if len(valid_probe_cap) > 0 and len(valid_sim_cap) > 0:
+        if len(valid_probe_cap) >= 2 and len(valid_sim_cap) >= 2:
+            cap_t_stat, cap_p_value = ttest_ind(valid_probe_cap, valid_sim_cap)
+            print(f"\nCapacitance (2s post-event):")
+            print(f"  Probe mean: {np.mean(valid_probe_cap):.2f} a.u. (n={len(valid_probe_cap)})")
+            print(f"  Simulated probe mean: {np.mean(valid_sim_cap):.2f} a.u. (n={len(valid_sim_cap)})")
+            print(f"  t-statistic: {cap_t_stat:.4f}")
+            print(f"  p-value: {cap_p_value:.6f}")
+        else:
+            cap_t_stat = np.nan
+            cap_p_value = np.nan
+            print(f"\nCapacitance: Insufficient data for t-test")
+    else:
+        cap_t_stat = np.nan
+        cap_p_value = np.nan
+        print(f"\nCapacitance: No valid data")
+    
+    print("=== END PROBE COMPARISON ===")
+    
+    # ========================================================================
+    # CREATE BAR PLOTS WITH T-TEST RESULTS
+    # ========================================================================
+    
+    fig, axs = plt.subplots(1, 2, figsize=(14, 5))
+    
+    # Plot 1: Speed Comparison
+    if len(valid_probe_speed) > 0 and len(valid_sim_speed) > 0:
+        means_speed = [np.mean(valid_probe_speed), np.mean(valid_sim_speed)]
+        sems_speed = [
+            np.std(valid_probe_speed, ddof=1) / np.sqrt(len(valid_probe_speed)),
+            np.std(valid_sim_speed, ddof=1) / np.sqrt(len(valid_sim_speed))
+        ]
+        x_pos = [0, 1]
+        bars = axs[0].bar(x_pos, means_speed, yerr=sems_speed, capsize=5,
+                         color=['#9467bd', '#8c564b'], alpha=0.7, edgecolor='black')
+        axs[0].set_xticks(x_pos)
+        axs[0].set_xticklabels(['Probe Events\n(2s post)', 'Simulated Probes\n(2s post)'])
+        axs[0].set_ylabel('Average Speed (cm/s)', fontsize=12)
+        axs[0].set_title('Speed: Probe vs Simulated Probe Events', fontsize=12, fontweight='bold')
+        axs[0].spines['top'].set_visible(False)
+        axs[0].spines['right'].set_visible(False)
+        axs[0].set_ylim(bottom=0)
+        
+        # Add significance stars
+        sig_stars = get_significance_stars(speed_p_value)
+        if sig_stars:
+            max_height = max(means_speed[0] + sems_speed[0], means_speed[1] + sems_speed[1])
+            axs[0].text(0.5, max_height * 1.1, sig_stars, ha='center', va='bottom', fontsize=20, fontweight='bold')
+            axs[0].plot([0, 1], [max_height * 1.05, max_height * 1.05], 'k-', linewidth=1)
+        
+        # Add n and p-value text
+        axs[0].text(0.5, -0.15, 
+                   f'n_probe = {len(valid_probe_speed)}, n_sim = {len(valid_sim_speed)}\np = {speed_p_value:.4f}' 
+                   if not pd.isna(speed_p_value) else f'n_probe = {len(valid_probe_speed)}, n_sim = {len(valid_sim_speed)}',
+                   ha='center', va='top', transform=axs[0].transAxes, fontsize=10)
+    else:
+        axs[0].text(0.5, 0.5, 'Insufficient Data', ha='center', va='center',
+                   transform=axs[0].transAxes, fontsize=12)
+        axs[0].set_title('Speed: Probe vs Simulated Probe Events', fontsize=12, fontweight='bold')
+    
+    # Plot 2: Capacitance Comparison
+    if len(valid_probe_cap) > 0 and len(valid_sim_cap) > 0:
+        means_cap = [np.mean(valid_probe_cap), np.mean(valid_sim_cap)]
+        sems_cap = [
+            np.std(valid_probe_cap, ddof=1) / np.sqrt(len(valid_probe_cap)),
+            np.std(valid_sim_cap, ddof=1) / np.sqrt(len(valid_sim_cap))
+        ]
+        x_pos = [0, 1]
+        bars = axs[1].bar(x_pos, means_cap, yerr=sems_cap, capsize=5,
+                         color=['#1f77b4', '#ff7f0e'], alpha=0.7, edgecolor='black')
+        axs[1].set_xticks(x_pos)
+        axs[1].set_xticklabels(['Probe Events\n(2s post)', 'Simulated Probes\n(2s post)'])
+        axs[1].set_ylabel('Average Capacitance (a.u.)', fontsize=12)
+        axs[1].set_title('Capacitance: Probe vs Simulated Probe Events', fontsize=12, fontweight='bold')
+        axs[1].spines['top'].set_visible(False)
+        axs[1].spines['right'].set_visible(False)
+        axs[1].set_ylim(bottom=0)
+        
+        # Add significance stars
+        sig_stars = get_significance_stars(cap_p_value)
+        if sig_stars:
+            max_height = max(means_cap[0] + sems_cap[0], means_cap[1] + sems_cap[1])
+            axs[1].text(0.5, max_height * 1.1, sig_stars, ha='center', va='bottom', fontsize=20, fontweight='bold')
+            axs[1].plot([0, 1], [max_height * 1.05, max_height * 1.05], 'k-', linewidth=1)
+        
+        # Add n and p-value text
+        axs[1].text(0.5, -0.15,
+                   f'n_probe = {len(valid_probe_cap)}, n_sim = {len(valid_sim_cap)}\np = {cap_p_value:.4f}'
+                   if not pd.isna(cap_p_value) else f'n_probe = {len(valid_probe_cap)}, n_sim = {len(valid_sim_cap)}',
+                   ha='center', va='top', transform=axs[1].transAxes, fontsize=10)
+    else:
+        axs[1].text(0.5, 0.5, 'Insufficient Data', ha='center', va='center',
+                   transform=axs[1].transAxes, fontsize=12)
+        axs[1].set_title('Capacitance: Probe vs Simulated Probe Events', fontsize=12, fontweight='bold')
+    
+    plt.tight_layout()
+    save_figure(fig, "probe_vs_simulated_probe_ttest", output_folder)
+    plt.show()
+    
+    print(f"\nProbe vs Simulated Probe comparison complete.")
+
+
 # ============================================================================
 # MAIN EXECUTION
 # ============================================================================
@@ -2549,8 +2825,15 @@ def main():
             data['trial_log'], probe_revert_array, all_revert_times,
             data['capacitive'], treadmill_interp, output_folder, cap_vmax=cap_vmax
         )
+        
+        # Step 11: Compare probe vs simulated probe events with t-tests
+        print("\nComparing probe vs simulated probe events...")
+        compare_probe_vs_simulated_probe(
+            data['trial_log'], probe_revert_array, all_revert_times,
+            data['capacitive'], treadmill_interp, output_folder
+        )
     
-    # Step 11: Summary
+    # Step 12: Summary
     print("\n" + "=" * 60)
     print("ANALYSIS COMPLETE")
     print("=" * 60)
