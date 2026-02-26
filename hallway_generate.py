@@ -952,6 +952,8 @@ class TCPStreamClient(DirectObject.DirectObject):
                 corridor.stop_texture_probability = self.base.cfg.get("stop_texture_probability", corridor.stop_texture_probability)
             if hasattr(corridor, 'probe'):
                 corridor.probe = self.base.cfg.get("probe", corridor.probe)
+            if hasattr(corridor, 'stay_zone_reward_probability'):
+                corridor.stay_zone_reward_probability = self.base.cfg.get("stay_zone_reward_probability", corridor.stay_zone_reward_probability)
 
             # Update wall and surface textures
             corridor.left_wall_texture = self.base.cfg.get("left_wall_texture", corridor.left_wall_texture)
@@ -974,6 +976,8 @@ class TCPStreamClient(DirectObject.DirectObject):
                 self.base.fog_color = self.base.cfg.get("fog_color", self.base.fog_color)
             if hasattr(self.base, 'time_spent_at_zero_speed'):
                 self.base.time_spent_at_zero_speed = self.base.cfg.get("time_spent_at_zero_speed", self.base.time_spent_at_zero_speed)
+            if hasattr(self.base, 'puff_zero_speed_time'):
+                self.base.puff_zero_speed_time = self.base.cfg.get("puff_zero_speed_time", self.base.puff_zero_speed_time)
             if hasattr(self.base, 'puff_duration'):
                 self.base.puff_duration = self.base.cfg.get("puff_duration", self.base.puff_duration)
             if hasattr(self.base, 'reward_duration'):
