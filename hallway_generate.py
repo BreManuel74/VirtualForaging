@@ -793,8 +793,6 @@ class TCPStreamClient(DirectObject.DirectObject):
         self.trial_df.to_csv = self.base.trial_df.to_csv 
         self.trial_csv_path = self.base.trial_csv_path
         self._send_lock = threading.Lock()
-        # Read the levels folder from environment variable, default to "Levels" if not set
-        self.levels_folder = os.environ.get("LEVELS_FOLDER", "Levels")
         
         if self.port == 0:
             print("Warning: No TCP server port specified. TCP client disabled.")
@@ -907,8 +905,11 @@ class TCPStreamClient(DirectObject.DirectObject):
         try:
             print(f"Changing level to: {level_file}")
             
-            # Construct full path to level file using the levels folder from session start
-            level_path = os.path.join(self.levels_folder, level_file)
+            # Get levels folder from environment variable, default to "Levels"
+            levels_folder = os.environ.get("LEVELS_FOLDER", "Levels")
+            
+            # Construct full path to level file
+            level_path = os.path.join(levels_folder, level_file)
             
             if not os.path.exists(level_path):
                 print(f"Level file not found: {level_path}")
