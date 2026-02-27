@@ -20,7 +20,8 @@ import os
 from tkinter import filedialog
 import tkinter as tk
 import matplotlib.cm as cm
-from scipy.stats import ttest_rel, ttest_ind
+from scipy.stats import ttest_rel, ttest_ind, kurtosis, skew
+from sklearn.mixture import GaussianMixture
 
 # Configure matplotlib for SVG output with editable text
 plt.rcParams['font.family'] = 'sans-serif'
@@ -1907,6 +1908,371 @@ def analyze_reward_hits_vs_misses(reward_zone_trials, capacitive_df, treadmill_i
     print(f"{'='*70}\n")
 
 
+def test_speed_bimodality_hits_vs_misses(reward_zone_trials, capacitive_df, treadmill_interp, output_folder):
+    """Test if speed distribution is truly bimodal or if hit/miss classification creates artificial groups
+    
+    This function tests the hypothesis that there are two distinct behavioral strategies (fast vs slow)
+    rather than the hit/miss classification artificially creating two groups. Uses multiple statistical
+    approaches:
+    1. Visual inspection of distribution (histogram)
+    2. Bimodality coefficient (BC > 0.555 suggests bimodality)
+    3. Gaussian Mixture Model comparison (1 vs 2 components using BIC)
+    4. Cluster purity analysis (how well natural clusters align with hit/miss labels)
+    
+    Args:
+        reward_zone_trials: List of (trial_idx, zone_entry_time, reward_event_time) tuples
+        capacitive_df: Capacitive DataFrame (for time reference)
+        treadmill_interp: Interpolated treadmill speed
+        output_folder: Directory to save figures
+    """
+    if len(reward_zone_trials) == 0:
+        print("No reward zone trials available for bimodality analysis.")
+        return
+    
+    print(f"\n{'='*70}")
+    print("TESTING FOR BIMODALITY IN SPEED DISTRIBUTION")
+    print("Question: Are fast/slow speeds real behavioral strategies or")
+    print("          artifacts of hit/miss classification?")
+    print(f"{'='*70}")
+    
+    # Extract time and speed data
+    cap_time = capacitive_df['elapsed_time'].values
+    speed_val = treadmill_interp.values
+    
+    # Separate hits and misses
+    hits, misses = separate_hits_and_misses(reward_zone_trials)
+    
+    # ========================================================================
+    # EXTRACT AVERAGE SPEED IN 2S POST-ZONE-ENTRY FOR EACH TRIAL
+    # ========================================================================
+    
+    all_speeds = []
+    all_labels = []  # 0 = miss, 1 = hit
+    
+    # Process hits
+    for trial_idx, zone_entry_time in hits:
+        mask = (cap_time >= zone_entry_time) & (cap_time <= zone_entry_time + 2.0)
+        speed_segment = speed_val[mask]
+        if len(speed_segment) > 0:
+            all_speeds.append(np.nanmean(speed_segment))
+            all_labels.append(1)  # hit
+    
+    # Process misses
+    for trial_idx, zone_entry_time in misses:
+        mask = (cap_time >= zone_entry_time) & (cap_time <= zone_entry_time + 2.0)
+        speed_segment = speed_val[mask]
+        if len(speed_segment) > 0:
+            all_speeds.append(np.nanmean(speed_segment))
+            all_labels.append(0)  # miss
+    
+    all_speeds = np.array(all_speeds)
+    all_labels = np.array(all_labels)
+    
+    if len(all_speeds) < 4:
+        print("Insufficient data for bimodality analysis (need at least 4 trials)")
+        return
+    
+    print(f"\nTotal trials analyzed: {len(all_speeds)}")
+    print(f"  Hits: {np.sum(all_labels == 1)}")
+    print(f"  Misses: {np.sum(all_labels == 0)}")
+    print(f"\nOverall speed statistics (2s post-zone-entry):")
+    print(f"  Mean: {np.mean(all_speeds):.2f} cm/s")
+    print(f"  Std: {np.std(all_speeds, ddof=1):.2f} cm/s")
+    print(f"  Range: {np.min(all_speeds):.2f} - {np.max(all_speeds):.2f} cm/s")
+    
+    # ========================================================================
+    # TEST 1: BIMODALITY COEFFICIENT
+    # ========================================================================
+    
+    # Bimodality coefficient: BC = (skew^2 + 1) / (kurtosis + 3*(n-1)^2 / ((n-2)*(n-3)))
+    # BC > 0.555 suggests bimodal distribution
+    # BC < 0.555 suggests unimodal distribution
+    
+    n = len(all_speeds)
+    skewness = skew(all_speeds)
+    kurt = kurtosis(all_speeds, fisher=True)  # Excess kurtosis
+    
+    # Calculate bimodality coefficient
+    bc_numerator = skewness**2 + 1
+    bc_denominator = kurt + 3 * (n - 1)**2 / ((n - 2) * (n - 3))
+    bimodality_coef = bc_numerator / bc_denominator
+    
+    print(f"\n--- TEST 1: Bimodality Coefficient ---")
+    print(f"Skewness: {skewness:.4f}")
+    print(f"Kurtosis (excess): {kurt:.4f}")
+    print(f"Bimodality Coefficient: {bimodality_coef:.4f}")
+    if bimodality_coef > 0.555:
+        print(f"  → BIMODAL: BC > 0.555 suggests TWO distinct modes")
+        print(f"  → Evidence for REAL behavioral strategies (fast vs slow)")
+    else:
+        print(f"  → UNIMODAL: BC < 0.555 suggests ONE mode")
+        print(f"  → May be artificial grouping from hit/miss classification")
+    
+    # ========================================================================
+    # TEST 2: GAUSSIAN MIXTURE MODEL COMPARISON
+    # ========================================================================
+    
+    print(f"\n--- TEST 2: Gaussian Mixture Model Comparison ---")
+    
+    # Reshape for sklearn
+    X = all_speeds.reshape(-1, 1)
+    
+    # Fit 1-component model (unimodal)
+    gmm1 = GaussianMixture(n_components=1, random_state=42, n_init=10, init_params='random')
+    gmm1.fit(X)
+    bic1 = gmm1.bic(X)
+    aic1 = gmm1.aic(X)
+    
+    # Fit 2-component model (bimodal)
+    gmm2 = GaussianMixture(n_components=2, random_state=42, n_init=10, init_params='random')
+    gmm2.fit(X)
+    bic2 = gmm2.bic(X)
+    aic2 = gmm2.aic(X)
+    
+    print(f"1-component model (unimodal):")
+    print(f"  BIC: {bic1:.2f}")
+    print(f"  AIC: {aic1:.2f}")
+    print(f"\n2-component model (bimodal):")
+    print(f"  BIC: {bic2:.2f}")
+    print(f"  AIC: {aic2:.2f}")
+    print(f"\nΔBIC (2-comp - 1-comp): {bic2 - bic1:.2f}")
+    print(f"ΔAIC (2-comp - 1-comp): {aic2 - aic1:.2f}")
+    
+    if bic2 < bic1:
+        print(f"  → BIMODAL: 2-component model preferred (lower BIC)")
+        print(f"  → Evidence for REAL behavioral strategies")
+    else:
+        print(f"  → UNIMODAL: 1-component model preferred (lower BIC)")
+        print(f"  → May be artificial grouping from hit/miss classification")
+    
+    # Extract cluster assignments from 2-component model
+    cluster_labels = gmm2.predict(X)
+    
+    # Get cluster means to determine which cluster is "fast" vs "slow"
+    cluster0_mean = np.mean(all_speeds[cluster_labels == 0])
+    cluster1_mean = np.mean(all_speeds[cluster_labels == 1])
+    
+    # Assign semantic labels
+    if cluster0_mean < cluster1_mean:
+        slow_cluster = 0
+        fast_cluster = 1
+    else:
+        slow_cluster = 1
+        fast_cluster = 0
+    
+    print(f"\n2-component model cluster means:")
+    print(f"  Slow cluster: {min(cluster0_mean, cluster1_mean):.2f} cm/s")
+    print(f"  Fast cluster: {max(cluster0_mean, cluster1_mean):.2f} cm/s")
+    
+    # Diagnostic: Show speed ranges within each cluster
+    slow_cluster_speeds_diag = all_speeds[cluster_labels == slow_cluster]
+    fast_cluster_speeds_diag = all_speeds[cluster_labels == fast_cluster]
+    
+    print(f"\nCluster speed ranges (DIAGNOSTIC):")
+    print(f"  Slow cluster: {np.min(slow_cluster_speeds_diag):.2f} - {np.max(slow_cluster_speeds_diag):.2f} cm/s")
+    print(f"  Fast cluster: {np.min(fast_cluster_speeds_diag):.2f} - {np.max(fast_cluster_speeds_diag):.2f} cm/s")
+    print(f"  Overlap range: {max(np.min(slow_cluster_speeds_diag), np.min(fast_cluster_speeds_diag)):.2f} - "
+          f"{min(np.max(slow_cluster_speeds_diag), np.max(fast_cluster_speeds_diag)):.2f} cm/s")
+    
+    # Show percentiles
+    print(f"\nCluster percentiles:")
+    print(f"  Slow cluster: 25th={np.percentile(slow_cluster_speeds_diag, 25):.2f}, "
+          f"50th={np.percentile(slow_cluster_speeds_diag, 50):.2f}, "
+          f"75th={np.percentile(slow_cluster_speeds_diag, 75):.2f}")
+    print(f"  Fast cluster: 25th={np.percentile(fast_cluster_speeds_diag, 25):.2f}, "
+          f"50th={np.percentile(fast_cluster_speeds_diag, 50):.2f}, "
+          f"75th={np.percentile(fast_cluster_speeds_diag, 75):.2f}")
+    
+    # ========================================================================
+    # TEST 3: CLUSTER PURITY ANALYSIS
+    # ========================================================================
+    
+    print(f"\n--- TEST 3: Cluster Purity Analysis ---")
+    print("If clusters align well with hit/miss labels, it suggests")
+    print("the behavioral strategies (fast/slow) CAUSE the outcomes (hit/miss)")
+    
+    # Create confusion matrix: cluster assignment vs hit/miss
+    slow_and_hit = np.sum((cluster_labels == slow_cluster) & (all_labels == 1))
+    slow_and_miss = np.sum((cluster_labels == slow_cluster) & (all_labels == 0))
+    fast_and_hit = np.sum((cluster_labels == fast_cluster) & (all_labels == 1))
+    fast_and_miss = np.sum((cluster_labels == fast_cluster) & (all_labels == 0))
+    
+    total_slow = slow_and_hit + slow_and_miss
+    total_fast = fast_and_hit + fast_and_miss
+    
+    print(f"\nCluster assignment vs Hit/Miss outcomes:")
+    print(f"                    Hits    Misses   Total")
+    print(f"  Slow cluster:     {slow_and_hit:4d}    {slow_and_miss:4d}     {total_slow:4d}")
+    print(f"  Fast cluster:     {fast_and_hit:4d}    {fast_and_miss:4d}     {total_fast:4d}")
+    
+    # Calculate purity metrics
+    slow_purity_hit = slow_and_hit / total_slow if total_slow > 0 else 0
+    slow_purity_miss = slow_and_miss / total_slow if total_slow > 0 else 0
+    fast_purity_hit = fast_and_hit / total_fast if total_fast > 0 else 0
+    fast_purity_miss = fast_and_miss / total_fast if total_fast > 0 else 0
+    
+    print(f"\nCluster composition:")
+    print(f"  Slow cluster: {slow_purity_hit*100:.1f}% hits, {slow_purity_miss*100:.1f}% misses")
+    print(f"  Fast cluster: {fast_purity_hit*100:.1f}% hits, {fast_purity_miss*100:.1f}% misses")
+    
+    # Overall purity (maximum class in each cluster)
+    overall_purity = (max(slow_and_hit, slow_and_miss) + max(fast_and_hit, fast_and_miss)) / len(all_speeds)
+    print(f"\nOverall cluster purity: {overall_purity*100:.1f}%")
+    
+    if overall_purity > 0.75:
+        print(f"  → HIGH purity: Clusters strongly align with hit/miss outcomes")
+        print(f"  → Speed strategy appears to DETERMINE outcome")
+    elif overall_purity > 0.60:
+        print(f"  → MODERATE purity: Some alignment between clusters and outcomes")
+        print(f"  → Speed strategy partially INFLUENCES outcome")
+    else:
+        print(f"  → LOW purity: Weak alignment between clusters and outcomes")
+        print(f"  → Hit/miss classification may not reflect speed strategies")
+    
+    # ========================================================================
+    # VISUALIZATION
+    # ========================================================================
+    
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    
+    # Plot 1: Histogram with overlaid distributions
+    ax1 = axes[0, 0]
+    bins = np.linspace(np.min(all_speeds), np.max(all_speeds), 30)
+    
+    # Plot histogram
+    ax1.hist(all_speeds, bins=bins, alpha=0.6, color='gray', edgecolor='black', label='All trials')
+    
+    # Overlay fitted distributions
+    x_range = np.linspace(np.min(all_speeds), np.max(all_speeds), 200).reshape(-1, 1)
+    
+    # 1-component model
+    logprob1 = gmm1.score_samples(x_range)
+    pdf1 = np.exp(logprob1) * len(all_speeds) * (bins[1] - bins[0])
+    ax1.plot(x_range, pdf1, 'b--', linewidth=2, label=f'1-component (BIC={bic1:.0f})')
+    
+    # 2-component model
+    logprob2 = gmm2.score_samples(x_range)
+    pdf2 = np.exp(logprob2) * len(all_speeds) * (bins[1] - bins[0])
+    ax1.plot(x_range, pdf2, 'r-', linewidth=2, label=f'2-component (BIC={bic2:.0f})')
+    
+    ax1.set_xlabel('Average Speed (cm/s, 2s post-zone-entry)')
+    ax1.set_ylabel('Count')
+    ax1.set_title('Speed Distribution: Model Comparison')
+    ax1.legend()
+    ax1.spines['top'].set_visible(False)
+    ax1.spines['right'].set_visible(False)
+    
+    # Plot 2: Histogram colored by hit/miss
+    ax2 = axes[0, 1]
+    hit_speeds = all_speeds[all_labels == 1]
+    miss_speeds = all_speeds[all_labels == 0]
+    
+    ax2.hist(hit_speeds, bins=bins, alpha=0.6, color='darkblue', edgecolor='black', label=f'Hits (n={len(hit_speeds)})')
+    ax2.hist(miss_speeds, bins=bins, alpha=0.6, color='deepskyblue', edgecolor='black', label=f'Misses (n={len(miss_speeds)})')
+    ax2.set_xlabel('Average Speed (cm/s, 2s post-zone-entry)')
+    ax2.set_ylabel('Count')
+    ax2.set_title('Speed Distribution: Hit/Miss Classification')
+    ax2.legend()
+    ax2.spines['top'].set_visible(False)
+    ax2.spines['right'].set_visible(False)
+    
+    # Plot 3: Histogram colored by unsupervised clusters
+    ax3 = axes[1, 0]
+    slow_cluster_speeds = all_speeds[cluster_labels == slow_cluster]
+    fast_cluster_speeds = all_speeds[cluster_labels == fast_cluster]
+    
+    ax3.hist(slow_cluster_speeds, bins=bins, alpha=0.6, color='green', edgecolor='black', 
+             label=f'Slow cluster (n={len(slow_cluster_speeds)})')
+    ax3.hist(fast_cluster_speeds, bins=bins, alpha=0.6, color='orange', edgecolor='black',
+             label=f'Fast cluster (n={len(fast_cluster_speeds)})')
+    ax3.set_xlabel('Average Speed (cm/s, 2s post-zone-entry)')
+    ax3.set_ylabel('Count')
+    ax3.set_title('Speed Distribution: Unsupervised Clustering (GMM)')
+    ax3.legend()
+    ax3.spines['top'].set_visible(False)
+    ax3.spines['right'].set_visible(False)
+    
+    # Plot 4: Scatter plot showing cluster vs hit/miss relationship
+    ax4 = axes[1, 1]
+    
+    # Create 4 groups for visualization
+    slow_hit_speeds = all_speeds[(cluster_labels == slow_cluster) & (all_labels == 1)]
+    slow_miss_speeds = all_speeds[(cluster_labels == slow_cluster) & (all_labels == 0)]
+    fast_hit_speeds = all_speeds[(cluster_labels == fast_cluster) & (all_labels == 1)]
+    fast_miss_speeds = all_speeds[(cluster_labels == fast_cluster) & (all_labels == 0)]
+    
+    # Plot as jittered scatter
+    np.random.seed(42)
+    jitter = 0.1
+    
+    if len(slow_hit_speeds) > 0:
+        ax4.scatter(np.random.normal(0, jitter, len(slow_hit_speeds)), slow_hit_speeds, 
+                   color='darkgreen', s=50, alpha=0.6, label=f'Slow+Hit (n={len(slow_hit_speeds)})')
+    if len(slow_miss_speeds) > 0:
+        ax4.scatter(np.random.normal(1, jitter, len(slow_miss_speeds)), slow_miss_speeds,
+                   color='lightgreen', s=50, alpha=0.6, label=f'Slow+Miss (n={len(slow_miss_speeds)})')
+    if len(fast_hit_speeds) > 0:
+        ax4.scatter(np.random.normal(2, jitter, len(fast_hit_speeds)), fast_hit_speeds,
+                   color='darkorange', s=50, alpha=0.6, label=f'Fast+Hit (n={len(fast_hit_speeds)})')
+    if len(fast_miss_speeds) > 0:
+        ax4.scatter(np.random.normal(3, jitter, len(fast_miss_speeds)), fast_miss_speeds,
+                   color='gold', s=50, alpha=0.6, label=f'Fast+Miss (n={len(fast_miss_speeds)})')
+    
+    ax4.set_xticks([0, 1, 2, 3])
+    ax4.set_xticklabels(['Slow\n+Hit', 'Slow\n+Miss', 'Fast\n+Hit', 'Fast\n+Miss'])
+    ax4.set_ylabel('Speed (cm/s)')
+    ax4.set_title('Cluster-Outcome Relationship')
+    ax4.legend(loc='upper right', fontsize=8)
+    ax4.spines['top'].set_visible(False)
+    ax4.spines['right'].set_visible(False)
+    ax4.set_ylim(bottom=0)
+    
+    plt.tight_layout()
+    save_figure(fig, 'speed_bimodality_analysis', output_folder)
+    plt.show()
+    
+    # ========================================================================
+    # SUMMARY
+    # ========================================================================
+    
+    print(f"\n{'='*70}")
+    print("SUMMARY: BIMODALITY ANALYSIS")
+    print(f"{'='*70}")
+    print(f"Bimodality Coefficient: {bimodality_coef:.4f} ({'BIMODAL' if bimodality_coef > 0.555 else 'UNIMODAL'})")
+    print(f"Best model by BIC: {'2-component (BIMODAL)' if bic2 < bic1 else '1-component (UNIMODAL)'}")
+    print(f"Cluster purity: {overall_purity*100:.1f}%")
+    
+    # Overall interpretation
+    bimodal_evidence_count = 0
+    if bimodality_coef > 0.555:
+        bimodal_evidence_count += 1
+    if bic2 < bic1:
+        bimodal_evidence_count += 1
+    if overall_purity > 0.65:
+        bimodal_evidence_count += 1
+    
+    print(f"\n--- INTERPRETATION ---")
+    if bimodal_evidence_count >= 2:
+        print("✓ STRONG EVIDENCE FOR REAL BEHAVIORAL STRATEGIES")
+        print("  The fast/slow speed dichotomy appears to be a genuine behavioral")
+        print("  phenomenon, not an artifact of hit/miss classification.")
+        print("  Interpretation: Mice use distinct movement strategies (fast vs slow)")
+        print("  and these strategies determine whether they get rewarded (hit vs miss).")
+    elif bimodal_evidence_count == 1:
+        print("~ MIXED EVIDENCE")
+        print("  Some tests support bimodality, others support unimodality.")
+        print("  The fast/slow distinction may be partially real but exaggerated")
+        print("  by the hit/miss classification.")
+    else:
+        print("✗ WEAK EVIDENCE FOR DISTINCT STRATEGIES")
+        print("  The fast/slow speed groups may be largely an artifact of")
+        print("  hit/miss classification rather than true behavioral strategies.")
+        print("  Interpretation: Speed exists on a continuum, and the hit/miss")
+        print("  classification imposes an artificial dichotomy.")
+    
+    print(f"{'='*70}\n")
+
+
 # ============================================================================
 # ANALYSIS FUNCTIONS: PUFF ZONES
 # ============================================================================
@@ -2222,6 +2588,192 @@ def analyze_probe_events(trial_log_df, capacitive_df, treadmill_interp, output_f
     plt.show()
     
     print(f"Probe event analysis complete: {n_probes} events analyzed")
+
+
+def analyze_probe_fast_vs_slow(trial_log_df, capacitive_df, treadmill_interp, output_folder, window=5):
+    """Analyze probe events split by fast vs slow speed in 2s post-probe window
+    
+    Calculates average speed in the 2 seconds after each probe event, then splits
+    probe events into the fastest 50% and slowest 50%. Creates a comparison plot
+    showing mean ± SEM for both groups.
+    
+    Args:
+        trial_log_df: Trial log DataFrame
+        capacitive_df: Capacitive sensor DataFrame
+        treadmill_interp: Interpolated treadmill speed data
+        output_folder: Directory for saving figures
+        window: Time window in seconds for plotting context (default: 5)
+    """
+    # Check if probe events exist
+    if 'probe_time' not in trial_log_df.columns:
+        print("No 'probe_time' column found. Skipping probe fast/slow analysis.")
+        return
+    
+    probe_event_times = pd.to_numeric(trial_log_df['probe_time'], errors='coerce').dropna()
+    probe_event_times = np.array(probe_event_times[~np.isnan(probe_event_times)], dtype=float)
+    
+    if len(probe_event_times) == 0:
+        print("No probe events found. Skipping probe fast/slow analysis.")
+        return
+    
+    print(f"\n{'='*70}")
+    print(f"ANALYZING PROBE EVENTS: FAST VS SLOW SPEEDS (2s post-probe)")
+    print(f"{'='*70}")
+    print(f"Total probe events: {len(probe_event_times)}")
+    
+    # Extract data arrays
+    cap_time = capacitive_df['elapsed_time'].values
+    speed_val = treadmill_interp.values
+    
+    # ========================================================================
+    # CALCULATE AVERAGE SPEED IN 2S POST-PROBE FOR EACH EVENT
+    # ========================================================================
+    
+    probe_avg_speeds = []
+    probe_times_with_data = []
+    
+    for pt in probe_event_times:
+        # Extract 2 seconds after probe event (0 to 2s)
+        mask = (cap_time >= pt) & (cap_time <= pt + 2.0)
+        speed_segment = speed_val[mask]
+        
+        if len(speed_segment) > 0:
+            avg_speed = np.nanmean(speed_segment)
+            probe_avg_speeds.append(avg_speed)
+            probe_times_with_data.append(pt)
+    
+    probe_avg_speeds = np.array(probe_avg_speeds)
+    probe_times_with_data = np.array(probe_times_with_data)
+    
+    if len(probe_avg_speeds) < 2:
+        print(f"Insufficient probe events with data ({len(probe_avg_speeds)}). Need at least 2.")
+        return
+    
+    # ========================================================================
+    # SPLIT INTO FAST (top 50%) AND SLOW (bottom 50%) TRIALS
+    # ========================================================================
+    
+    # Sort by average speed
+    sorted_indices = np.argsort(probe_avg_speeds)
+    n_probes = len(probe_avg_speeds)
+    n_slow = n_probes // 2
+    n_fast = n_probes - n_slow  # Handles odd numbers
+    
+    slow_indices = sorted_indices[:n_slow]
+    fast_indices = sorted_indices[n_slow:]
+    
+    slow_probe_times = probe_times_with_data[slow_indices]
+    fast_probe_times = probe_times_with_data[fast_indices]
+    
+    slow_avg_speeds = probe_avg_speeds[slow_indices]
+    fast_avg_speeds = probe_avg_speeds[fast_indices]
+    
+    print(f"\nSlow trials (bottom 50%): n={len(slow_probe_times)}")
+    print(f"  Mean speed (2s post-probe): {np.mean(slow_avg_speeds):.2f} cm/s")
+    print(f"  Range: {np.min(slow_avg_speeds):.2f} - {np.max(slow_avg_speeds):.2f} cm/s")
+    
+    print(f"\nFast trials (top 50%): n={len(fast_probe_times)}")
+    print(f"  Mean speed (2s post-probe): {np.mean(fast_avg_speeds):.2f} cm/s")
+    print(f"  Range: {np.min(fast_avg_speeds):.2f} - {np.max(fast_avg_speeds):.2f} cm/s")
+    
+    # ========================================================================
+    # CREATE ALIGNED SPEED WINDOWS FOR SLOW TRIALS
+    # ========================================================================
+    
+    speed_windows_slow = []
+    for pt in slow_probe_times:
+        mask = (cap_time >= pt - window) & (cap_time <= pt + window)
+        speed_segment = speed_val[mask]
+        speed_windows_slow.append(speed_segment)
+    
+    if len(speed_windows_slow) > 0 and max(len(seg) for seg in speed_windows_slow) > 0:
+        max_len_slow = max(len(seg) for seg in speed_windows_slow)
+        speed_windows_slow_padded = np.array([
+            np.pad(seg.astype(float), (0, max_len_slow - len(seg)), constant_values=np.nan)
+            for seg in speed_windows_slow
+        ])
+        aligned_time_slow = np.linspace(-window, window, max_len_slow)
+    else:
+        speed_windows_slow_padded = None
+        aligned_time_slow = None
+    
+    # ========================================================================
+    # CREATE ALIGNED SPEED WINDOWS FOR FAST TRIALS
+    # ========================================================================
+    
+    speed_windows_fast = []
+    for pt in fast_probe_times:
+        mask = (cap_time >= pt - window) & (cap_time <= pt + window)
+        speed_segment = speed_val[mask]
+        speed_windows_fast.append(speed_segment)
+    
+    if len(speed_windows_fast) > 0 and max(len(seg) for seg in speed_windows_fast) > 0:
+        max_len_fast = max(len(seg) for seg in speed_windows_fast)
+        speed_windows_fast_padded = np.array([
+            np.pad(seg.astype(float), (0, max_len_fast - len(seg)), constant_values=np.nan)
+            for seg in speed_windows_fast
+        ])
+        aligned_time_fast = np.linspace(-window, window, max_len_fast)
+    else:
+        speed_windows_fast_padded = None
+        aligned_time_fast = None
+    
+    # ========================================================================
+    # CREATE COMPARISON PLOT: FAST VS SLOW
+    # ========================================================================
+    
+    if speed_windows_slow_padded is not None and speed_windows_fast_padded is not None:
+        print(f"\nCreating comparison plot: Fast vs Slow probe trials")
+        
+        avg_speed_slow = np.nanmean(speed_windows_slow_padded, axis=0)
+        sem_speed_slow = np.nanstd(speed_windows_slow_padded, axis=0, ddof=1) / np.sqrt(
+            np.sum(~np.isnan(speed_windows_slow_padded), axis=0)
+        )
+        
+        avg_speed_fast = np.nanmean(speed_windows_fast_padded, axis=0)
+        sem_speed_fast = np.nanstd(speed_windows_fast_padded, axis=0, ddof=1) / np.sqrt(
+            np.sum(~np.isnan(speed_windows_fast_padded), axis=0)
+        )
+        
+        fig, ax = plt.subplots(figsize=(12, 6))
+        
+        # Plot slow trials
+        ax.plot(aligned_time_slow, avg_speed_slow, color='darkblue', linewidth=2, 
+                label=f'Slow Trials (n={len(slow_probe_times)})')
+        ax.fill_between(aligned_time_slow, 
+                       avg_speed_slow - sem_speed_slow,
+                       avg_speed_slow + sem_speed_slow,
+                       alpha=0.2, color='darkblue')
+        
+        # Plot fast trials
+        ax.plot(aligned_time_fast, avg_speed_fast, color='deepskyblue', linewidth=2, 
+                label=f'Fast Trials (n={len(fast_probe_times)})')
+        ax.fill_between(aligned_time_fast, 
+                       avg_speed_fast - sem_speed_fast,
+                       avg_speed_fast + sem_speed_fast,
+                       alpha=0.2, color='deepskyblue')
+        
+        ax.axvline(x=0, color='black', linestyle='--', linewidth=2, label='Probe Event (t=0)')
+        ax.set_xlabel('Time from Probe Event (s)')
+        ax.set_ylabel('Treadmill Speed (cm/s)')
+        ax.set_title(f'Treadmill Speed: Fast (n={len(fast_probe_times)}) vs Slow (n={len(slow_probe_times)}) Probe Trials\n(Split by median speed in 2s post-probe window)')
+        ax.legend()
+        ax.set_xlim(-window, window)
+        ax.set_ylim(bottom=0)
+        ax.set_xticks(np.arange(-window, window + 1, 1))
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        plt.tight_layout()
+        save_figure(fig, 'probe_speed_comparison_fast_vs_slow', output_folder)
+        plt.show()
+        
+        print(f"Fast vs Slow comparison plot created successfully")
+    else:
+        print("Could not create comparison plot: insufficient data")
+    
+    print(f"\n{'='*70}")
+    print("PROBE FAST VS SLOW ANALYSIS COMPLETE")
+    print(f"{'='*70}\n")
 
 
 def match_probe_to_revert_times(trial_log_df, texture_data):
@@ -2787,6 +3339,12 @@ def main():
         analyze_reward_hits_vs_misses(
             reward_zone_trials, data['capacitive'], treadmill_interp, output_folder, window=5
         )
+        
+        # Test for bimodality in speed distribution
+        print("\nTesting for bimodality in hit/miss speed distribution...")
+        test_speed_bimodality_hits_vs_misses(
+            reward_zone_trials, data['capacitive'], treadmill_interp, output_folder
+        )
     
     # Step 8: Match and analyze puff zones (using capacitive scale from reward analysis)
     print("\nAnalyzing puff zones...")
@@ -2811,6 +3369,12 @@ def main():
     print("\nAnalyzing probe events...")
     analyze_probe_events(
         data['trial_log'], data['capacitive'], treadmill_interp, output_folder, cap_vmax=cap_vmax
+    )
+    
+    # Step 9b: Analyze probe events split by fast vs slow speeds
+    print("\nAnalyzing probe events: fast vs slow trials...")
+    analyze_probe_fast_vs_slow(
+        data['trial_log'], data['capacitive'], treadmill_interp, output_folder
     )
     
     # Step 10: Match probe times to revert times and analyze simulated probes
