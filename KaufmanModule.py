@@ -53,6 +53,7 @@ class TrialLogging:
             'probe_time': np.full(max_trials, np.nan),
             'puff_event': np.full(max_trials, np.nan, dtype=object),
             'reward_event': np.full(max_trials, np.nan, dtype=object),
+            'hits_event': np.full(max_trials, np.nan, dtype=object),
         })
         self.save()
 
@@ -114,6 +115,9 @@ class TrialLogging:
 
     def log_zone_re_entry_time(self, t: float) -> None:
         self._append_value('zone_re_entry_time', float(t))
+
+    def log_hits_event(self, t: float) -> None:
+        self._append_value('hits_event', float(t))
 
 class DataGenerator:
     """

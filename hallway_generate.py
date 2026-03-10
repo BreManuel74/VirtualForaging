@@ -1554,6 +1554,12 @@ class MousePortal(ShowBase):
                 #print("Requesting Reward state")
                 self.fsm.request('Reward')
                 self.active_stay_zone = False  # Reset stay zone flag after requesting reward
+            elif (self.segments_with_stay_texture <= self.zone_length and 
+                fsm_state != 'Reward' and
+                corridor.reward_zone_active == False and 
+                (speed_zero_duration or meets_time_requirement)):
+                self.trial_logger.log_hits_event(round(global_stopwatch.get_elapsed_time(), 2))
+                self.active_stay_zone = False  # Reset stay zone flag after logging hit
 
         elif self.current_texture == go_texture and self.active_puff_zone == True:
             #print(self.zone_length)
