@@ -17,6 +17,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import ast
 import os
+import sys
 from tkinter import filedialog
 import tkinter as tk
 import matplotlib.cm as cm
@@ -120,13 +121,37 @@ def select_data_folder():
     root = tk.Tk()
     root.withdraw()
     
+    # Bring the dialog to the front
+    root.attributes('-topmost', True)
+    root.update()
+    
     script_dir = os.path.dirname(os.path.abspath(__file__))
     initial_dir = os.path.dirname(script_dir)
     
-    folder_path = filedialog.askdirectory(
-        title="Select folder containing behavioral data files",
-        initialdir=initial_dir
-    )
+    try:
+        folder_path = filedialog.askdirectory(
+            title="Select folder containing behavioral data files",
+            initialdir=initial_dir,
+            parent=root
+        )
+        
+        # Debug: show what was returned
+        print(f"\nDialog returned: '{folder_path}'")
+        print(f"Type: {type(folder_path)}, Length: {len(folder_path) if folder_path else 0}")
+        
+    except KeyboardInterrupt:
+        print("\nFolder selection cancelled by user.")
+        folder_path = None
+    except Exception as e:
+        print(f"\nUnexpected error during folder selection: {e}")
+        folder_path = None
+    finally:
+        root.destroy()
+    
+    if folder_path:
+        print(f"Selected folder: {folder_path}")
+    else:
+        print("No folder was selected (empty or None)")
     
     return folder_path if folder_path else None
 
@@ -252,15 +277,48 @@ def process_texture_history(trial_log_df):
         print(f"Warning: Missing texture columns: {missing_cols}. Creating empty arrays.")
         return create_empty_texture_arrays(trial_log_df)
     
+    # Collect all re-entry times to exclude them from analyses and plots
+    re_entry_times = set()
+    if 'zone_re_entry_time' in trial_log_df.columns:
+        for val in trial_log_df['zone_re_entry_time']:
+            re_entry_list = safe_literal_eval(val)
+            for t in re_entry_list:
+                if pd.notna(t) and t != '':
+                    try:
+                        re_entry_times.add(float(t))
+                    except (ValueError, TypeError):
+                        pass
+    
+    if len(re_entry_times) > 0:
+        print(f"Excluding {len(re_entry_times)} zone re-entries from timeline analysis")
+    
     # Parse texture history column
     texture_history = trial_log_df['texture_history'].apply(safe_literal_eval)
     
-    # Parse stay zone (reward) columns
-    stay_texture_change_time = trial_log_df['stay_texture_change_time'].apply(safe_literal_eval)
+    # Parse stay zone (reward) columns and filter out re-entries
+    def filter_re_entries(time_list):
+        """Filter out any times that match re-entry times"""
+        if not time_list:
+            return []
+        filtered = []
+        for t in time_list:
+            if pd.notna(t) and t != '':
+                try:
+                    if float(t) not in re_entry_times:
+                        filtered.append(t)
+                except (ValueError, TypeError):
+                    pass
+        return filtered
+    
+    stay_texture_change_time = trial_log_df['stay_texture_change_time'].apply(
+        lambda x: filter_re_entries(safe_literal_eval(x))
+    )
     stay_texture_revert_time = trial_log_df['stay_texture_revert_time'].apply(safe_literal_eval)
     
-    # Parse go zone (punish) columns
-    go_texture_change_time = trial_log_df['go_texture_change_time'].apply(safe_literal_eval)
+    # Parse go zone (punish) columns and filter out re-entries
+    go_texture_change_time = trial_log_df['go_texture_change_time'].apply(
+        lambda x: filter_re_entries(safe_literal_eval(x))
+    )
     go_texture_revert_time = trial_log_df['go_texture_revert_time'].apply(safe_literal_eval)
     
     # Check if there are any texture changes (handle NaN and empty cases)
@@ -388,12 +446,15 @@ def process_texture_history(trial_log_df):
     )
     
     # Combine stay and go times into unified arrays (for backward compatibility)
+    # Note: Using the already-filtered stay_texture_change_time and go_texture_change_time
+    # which have re-entries removed
     all_change_times = []
     all_revert_times = []
     
     for idx in range(len(trial_log_df)):
-        stay_times = safe_literal_eval(trial_log_df['stay_texture_change_time'].iloc[idx])
-        go_times = safe_literal_eval(trial_log_df['go_texture_change_time'].iloc[idx])
+        # Use the filtered versions which already have re-entries removed
+        stay_times = stay_texture_change_time.iloc[idx]
+        go_times = go_texture_change_time.iloc[idx]
         stay_reverts = safe_literal_eval(trial_log_df['stay_texture_revert_time'].iloc[idx])
         go_reverts = safe_literal_eval(trial_log_df['go_texture_revert_time'].iloc[idx])
         
@@ -601,8 +662,21 @@ def match_reward_zones_to_events(trial_log_df, reward_texture_change_time):
     
     print("\n=== MATCHING REWARD ZONES TO DELIVERY EVENTS ===")
     
+    # Collect all re-entry times to exclude them
+    re_entry_times = set()
+    if 'zone_re_entry_time' in trial_log_df.columns:
+        for val in trial_log_df['zone_re_entry_time']:
+            re_entry_list = safe_literal_eval(val)
+            for t in re_entry_list:
+                if pd.notna(t) and t != '':
+                    try:
+                        re_entry_times.add(float(t))
+                    except (ValueError, TypeError):
+                        pass
+    
     # Collect all reward zone entries from stay_texture_change_time column
     # (stay zones are always reward zones, regardless of texture_history)
+    # EXCLUDING re-entries
     all_reward_zones = []
     for trial_idx in range(len(trial_log_df)):
         # Reward zones use stay_texture_change_time
@@ -611,9 +685,14 @@ def match_reward_zones_to_events(trial_log_df, reward_texture_change_time):
         if len(texture_times) > 0:
             for zone_entry_time in texture_times:
                 if pd.notna(zone_entry_time) and zone_entry_time > 0:
-                    all_reward_zones.append((trial_idx, zone_entry_time))
+                    # Exclude re-entries
+                    try:
+                        if float(zone_entry_time) not in re_entry_times:
+                            all_reward_zones.append((trial_idx, zone_entry_time))
+                    except (ValueError, TypeError):
+                        pass
     
-    print(f"Found {len(all_reward_zones)} reward zone entries")
+    print(f"Found {len(all_reward_zones)} reward zone entries (re-entries excluded)")
     
     # Collect all reward events
     reward_events = []
@@ -679,8 +758,21 @@ def match_puff_zones_to_events(trial_log_df, punish_texture_change_time_first):
     
     print("\n=== MATCHING PUFF ZONES TO DELIVERY EVENTS ===")
     
+    # Collect all re-entry times to exclude them
+    re_entry_times = set()
+    if 'zone_re_entry_time' in trial_log_df.columns:
+        for val in trial_log_df['zone_re_entry_time']:
+            re_entry_list = safe_literal_eval(val)
+            for t in re_entry_list:
+                if pd.notna(t) and t != '':
+                    try:
+                        re_entry_times.add(float(t))
+                    except (ValueError, TypeError):
+                        pass
+    
     # Collect all puff zone entries using FIRST puff per zone from pre-computed array
     # (go zones are always punish zones, regardless of texture_history)
+    # EXCLUDING re-entries
     all_puff_zones = []
     puff_zone_count = 0
     for trial_idx in range(len(trial_log_df)):
@@ -695,11 +787,13 @@ def match_puff_zones_to_events(trial_log_df, punish_texture_change_time_first):
             if not pd.isna(zone_entry_time) and zone_entry_time != '':
                 try:
                     zone_entry_time = float(zone_entry_time)
-                    all_puff_zones.append((trial_idx, zone_entry_time))
+                    # Exclude re-entries
+                    if zone_entry_time not in re_entry_times:
+                        all_puff_zones.append((trial_idx, zone_entry_time))
                 except (ValueError, TypeError):
                     continue
     
-    print(f"Found {len(all_puff_zones)} puff zone entries")
+    print(f"Found {len(all_puff_zones)} puff zone entries (re-entries excluded)")
     
     # Collect all puff events
     puff_events = []
@@ -785,7 +879,7 @@ def match_puff_zones_to_events(trial_log_df, punish_texture_change_time_first):
 # WINDOW EXTRACTION FUNCTIONS
 # ============================================================================
 
-def create_aligned_windows(time_array, data_array, event_times, window_size=5):
+def create_aligned_windows(time_array, data_array, event_times, window_size=5, n_timepoints=None):
     """Create time-aligned windows around event times
     
     Args:
@@ -793,6 +887,7 @@ def create_aligned_windows(time_array, data_array, event_times, window_size=5):
         data_array: Data values
         event_times: List/array of event times to align to
         window_size: Window size in seconds (before and after event)
+        n_timepoints: Number of timepoints for output (if None, uses max length found)
         
     Returns:
         tuple: (aligned_windows array, aligned_time array)
@@ -800,26 +895,47 @@ def create_aligned_windows(time_array, data_array, event_times, window_size=5):
     if len(event_times) == 0:
         return None, None
     
+    # Create common time axis for interpolation
+    if n_timepoints is None:
+        # Estimate based on sampling rate
+        time_diffs = np.diff(time_array)
+        median_dt = np.median(time_diffs[time_diffs > 0])
+        n_timepoints = int(2 * window_size / median_dt) + 1
+    
+    # Common time axis centered at 0
+    aligned_time = np.linspace(-window_size, window_size, n_timepoints)
+    
     windows = []
     for event_time in event_times:
+        # Extract segment around event
         mask = (time_array >= event_time - window_size) & (time_array <= event_time + window_size)
-        segment = data_array[mask]
-        windows.append(segment)
+        segment_time = time_array[mask]
+        segment_data = data_array[mask]
+        
+        if len(segment_time) < 2:
+            # Not enough data for this event, use NaN
+            windows.append(np.full(n_timepoints, np.nan))
+            continue
+        
+        # Center time at event
+        segment_time_centered = segment_time - event_time
+        
+        # Interpolate to common time axis
+        interpolated_data = np.interp(
+            aligned_time, 
+            segment_time_centered, 
+            segment_data,
+            left=np.nan,
+            right=np.nan
+        )
+        windows.append(interpolated_data)
     
     if len(windows) == 0:
         return None, None
     
-    # Pad to same length
-    max_len = max(len(seg) for seg in windows)
-    windows_padded = np.array([
-        np.pad(seg.astype(float), (0, max_len - len(seg)), constant_values=np.nan)
-        for seg in windows
-    ])
+    windows_array = np.array(windows)
     
-    # Create aligned time axis
-    aligned_time = np.linspace(-window_size, window_size, max_len)
-    
-    return windows_padded, aligned_time
+    return windows_array, aligned_time
 
 
 # ============================================================================
@@ -1174,20 +1290,11 @@ def plot_average_traces_reward(reward_zone_trials, trial_log_df, capacitive_df,
     # Extract zone entry times
     zone_entry_times = [entry[1] for entry in reward_zone_trials]
     
-    # Create speed windows aligned to zone entry
-    speed_windows = []
-    for rt in zone_entry_times:
-        mask = (cap_time >= rt - window) & (cap_time <= rt + window)
-        speed_segment = speed_val[mask]
-        speed_windows.append(speed_segment)
+    # Create speed windows aligned to zone entry (using interpolation)
+    speed_windows_padded, aligned_time_speed = create_aligned_windows(
+        cap_time, speed_val, zone_entry_times, window
+    )
     
-    max_speed_len = max(len(seg) for seg in speed_windows)
-    speed_windows_padded = np.array([
-        np.pad(seg.astype(float), (0, max_speed_len - len(seg)), constant_values=np.nan)
-        for seg in speed_windows
-    ])
-    
-    aligned_time_speed = np.linspace(-window, window, max_speed_len)
     mean_speed = np.nanmean(speed_windows_padded, axis=0)
     sem_speed = np.nanstd(speed_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(speed_windows_padded), axis=0))
     
@@ -1199,20 +1306,11 @@ def plot_average_traces_reward(reward_zone_trials, trial_log_df, capacitive_df,
         print("No reward events found for average trace analysis")
         return
     
-    # Create capacitive windows aligned to reward events
-    cap_event_windows = []
-    for rt in reward_event_times_flat:
-        mask = (cap_time >= rt - window) & (cap_time <= rt + window)
-        cap_segment = cap_val[mask]
-        cap_event_windows.append(cap_segment)
+    # Create capacitive windows aligned to reward events (using interpolation)
+    cap_event_windows_padded, aligned_time_event = create_aligned_windows(
+        cap_time, cap_val, reward_event_times_flat, window
+    )
     
-    max_event_len = max(len(seg) for seg in cap_event_windows)
-    cap_event_windows_padded = np.array([
-        np.pad(seg.astype(float), (0, max_event_len - len(seg)), constant_values=np.nan)
-        for seg in cap_event_windows
-    ])
-    
-    aligned_time_event = np.linspace(-window, window, max_event_len)
     mean_event_vals = np.nanmean(cap_event_windows_padded, axis=0)
     sem_event_vals = np.nanstd(cap_event_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(cap_event_windows_padded), axis=0))
     
@@ -1257,37 +1355,19 @@ def plot_average_traces_reward(reward_zone_trials, trial_log_df, capacitive_df,
     if pupil_diameter_interp is not None:
         pupil_val = pupil_diameter_interp.values
         
-        # Pupil aligned to zone entry
-        pupil_zone_windows = []
-        for rt in zone_entry_times:
-            mask = (cap_time >= rt - window) & (cap_time <= rt + window)
-            pupil_segment = pupil_val[mask]
-            pupil_zone_windows.append(pupil_segment)
+        # Pupil aligned to zone entry (using interpolation)
+        pupil_zone_windows_padded, aligned_time_pupil = create_aligned_windows(
+            cap_time, pupil_val, zone_entry_times, window
+        )
         
-        max_pupil_len = max(len(seg) for seg in pupil_zone_windows)
-        pupil_zone_windows_padded = np.array([
-            np.pad(seg.astype(float), (0, max_pupil_len - len(seg)), constant_values=np.nan)
-            for seg in pupil_zone_windows
-        ])
-        
-        aligned_time_pupil = np.linspace(-window, window, max_pupil_len)
         mean_pupil = np.nanmean(pupil_zone_windows_padded, axis=0)
         sem_pupil = np.nanstd(pupil_zone_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(pupil_zone_windows_padded), axis=0))
         
-        # Pupil aligned to reward events
-        pupil_event_windows = []
-        for rt in reward_event_times_flat:
-            mask = (cap_time >= rt - window) & (cap_time <= rt + window)
-            pupil_segment = pupil_val[mask]
-            pupil_event_windows.append(pupil_segment)
+        # Pupil aligned to reward events (using interpolation)
+        pupil_event_windows_padded, aligned_time_pupil_event = create_aligned_windows(
+            cap_time, pupil_val, reward_event_times_flat, window
+        )
         
-        max_pupil_event_len = max(len(seg) for seg in pupil_event_windows)
-        pupil_event_windows_padded = np.array([
-            np.pad(seg.astype(float), (0, max_pupil_event_len - len(seg)), constant_values=np.nan)
-            for seg in pupil_event_windows
-        ])
-        
-        aligned_time_pupil_event = np.linspace(-window, window, max_pupil_event_len)
         mean_pupil_event = np.nanmean(pupil_event_windows_padded, axis=0)
         sem_pupil_event = np.nanstd(pupil_event_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(pupil_event_windows_padded), axis=0))
         
@@ -1372,24 +1452,15 @@ def plot_average_traces_puff(puff_zone_trials, trial_log_df, capacitive_df,
     # Extract zone entry times
     zone_entry_times = [entry[1] for entry in puff_zone_trials]
     
-    # Speed aligned to puff zone entry
-    speed_puff_windows = []
-    for puff_time in zone_entry_times:
-        mask = (cap_time >= puff_time - window) & (cap_time <= puff_time + window)
-        speed_segment = speed_val[mask]
-        speed_puff_windows.append(speed_segment)
+    # Speed aligned to puff zone entry (using interpolation)
+    speed_puff_windows_padded, aligned_time_puff = create_aligned_windows(
+        cap_time, speed_val, zone_entry_times, window
+    )
     
-    if not speed_puff_windows or max(len(seg) for seg in speed_puff_windows) == 0:
+    if speed_puff_windows_padded is None:
         print("No valid speed data for puff zone analysis")
         return
     
-    max_puff_len = max(len(seg) for seg in speed_puff_windows)
-    speed_puff_windows_padded = np.array([
-        np.pad(seg.astype(float), (0, max_puff_len - len(seg)), constant_values=np.nan)
-        for seg in speed_puff_windows
-    ])
-    
-    aligned_time_puff = np.linspace(-window, window, max_puff_len)
     n_puff_events = speed_puff_windows_padded.shape[0]
     mean_speed_puff = np.nanmean(speed_puff_windows_padded, axis=0)
     sem_speed_puff = np.nanstd(speed_puff_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(speed_puff_windows_padded), axis=0))
@@ -1403,21 +1474,12 @@ def plot_average_traces_puff(puff_zone_trials, trial_log_df, capacitive_df,
         puff_event_times = puff_event_times[~np.isnan(puff_event_times)].values
         
         if len(puff_event_times) > 0:
-            # Capacitive aligned to puff events
-            cap_puff_event_windows = []
-            for puff_event_time in puff_event_times:
-                mask = (cap_time >= puff_event_time - window) & (cap_time <= puff_event_time + window)
-                cap_segment = cap_val[mask]
-                cap_puff_event_windows.append(cap_segment)
+            # Capacitive aligned to puff events (using interpolation)
+            cap_puff_event_windows_padded, aligned_time_puff_cap = create_aligned_windows(
+                cap_time, cap_val, puff_event_times, window
+            )
             
-            if cap_puff_event_windows and max(len(seg) for seg in cap_puff_event_windows) > 0:
-                max_puff_cap_len = max(len(seg) for seg in cap_puff_event_windows)
-                cap_puff_event_windows_padded = np.array([
-                    np.pad(seg.astype(float), (0, max_puff_cap_len - len(seg)), constant_values=np.nan)
-                    for seg in cap_puff_event_windows
-                ])
-                
-                aligned_time_puff_cap = np.linspace(-window, window, max_puff_cap_len)
+            if cap_puff_event_windows_padded is not None:
                 n_puff_event_cap = cap_puff_event_windows_padded.shape[0]
                 mean_cap_puff_event = np.nanmean(cap_puff_event_windows_padded, axis=0)
                 sem_cap_puff_event = np.nanstd(cap_puff_event_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(cap_puff_event_windows_padded), axis=0))
@@ -1429,21 +1491,12 @@ def plot_average_traces_puff(puff_zone_trials, trial_log_df, capacitive_df,
                     'n_events': n_puff_event_cap
                 }
             
-            # Speed aligned to puff events
-            speed_puff_event_windows = []
-            for puff_event_time in puff_event_times:
-                mask = (cap_time >= puff_event_time - window) & (cap_time <= puff_event_time + window)
-                speed_segment = speed_val[mask]
-                speed_puff_event_windows.append(speed_segment)
+            # Speed aligned to puff events (using interpolation)
+            speed_puff_event_windows_padded, aligned_time_puff_speed = create_aligned_windows(
+                cap_time, speed_val, puff_event_times, window
+            )
             
-            if speed_puff_event_windows and max(len(seg) for seg in speed_puff_event_windows) > 0:
-                max_puff_speed_len = max(len(seg) for seg in speed_puff_event_windows)
-                speed_puff_event_windows_padded = np.array([
-                    np.pad(seg.astype(float), (0, max_puff_speed_len - len(seg)), constant_values=np.nan)
-                    for seg in speed_puff_event_windows
-                ])
-                
-                aligned_time_puff_speed = np.linspace(-window, window, max_puff_speed_len)
+            if speed_puff_event_windows_padded is not None:
                 n_puff_event_speed = speed_puff_event_windows_padded.shape[0]
                 mean_speed_puff_event = np.nanmean(speed_puff_event_windows_padded, axis=0)
                 sem_speed_puff_event = np.nanstd(speed_puff_event_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(speed_puff_event_windows_padded), axis=0))
@@ -1532,20 +1585,11 @@ def plot_average_traces_puff(puff_zone_trials, trial_log_df, capacitive_df,
         pupil_val = pupil_diameter_interp.values
         window_pupil = 10
         
-        # Pupil aligned to puff zone entry
-        pupil_puff_windows = []
-        for puff_time in zone_entry_times:
-            mask = (cap_time >= puff_time - window_pupil) & (cap_time <= puff_time + window_pupil)
-            pupil_segment = pupil_val[mask]
-            pupil_puff_windows.append(pupil_segment)
+        # Pupil aligned to puff zone entry (using interpolation)
+        pupil_puff_windows_padded, aligned_time_pupil_puff = create_aligned_windows(
+            cap_time, pupil_val, zone_entry_times, window_pupil
+        )
         
-        max_pupil_puff_len = max(len(seg) for seg in pupil_puff_windows)
-        pupil_puff_windows_padded = np.array([
-            np.pad(seg.astype(float), (0, max_pupil_puff_len - len(seg)), constant_values=np.nan)
-            for seg in pupil_puff_windows
-        ])
-        
-        aligned_time_pupil_puff = np.linspace(-window_pupil, window_pupil, max_pupil_puff_len)
         mean_pupil_puff = np.nanmean(pupil_puff_windows_padded, axis=0)
         sem_pupil_puff = np.nanstd(pupil_puff_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(pupil_puff_windows_padded), axis=0))
         n_puffs_pupil = pupil_puff_windows_padded.shape[0]
@@ -1556,20 +1600,12 @@ def plot_average_traces_puff(puff_zone_trials, trial_log_df, capacitive_df,
             puff_event_times = pd.to_numeric(trial_log_df['puff_event'], errors='coerce').dropna().values
             
             if len(puff_event_times) > 0:
-                pupil_puff_event_windows = []
-                for puff_time in puff_event_times:
-                    mask = (cap_time >= puff_time - window_pupil) & (cap_time <= puff_time + window_pupil)
-                    pupil_segment = pupil_val[mask]
-                    pupil_puff_event_windows.append(pupil_segment)
+                # Use interpolation for puff event windows
+                pupil_puff_event_windows_padded, aligned_time_pupil_puff_event = create_aligned_windows(
+                    cap_time, pupil_val, puff_event_times, window_pupil
+                )
                 
-                if pupil_puff_event_windows and max(len(seg) for seg in pupil_puff_event_windows) > 0:
-                    max_pupil_puff_event_len = max(len(seg) for seg in pupil_puff_event_windows)
-                    pupil_puff_event_windows_padded = np.array([
-                        np.pad(seg.astype(float), (0, max_pupil_puff_event_len - len(seg)), constant_values=np.nan)
-                        for seg in pupil_puff_event_windows
-                    ])
-                    
-                    aligned_time_pupil_puff_event = np.linspace(-window_pupil, window_pupil, max_pupil_puff_event_len)
+                if pupil_puff_event_windows_padded is not None:
                     n_puffs_pupil_event = pupil_puff_event_windows_padded.shape[0]
                     mean_pupil_puff_event = np.nanmean(pupil_puff_event_windows_padded, axis=0)
                     sem_pupil_puff_event = np.nanstd(pupil_puff_event_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(pupil_puff_event_windows_padded), axis=0))
@@ -2025,40 +2061,19 @@ def analyze_probe_events(trial_log_df, capacitive_df, treadmill_interp, output_f
     cap_val = capacitive_df['capacitive_value'].values
     speed_val = treadmill_interp.values
     
-    # --- Capacitive Value aligned to probe events ---
-    cap_probe_windows = []
-    for pt in probe_event_times:
-        mask = (cap_time >= pt - window) & (cap_time <= pt + window)
-        cap_segment = cap_val[mask]
-        cap_probe_windows.append(cap_segment)
+    # --- Capacitive Value aligned to probe events (using interpolation) ---
+    cap_probe_windows_padded, aligned_time_probe = create_aligned_windows(
+        cap_time, cap_val, probe_event_times, window
+    )
     
-    # Pad all segments to the same length
-    max_probe_len = max(len(seg) for seg in cap_probe_windows) if cap_probe_windows else 0
-    
-    if max_probe_len == 0:
+    if cap_probe_windows_padded is None:
         print("No valid probe event data found for alignment analysis.")
         return
     
-    cap_probe_windows_padded = np.array([
-        np.pad(seg.astype(float), (0, max_probe_len - len(seg)), constant_values=np.nan)
-        for seg in cap_probe_windows
-    ])
-    
-    # --- Treadmill Speed aligned to probe events ---
-    speed_probe_windows = []
-    for pt in probe_event_times:
-        mask = (cap_time >= pt - window) & (cap_time <= pt + window)
-        speed_segment = speed_val[mask]
-        speed_probe_windows.append(speed_segment)
-    
-    # Pad speed segments to the same length
-    speed_probe_windows_padded = np.array([
-        np.pad(seg.astype(float), (0, max_probe_len - len(seg)), constant_values=np.nan)
-        for seg in speed_probe_windows
-    ])
-    
-    # Create a common time axis centered at 0
-    aligned_time_probe = np.linspace(-window, window, max_probe_len)
+    # --- Treadmill Speed aligned to probe events (using interpolation) ---
+    speed_probe_windows_padded, _ = create_aligned_windows(
+        cap_time, speed_val, probe_event_times, window
+    )
     
     # --- Combined Subplots: Treadmill Speed and Capacitive Value aligned to probe events ---
     fig, axs = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
@@ -2265,39 +2280,19 @@ def analyze_simulated_probe_events(trial_log_df, probe_revert_array, all_revert_
     cap_val = capacitive_df['capacitive_value'].values
     speed_val = treadmill_interp.values
     
-    # --- Capacitive Value aligned to simulated probes ---
-    cap_sim_windows = []
-    for sim_probe_time in simulated_probe_times:
-        mask = (cap_time >= sim_probe_time - window) & (cap_time <= sim_probe_time + window)
-        cap_segment = cap_val[mask]
-        cap_sim_windows.append(cap_segment)
+    # --- Capacitive Value aligned to simulated probes (using interpolation) ---
+    cap_sim_windows_padded, aligned_time_sim = create_aligned_windows(
+        cap_time, cap_val, simulated_probe_times, window
+    )
     
-    # Check for valid windows
-    if not cap_sim_windows or max(len(seg) for seg in cap_sim_windows) == 0:
+    if cap_sim_windows_padded is None:
         print("Warning: No valid data windows for simulated probe analysis.")
         return
     
-    # Pad segments
-    max_sim_len = max(len(seg) for seg in cap_sim_windows)
-    cap_sim_windows_padded = np.array([
-        np.pad(seg.astype(float), (0, max_sim_len - len(seg)), constant_values=np.nan)
-        for seg in cap_sim_windows
-    ])
-    
-    # --- Treadmill Speed aligned to simulated probes ---
-    speed_sim_windows = []
-    for sim_probe_time in simulated_probe_times:
-        mask = (cap_time >= sim_probe_time - window) & (cap_time <= sim_probe_time + window)
-        speed_segment = speed_val[mask]
-        speed_sim_windows.append(speed_segment)
-    
-    speed_sim_windows_padded = np.array([
-        np.pad(seg.astype(float), (0, max_sim_len - len(seg)), constant_values=np.nan)
-        for seg in speed_sim_windows
-    ])
-    
-    # Create aligned time axis
-    aligned_time_sim = np.linspace(-window, window, max_sim_len)
+    # --- Treadmill Speed aligned to simulated probes (using interpolation) ---
+    speed_sim_windows_padded, _ = create_aligned_windows(
+        cap_time, speed_val, simulated_probe_times, window
+    )
     
     # --- Create Combined Plot ---
     fig, axs = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
@@ -2484,4 +2479,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n\nProgram interrupted by user. Exiting...")
+        sys.exit(0)

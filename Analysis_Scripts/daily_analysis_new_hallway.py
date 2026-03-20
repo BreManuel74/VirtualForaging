@@ -72,13 +72,38 @@ class LickAnalysis:
         Returns:
             reward_texture_change_time: 1D array of FIRST stay zone entry time per trial
         """
+        # Collect all re-entry times to exclude them
+        re_entry_times = set()
+        if 'zone_re_entry_time' in self.trial_log_df.columns:
+            for val in self.trial_log_df['zone_re_entry_time']:
+                re_entry_list = self.safe_literal_eval(val)
+                for t in re_entry_list:
+                    if pd.notna(t) and t != '':
+                        try:
+                            re_entry_times.add(float(t))
+                        except (ValueError, TypeError):
+                            pass
+        
         stay_texture_change_time = self.trial_log_df['stay_texture_change_time'].apply(self.safe_literal_eval)
         
-        # Extract only the FIRST entry per trial (exclude re-entries)
-        first_entries = stay_texture_change_time.apply(lambda x: x[0] if len(x) > 0 else np.nan)
+        # Extract only the FIRST entry per trial and exclude re-entries
+        first_entries = []
+        for x in stay_texture_change_time:
+            if len(x) > 0:
+                entry = x[0]
+                # Exclude if this entry is a re-entry from another trial
+                try:
+                    if float(entry) not in re_entry_times:
+                        first_entries.append(entry)
+                    else:
+                        first_entries.append(np.nan)
+                except (ValueError, TypeError):
+                    first_entries.append(np.nan)
+            else:
+                first_entries.append(np.nan)
         
         # Convert to 1D array (reshape to maintain compatibility with existing code)
-        reward_texture_change_time = first_entries.values.reshape(-1, 1)
+        reward_texture_change_time = np.array(first_entries).reshape(-1, 1)
         
         return reward_texture_change_time
 
@@ -345,13 +370,38 @@ class SpeedAnalysis:
         Returns:
             punish_texture_change_time: 1D array of FIRST go zone entry time per trial
         """
-        go_texture_change_time = self.trial_log_df['go_texture_change_time'].apply(self.safe_literal_eval)
+        # Collect all re-entry times to exclude them
+        re_entry_times = set()
+        if 'zone_re_entry_time' in self.trial_log_df.columns:
+            for val in self.trial_log_df['zone_re_entry_time']:
+                re_entry_list = LickAnalysis.safe_literal_eval(val)
+                for t in re_entry_list:
+                    if pd.notna(t) and t != '':
+                        try:
+                            re_entry_times.add(float(t))
+                        except (ValueError, TypeError):
+                            pass
         
-        # Extract only the FIRST entry per trial (exclude re-entries)
-        first_entries = go_texture_change_time.apply(lambda x: x[0] if len(x) > 0 else np.nan)
+        go_texture_change_time = self.trial_log_df['go_texture_change_time'].apply(LickAnalysis.safe_literal_eval)
+        
+        # Extract only the FIRST entry per trial and exclude re-entries
+        first_entries = []
+        for x in go_texture_change_time:
+            if len(x) > 0:
+                entry = x[0]
+                # Exclude if this entry is a re-entry from another trial
+                try:
+                    if float(entry) not in re_entry_times:
+                        first_entries.append(entry)
+                    else:
+                        first_entries.append(np.nan)
+                except (ValueError, TypeError):
+                    first_entries.append(np.nan)
+            else:
+                first_entries.append(np.nan)
         
         # Convert to 1D array (reshape to maintain compatibility with existing code)
-        punish_texture_change_time = first_entries.values.reshape(-1, 1)
+        punish_texture_change_time = np.array(first_entries).reshape(-1, 1)
         
         return punish_texture_change_time
 
