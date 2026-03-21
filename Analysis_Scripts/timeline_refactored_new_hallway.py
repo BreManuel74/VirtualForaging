@@ -729,15 +729,44 @@ def match_reward_zones_to_events(trial_log_df, reward_texture_change_time):
             reward_zone_trials.append((zone_trial_idx, zone_entry_time, reward_event_time))
             matched_zones.add(best_match)
     
-    # Add unmatched zones with NaN reward times
+    # Build a temporal mapping: zone_entry_time -> hits_event_time for inactive hits.
+    # hits_event is an independent event column (not row-aligned). Match each hits_event
+    # to the most recent preceding zone entry, then exclude zones already claimed by rewards.
+    hits_to_zone_map = {}  # zone_entry_time (float) -> hits_event_time
+    if 'hits_event' in trial_log_df.columns:
+        # Collect all hits_event times as a flat sorted array
+        hits_event_times = pd.to_numeric(trial_log_df['hits_event'], errors='coerce').dropna().values
+        hits_event_times = np.sort(hits_event_times)
+
+        # Zone entry times that are already claimed by a reward
+        reward_claimed_zone_times = {float(zt) for _, zt, _ in reward_zone_trials}
+
+        # All zone entry times as a sorted array for temporal matching
+        all_zone_entry_times = np.array(sorted(zt for _, zt in all_reward_zones))
+
+        # For each hits_event, find the most recent preceding zone entry
+        for hit_time in hits_event_times:
+            prior_zones = all_zone_entry_times[all_zone_entry_times < hit_time]
+            if len(prior_zones) == 0:
+                continue
+            matched_zone_t = float(prior_zones[-1])
+            # Only record if this zone is not claimed by a reward event
+            if matched_zone_t not in reward_claimed_zone_times:
+                # Keep only the first (earliest) hits_event per zone
+                if matched_zone_t not in hits_to_zone_map:
+                    hits_to_zone_map[matched_zone_t] = hit_time
+
+    # Add unmatched zones - use the mapped hits_event time if available (correct stop in
+    # inactive zone), otherwise NaN (true miss: mouse did not stop correctly in zone)
     for i, (zone_trial_idx, zone_entry_time) in enumerate(all_reward_zones):
         if i not in matched_zones:
-            reward_zone_trials.append((zone_trial_idx, zone_entry_time, np.nan))
+            event_time = hits_to_zone_map.get(float(zone_entry_time), np.nan)
+            reward_zone_trials.append((zone_trial_idx, zone_entry_time, event_time))
     
     reward_zone_trials.sort(key=lambda x: x[1])
     
     valid_deliveries = sum(1 for _, _, r in reward_zone_trials if pd.notna(r) and r > 0)
-    print(f"Successfully matched {valid_deliveries}/{len(reward_zone_trials)} reward zones to deliveries")
+    print(f"Successfully matched {valid_deliveries}/{len(reward_zone_trials)} reward zones to deliveries or hits")
     print("=== END REWARD ZONE MATCHING ===\n")
     
     return reward_zone_trials

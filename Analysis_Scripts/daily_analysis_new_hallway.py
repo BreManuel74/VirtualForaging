@@ -1479,6 +1479,49 @@ if __name__ == "__main__":
     reward_zone_times_flat = pd.to_numeric(reward_zone_times_flat, errors='coerce')
     reward_zone_times_flat = reward_zone_times_flat[~np.isnan(reward_zone_times_flat)]
 
+    # Compute inactive hits: correct stops in inactive reward zones (hits_event present,
+    # no reward_event). Columns are independent event logs — matching is done temporally,
+    # not row-by-row, using the same approach as get_reward_zone_times_for_rewards.
+    tl = analysis.trial_log_df
+
+    # Collect all hits_event times as a flat, independent array
+    if 'hits_event' in tl.columns:
+        hits_event_times = pd.to_numeric(tl['hits_event'], errors='coerce').dropna().values
+        hits_event_times = np.sort(hits_event_times)
+    else:
+        hits_event_times = np.array([])
+
+    # Find which zone entry times are already claimed by a reward_event (temporal match)
+    all_reward_event_times = pd.to_numeric(tl['reward_event'], errors='coerce').dropna().values
+    if len(all_reward_event_times) > 0 and len(reward_zone_times_flat) > 0:
+        _reward_matched_zones = LickAnalysis.get_reward_zone_times_for_rewards(
+            all_reward_event_times, reward_zone_times_flat
+        )
+        reward_claimed_zone_set = {
+            float(zt) for zt in _reward_matched_zones if not np.isnan(zt)
+        }
+    else:
+        reward_claimed_zone_set = set()
+
+    # For each hits_event, find its most recent preceding zone entry.
+    # If that zone was NOT claimed by a reward, it is an inactive hit.
+    if len(hits_event_times) > 0 and len(reward_zone_times_flat) > 0:
+        _hits_matched_zones = LickAnalysis.get_reward_zone_times_for_rewards(
+            hits_event_times, reward_zone_times_flat
+        )
+        inactive_hit_zone_set = {
+            float(zt) for zt in _hits_matched_zones
+            if not np.isnan(zt) and float(zt) not in reward_claimed_zone_set
+        }
+        inactive_hit_zone_times = np.array(sorted(inactive_hit_zone_set))
+    else:
+        inactive_hit_zone_times = np.array([])
+
+    print(f"Session totals: {len(reward_zone_times_flat)} reward zone entries, "
+          f"{len(all_reward_event_times)} reward deliveries, "
+          f"{len(hits_event_times)} inactive hits (hits_event), "
+          f"{len(inactive_hit_zone_times)} inactive hit zones matched")
+
     for i, q in enumerate(quarters):
         start = q['start']
         end = q['end']
@@ -1488,11 +1531,17 @@ if __name__ == "__main__":
             matched_zone_times=q['matched_zone_times']
         )
         metrics_quarter['Quarter'] = f'Q{i+1}'
-        metrics_quarter[f'Q{i+1}_hits'] = len(q['reward_times'])
         reward_zones_in_quarter = reward_zone_times_flat[(reward_zone_times_flat >= start) & (reward_zone_times_flat < end)]
         metrics_quarter[f'Q{i+1}_reward_zones'] = len(reward_zones_in_quarter)
-        metrics_quarter[f'Q{i+1}_misses'] = len(reward_zones_in_quarter) - len(q['reward_times'])
+        # Inactive hits: correct stops in inactive zones (hits_event present, no reward_event)
+        n_inactive_hits = int(np.sum((inactive_hit_zone_times >= start) & (inactive_hit_zone_times < end)))
+        total_hits = len(q['reward_times']) + n_inactive_hits
+        metrics_quarter[f'Q{i+1}_hits'] = total_hits
+        metrics_quarter[f'Q{i+1}_misses'] = len(reward_zones_in_quarter) - total_hits
         quarter_data.append(metrics_quarter)
+        print(f"  Q{i+1}: {len(reward_zones_in_quarter)} zones | "
+              f"{len(q['reward_times'])} reward hits + {n_inactive_hits} inactive hits "
+              f"= {total_hits} total hits | {len(reward_zones_in_quarter) - total_hits} misses")
         #Print metrics for each quarter
         # print(f"Quarter {i+1} ({start:.2f} to {end:.2f}):")
         #print(f"  Avg licks before reward: {metrics_quarter['average_licks_before_reward']}")
