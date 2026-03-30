@@ -19,12 +19,53 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 import colorsys
 import sys
-from scipy import stats
+import pickle
+import hashlib
 
 # Add Analysis_Scripts to path to import lick detection algorithm
 script_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, script_dir)
 import lick_detection_algorithm as lda
+
+# Cache directory for KDE values
+KDE_CACHE_DIR = os.path.join(script_dir, '.kde_cache')
+if not os.path.exists(KDE_CACHE_DIR):
+    os.makedirs(KDE_CACHE_DIR)
+
+def get_file_hash(filepath):
+    """Generate a hash based on file path and modification time."""
+    stat = os.stat(filepath)
+    # Use file path, size, and modification time to create unique identifier
+    hash_input = f"{filepath}_{stat.st_size}_{stat.st_mtime}".encode('utf-8')
+    return hashlib.md5(hash_input).hexdigest()
+
+def get_cached_kde(capacitive_filepath):
+    """Retrieve cached KDE value for a capacitive file if it exists."""
+    file_hash = get_file_hash(capacitive_filepath)
+    cache_file = os.path.join(KDE_CACHE_DIR, f"{file_hash}.pkl")
+    
+    if os.path.exists(cache_file):
+        try:
+            with open(cache_file, 'rb') as f:
+                cached_data = pickle.load(f)
+                return cached_data['kde_value']
+        except Exception as e:
+            # If cache is corrupted, ignore and recalculate
+            print(f"Warning: Cache read failed for {capacitive_filepath}: {e}")
+            return None
+    return None
+
+def cache_kde_value(capacitive_filepath, kde_value):
+    """Cache the KDE value for a capacitive file."""
+    file_hash = get_file_hash(capacitive_filepath)
+    cache_file = os.path.join(KDE_CACHE_DIR, f"{file_hash}.pkl")
+    
+    try:
+        with open(cache_file, 'wb') as f:
+            pickle.dump({'kde_value': kde_value}, f)
+    except Exception as e:
+        # If caching fails, just continue without caching
+        print(f"Warning: Cache write failed for {capacitive_filepath}: {e}")
 
 def generate_colors(n):
     """Generate n distinct colors"""
@@ -173,7 +214,11 @@ def analyze_levels(data_files):
                     # Read trial log data
                     trial_log = pd.read_csv(row['trial_log'])
                     # Count rewards (non-null reward events)
-                    hits = len(trial_log['reward_event'].dropna()) + len(trial_log['hits_event'].dropna())
+                    # Check if hits_event column exists (older data may not have it)
+                    if 'hits_event' in trial_log.columns:
+                        hits = len(trial_log['reward_event'].dropna()) + len(trial_log['hits_event'].dropna())
+                    else:
+                        hits = len(trial_log['reward_event'].dropna())  # Use only reward_event for older data
                     # Calculate session length in minutes
                     capacitive_data = pd.read_csv(row['capacitive'])
                     session_length = capacitive_data['elapsed_time'].max() / 60.0
@@ -296,8 +341,14 @@ def analyze_mouse_data(data_files, markers, starting_conditions, save_lick_plots
                 cap_df = capacitive_data.copy()
                 cap_df['Time_sec'] = cap_df['elapsed_time']
                 
-                # Compute KDE normalization
-                kde_value = lda.compute_KDE(cap_df, 'capacitive_value')
+                # Compute KDE normalization (with caching)
+                capacitive_filepath = row['capacitive']
+                kde_value = get_cached_kde(capacitive_filepath)
+                if kde_value is None:
+                    # Cache miss - compute KDE
+                    kde_value = lda.compute_KDE(cap_df, 'capacitive_value')
+                    cache_kde_value(capacitive_filepath, kde_value)
+                
                 cap_df = lda.compute_KDE_normalizations(cap_df, 'capacitive_value', kde_value)
                 
                 # Detect lick events using dynamic threshold (max_deviation / 2)
@@ -707,83 +758,6 @@ def analyze_mouse_data(data_files, markers, starting_conditions, save_lick_plots
     ax.tick_params(axis='x', which='minor', direction='in')
     ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
     plt.legend()
-    
-    # Statistical Analysis: Sex-based comparison
-    print("\n" + "=" * 70)
-    print("STATISTICAL ANALYSIS: SEX-BASED COMPARISON (Two-tailed t-test)")
-    print("=" * 70)
-    sex_sig_days = []  # Store significant days for plotting
-    if len(male_rewards_per_min) > 0 and len(female_rewards_per_min) > 0:
-        # Overall comparison using all data points (excluding NaN)
-        male_all_data = male_rewards_per_min.flatten()
-        male_all_data = male_all_data[~np.isnan(male_all_data)]
-        female_all_data = female_rewards_per_min.flatten()
-        female_all_data = female_all_data[~np.isnan(female_all_data)]
-        
-        if len(male_all_data) > 0 and len(female_all_data) > 0:
-            t_stat, p_value = stats.ttest_ind(male_all_data, female_all_data)
-            print(f"\nOverall Comparison (All Time Points):")
-            print(f"  Male: n={len(male_all_data)}, Mean={np.mean(male_all_data):.3f}, SEM={np.std(male_all_data)/np.sqrt(len(male_all_data)):.3f}")
-            print(f"  Female: n={len(female_all_data)}, Mean={np.mean(female_all_data):.3f}, SEM={np.std(female_all_data)/np.sqrt(len(female_all_data)):.3f}")
-            print(f"  t-statistic: {t_stat:.4f}")
-            print(f"  p-value: {p_value:.4f}")
-            if p_value < 0.001:
-                print(f"  Significance: *** (p < 0.001)")
-            elif p_value < 0.01:
-                print(f"  Significance: ** (p < 0.01)")
-            elif p_value < 0.05:
-                print(f"  Significance: * (p < 0.05)")
-            else:
-                print(f"  Significance: ns (not significant)")
-        
-        # Day-by-day comparison
-        print(f"\nDay-by-Day Comparison:")
-        print(f"  (Showing all comparisons with sample sizes and p-values)")
-        for day in range(max_days):
-            male_day = male_rewards_per_min[:, day]
-            female_day = female_rewards_per_min[:, day]
-            male_day = male_day[~np.isnan(male_day)]
-            female_day = female_day[~np.isnan(female_day)]
-            
-            n_male = len(male_day)
-            n_female = len(female_day)
-            mean_male = np.mean(male_day) if n_male > 0 else np.nan
-            mean_female = np.mean(female_day) if n_female > 0 else np.nan
-            
-            if n_male > 1 and n_female > 1:
-                t_stat, p_value = stats.ttest_ind(male_day, female_day)
-                
-                sig_marker = ""
-                if p_value < 0.001:
-                    sig_marker = " ***"
-                    sex_sig_days.append((day, t_stat, p_value))
-                elif p_value < 0.01:
-                    sig_marker = " **"
-                    sex_sig_days.append((day, t_stat, p_value))
-                elif p_value < 0.05:
-                    sig_marker = " *"
-                    sex_sig_days.append((day, t_stat, p_value))
-                else:
-                    sig_marker = " ns"
-                
-                print(f"  Day {day}: n_male={n_male}, n_female={n_female}, Mean_male={mean_male:.3f}, Mean_female={mean_female:.3f}, t={t_stat:.3f}, p={p_value:.4f}{sig_marker}")
-            elif n_male > 0 or n_female > 0:
-                print(f"  Day {day}: n_male={n_male}, n_female={n_female} - Insufficient data (need n>1 for both groups)")
-        
-        if not sex_sig_days:
-            print(f"  No significant differences found at individual days (p < 0.05)")
-    else:
-        print("  Insufficient data for sex-based comparison (need both male and female data)")
-    print("=" * 70 + "\n")
-    
-    # Add significance markers to sex-specific rewards plot
-    if sex_sig_days:
-        plt.figure(sex_reward_fig.number)
-        ax = plt.gca()
-        y_max = ax.get_ylim()[1]
-        for day, t_stat, p_value in sex_sig_days:
-            sig_marker = "***" if p_value < 0.001 else "**" if p_value < 0.01 else "*"
-            plt.text(day, y_max * 0.95, sig_marker, ha='center', va='top', fontsize=12, fontweight='bold')
 
     # Create a new figure for condition-based analysis
     condition_reward_fig = plt.figure(figsize=(12, 6))
@@ -837,130 +811,6 @@ def analyze_mouse_data(data_files, markers, starting_conditions, save_lick_plots
     ax.tick_params(axis='x', which='minor', direction='in')
     ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
     plt.legend()
-    
-    # Statistical Analysis: Condition-based comparison (Rewards)
-    print("\n" + "=" * 70)
-    print("STATISTICAL ANALYSIS: STARTING CONDITION COMPARISON - REWARDS")
-    print("(Two-tailed t-test, pairwise comparisons)")
-    print("=" * 70)
-    
-    condition_reward_sig_days = []  # Store significant days for plotting
-    if len(condition_groups) > 1:
-        # Perform pairwise comparisons between all conditions
-        conditions_list = list(condition_groups.keys())
-        
-        # Overall comparisons
-        for i in range(len(conditions_list)):
-            for j in range(i + 1, len(conditions_list)):
-                cond1 = conditions_list[i]
-                cond2 = conditions_list[j]
-                
-                # Get all data points for each condition
-                cond1_data = []
-                for rewards in condition_groups[cond1]:
-                    cond1_data.extend(rewards[~np.isnan(rewards)])
-                cond2_data = []
-                for rewards in condition_groups[cond2]:
-                    cond2_data.extend(rewards[~np.isnan(rewards)])
-                
-                cond1_data = np.array(cond1_data)
-                cond2_data = np.array(cond2_data)
-                
-                if len(cond1_data) > 0 and len(cond2_data) > 0:
-                    t_stat, p_value = stats.ttest_ind(cond1_data, cond2_data)
-                    print(f"\nOverall: {cond1} vs {cond2}:")
-                    print(f"  {cond1}: n={len(cond1_data)}, Mean={np.mean(cond1_data):.3f}, SEM={np.std(cond1_data)/np.sqrt(len(cond1_data)):.3f}")
-                    print(f"  {cond2}: n={len(cond2_data)}, Mean={np.mean(cond2_data):.3f}, SEM={np.std(cond2_data)/np.sqrt(len(cond2_data)):.3f}")
-                    print(f"  t-statistic: {t_stat:.4f}")
-                    print(f"  p-value: {p_value:.4f}")
-                    if p_value < 0.001:
-                        print(f"  Significance: *** (p < 0.001)")
-                    elif p_value < 0.01:
-                        print(f"  Significance: ** (p < 0.01)")
-                    elif p_value < 0.05:
-                        print(f"  Significance: * (p < 0.05)")
-                    else:
-                        print(f"  Significance: ns (not significant)")
-        
-        # Day-by-day comparisons
-        print(f"\nDay-by-Day Comparisons:")
-        print(f"  (Showing all comparisons with sample sizes and p-values)")
-        # First find the global maximum length across all conditions
-        global_max_len = max(max(len(r) for r in rewards_list) for rewards_list in condition_groups.values())
-        
-        # Pad all conditions to the same global maximum length
-        condition_padded = {}
-        for condition, rewards_list in condition_groups.items():
-            condition_padded[condition] = np.array([np.pad(r, (0, global_max_len - len(r)), 
-                                                    constant_values=np.nan) for r in rewards_list])
-        
-        has_any_comparison = False
-        for day in range(global_max_len):
-            day_sig = False
-            day_has_test = False
-            for i in range(len(conditions_list)):
-                for j in range(i + 1, len(conditions_list)):
-                    cond1 = conditions_list[i]
-                    cond2 = conditions_list[j]
-                    
-                    cond1_day = condition_padded[cond1][:, day]
-                    cond2_day = condition_padded[cond2][:, day]
-                    
-                    cond1_day = cond1_day[~np.isnan(cond1_day)]
-                    cond2_day = cond2_day[~np.isnan(cond2_day)]
-                    
-                    n1 = len(cond1_day)
-                    n2 = len(cond2_day)
-                    
-                    # Calculate means for display
-                    mean1 = np.mean(cond1_day) if n1 > 0 else np.nan
-                    mean2 = np.mean(cond2_day) if n2 > 0 else np.nan
-                    
-                    if n1 > 1 and n2 > 1:
-                        # Can perform t-test
-                        t_stat, p_value = stats.ttest_ind(cond1_day, cond2_day)
-                        day_has_test = True
-                        has_any_comparison = True
-                        
-                        sig_marker = ""
-                        if p_value < 0.001:
-                            sig_marker = " ***"
-                            if not day_sig:
-                                condition_reward_sig_days.append(day)
-                                day_sig = True
-                        elif p_value < 0.01:
-                            sig_marker = " **"
-                            if not day_sig:
-                                condition_reward_sig_days.append(day)
-                                day_sig = True
-                        elif p_value < 0.05:
-                            sig_marker = " *"
-                            if not day_sig:
-                                condition_reward_sig_days.append(day)
-                                day_sig = True
-                        else:
-                            sig_marker = " ns"
-                        
-                        print(f"  Day {day} ({cond1} vs {cond2}): n1={n1}, n2={n2}, Mean1={mean1:.3f}, Mean2={mean2:.3f}, t={t_stat:.3f}, p={p_value:.4f}{sig_marker}")
-                    elif n1 > 0 or n2 > 0:
-                        # Insufficient sample size
-                        print(f"  Day {day} ({cond1} vs {cond2}): n1={n1}, n2={n2} - Insufficient data (need n>1 for both groups)")
-        
-        if not has_any_comparison:
-            print(f"  No day-by-day comparisons possible (insufficient data)")
-        elif not condition_reward_sig_days:
-            print(f"\n  Summary: No significant differences found at individual days (p < 0.05)")
-    else:
-        print("  Only one condition found - cannot perform comparison")
-    print("=" * 70 + "\n")
-    
-    # Add significance markers to condition-based rewards plot
-    if condition_reward_sig_days:
-        plt.figure(condition_reward_fig.number)
-        ax = plt.gca()
-        y_max = ax.get_ylim()[1]
-        for day in condition_reward_sig_days:
-            plt.text(day, y_max * 0.95, '*', ha='center', va='top', fontsize=12, fontweight='bold')
 
     # Create a new figure for condition-based speed analysis
     condition_speed_fig = plt.figure(figsize=(12, 6))
@@ -1012,130 +862,6 @@ def analyze_mouse_data(data_files, markers, starting_conditions, save_lick_plots
     ax.tick_params(axis='x', which='minor', direction='in')
     ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
     plt.legend()
-    
-    # Statistical Analysis: Condition-based comparison (Speed)
-    print("\n" + "=" * 70)
-    print("STATISTICAL ANALYSIS: STARTING CONDITION COMPARISON - SPEED")
-    print("(Two-tailed t-test, pairwise comparisons)")
-    print("=" * 70)
-    
-    condition_speed_sig_days = []  # Store significant days for plotting
-    if len(condition_speed_groups) > 1:
-        # Perform pairwise comparisons between all conditions
-        conditions_list = list(condition_speed_groups.keys())
-        
-        # Overall comparisons
-        for i in range(len(conditions_list)):
-            for j in range(i + 1, len(conditions_list)):
-                cond1 = conditions_list[i]
-                cond2 = conditions_list[j]
-                
-                # Get all data points for each condition
-                cond1_data = []
-                for speeds in condition_speed_groups[cond1]:
-                    cond1_data.extend(speeds[~np.isnan(speeds)])
-                cond2_data = []
-                for speeds in condition_speed_groups[cond2]:
-                    cond2_data.extend(speeds[~np.isnan(speeds)])
-                
-                cond1_data = np.array(cond1_data)
-                cond2_data = np.array(cond2_data)
-                
-                if len(cond1_data) > 0 and len(cond2_data) > 0:
-                    t_stat, p_value = stats.ttest_ind(cond1_data, cond2_data)
-                    print(f"\nOverall: {cond1} vs {cond2}:")
-                    print(f"  {cond1}: n={len(cond1_data)}, Mean={np.mean(cond1_data):.3f} cm/s, SEM={np.std(cond1_data)/np.sqrt(len(cond1_data)):.3f}")
-                    print(f"  {cond2}: n={len(cond2_data)}, Mean={np.mean(cond2_data):.3f} cm/s, SEM={np.std(cond2_data)/np.sqrt(len(cond2_data)):.3f}")
-                    print(f"  t-statistic: {t_stat:.4f}")
-                    print(f"  p-value: {p_value:.4f}")
-                    if p_value < 0.001:
-                        print(f"  Significance: *** (p < 0.001)")
-                    elif p_value < 0.01:
-                        print(f"  Significance: ** (p < 0.01)")
-                    elif p_value < 0.05:
-                        print(f"  Significance: * (p < 0.05)")
-                    else:
-                        print(f"  Significance: ns (not significant)")
-        
-        # Day-by-day comparisons
-        print(f"\nDay-by-Day Comparisons:")
-        print(f"  (Showing all comparisons with sample sizes and p-values)")
-        # First find the global maximum length across all conditions
-        global_max_len = max(max(len(s) for s in speed_list) for speed_list in condition_speed_groups.values())
-        
-        # Pad all conditions to the same global maximum length
-        condition_speed_padded = {}
-        for condition, speed_list in condition_speed_groups.items():
-            condition_speed_padded[condition] = np.array([np.pad(s, (0, global_max_len - len(s)), 
-                                                         constant_values=np.nan) for s in speed_list])
-        
-        has_any_comparison = False
-        for day in range(global_max_len):
-            day_sig = False
-            day_has_test = False
-            for i in range(len(conditions_list)):
-                for j in range(i + 1, len(conditions_list)):
-                    cond1 = conditions_list[i]
-                    cond2 = conditions_list[j]
-                    
-                    cond1_day = condition_speed_padded[cond1][:, day]
-                    cond2_day = condition_speed_padded[cond2][:, day]
-                    
-                    cond1_day = cond1_day[~np.isnan(cond1_day)]
-                    cond2_day = cond2_day[~np.isnan(cond2_day)]
-                    
-                    n1 = len(cond1_day)
-                    n2 = len(cond2_day)
-                    
-                    # Calculate means for display
-                    mean1 = np.mean(cond1_day) if n1 > 0 else np.nan
-                    mean2 = np.mean(cond2_day) if n2 > 0 else np.nan
-                    
-                    if n1 > 1 and n2 > 1:
-                        # Can perform t-test
-                        t_stat, p_value = stats.ttest_ind(cond1_day, cond2_day)
-                        day_has_test = True
-                        has_any_comparison = True
-                        
-                        sig_marker = ""
-                        if p_value < 0.001:
-                            sig_marker = " ***"
-                            if not day_sig:
-                                condition_speed_sig_days.append(day)
-                                day_sig = True
-                        elif p_value < 0.01:
-                            sig_marker = " **"
-                            if not day_sig:
-                                condition_speed_sig_days.append(day)
-                                day_sig = True
-                        elif p_value < 0.05:
-                            sig_marker = " *"
-                            if not day_sig:
-                                condition_speed_sig_days.append(day)
-                                day_sig = True
-                        else:
-                            sig_marker = " ns"
-                        
-                        print(f"  Day {day} ({cond1} vs {cond2}): n1={n1}, n2={n2}, Mean1={mean1:.3f} cm/s, Mean2={mean2:.3f} cm/s, t={t_stat:.3f}, p={p_value:.4f}{sig_marker}")
-                    elif n1 > 0 or n2 > 0:
-                        # Insufficient sample size
-                        print(f"  Day {day} ({cond1} vs {cond2}): n1={n1}, n2={n2} - Insufficient data (need n>1 for both groups)")
-        
-        if not has_any_comparison:
-            print(f"  No day-by-day comparisons possible (insufficient data)")
-        elif not condition_speed_sig_days:
-            print(f"\n  Summary: No significant differences found at individual days (p < 0.05)")
-    else:
-        print("  Only one condition found - cannot perform comparison")
-    print("=" * 70 + "\n")
-    
-    # Add significance markers to condition-based speed plot
-    if condition_speed_sig_days:
-        plt.figure(condition_speed_fig.number)
-        ax = plt.gca()
-        y_max = ax.get_ylim()[1]
-        for day in condition_speed_sig_days:
-            plt.text(day, y_max * 0.95, '*', ha='center', va='top', fontsize=12, fontweight='bold')
 
     # Create the level-based analysis plot
     level_fig = analyze_levels(data_files)
