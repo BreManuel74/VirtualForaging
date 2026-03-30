@@ -168,7 +168,7 @@ def validate_and_find_files(folder_path):
     trial_log_files = [f for f in os.listdir(folder_path) if 'trial_log.csv' in f]
     treadmill_files = [f for f in os.listdir(folder_path) if 'treadmill.csv' in f]
     capacitive_files = [f for f in os.listdir(folder_path) if 'capacitive.csv' in f]
-    pupil_files = [f for f in os.listdir(folder_path) if 'exposure.csv' in f]
+    pupil_files = [f for f in os.listdir(folder_path) if 'DLC' in f]
     frame_log_files = [f for f in os.listdir(folder_path) if 'frame_log.txt' in f]
     
     # Check required files
@@ -584,10 +584,13 @@ def process_pupil_data(pupil_df, frame_log_df, capacitive_df):
         capacitive_df: Capacitive DataFrame for alignment
         
     Returns:
-        pd.Series or None: Interpolated pupil diameter or None if processing fails
+        tuple: (interpolated_series, raw_times, raw_diameters_zscore) or (None, None, None) if processing fails
+               - interpolated_series: pd.Series z-scored and interpolated to capacitive timeline (for timeline plots)
+               - raw_times: np.array of raw pupil timestamps at native 20fps
+               - raw_diameters_zscore: np.array of z-scored pupil diameter values (for event-aligned averaging)
     """
     if pupil_df is None or frame_log_df is None:
-        return None
+        return None, None, None
     
     # Rename columns if needed (pupil CSV has generic column names after skipping header rows)
     if pupil_df.columns[0] != 'frame_number':
@@ -607,7 +610,7 @@ def process_pupil_data(pupil_df, frame_log_df, capacitive_df):
     pupil_df['time_seconds'] = pupil_df['aligned_frame_number'].map(frame_to_time_mapping)
     
     # Calculate pupil diameter (only for high likelihood points)
-    high_likelihood_mask = (pupil_df['point_3_likelihood'] >= 0.80) & (pupil_df['point_7_likelihood'] >= 0.80)
+    high_likelihood_mask = (pupil_df['point_3_likelihood'] >= 0.70) & (pupil_df['point_7_likelihood'] >= 0.70)
     pupil_df['pupil_diameter'] = np.where(
         high_likelihood_mask,
         np.sqrt((pupil_df['point_7_x'] - pupil_df['point_3_x'])**2 + 
@@ -627,20 +630,26 @@ def process_pupil_data(pupil_df, frame_log_df, capacitive_df):
         valid_times = valid_times[sort_indices]
         valid_diameters = valid_diameters[sort_indices]
         
+        # Z-score the pupil data (normalize to session mean and std)
+        pupil_mean = np.nanmean(valid_diameters)
+        pupil_std = np.nanstd(valid_diameters)
+        valid_diameters_zscore = (valid_diameters - pupil_mean) / pupil_std
+        
         pupil_diameter_interp = pd.Series(
             data=np.interp(
                 capacitive_df['elapsed_time'],
                 valid_times,
-                valid_diameters
+                valid_diameters_zscore
             ),
             index=capacitive_df['elapsed_time']
         )
         
-        print(f"Pupil data processed: {valid_data_mask.sum()} valid measurements")
-        return pupil_diameter_interp
+        print(f"Pupil data processed: {valid_data_mask.sum()} valid measurements at native sampling rate")
+        print(f"Pupil z-score normalization: mean={pupil_mean:.2f} pixels, std={pupil_std:.2f} pixels")
+        return pupil_diameter_interp, valid_times, valid_diameters_zscore
     else:
         print("Warning: Insufficient valid pupil data for interpolation")
-        return None
+        return None, None, None
 
 
 # ============================================================================
@@ -908,7 +917,7 @@ def match_puff_zones_to_events(trial_log_df, punish_texture_change_time_first):
 # WINDOW EXTRACTION FUNCTIONS
 # ============================================================================
 
-def create_aligned_windows(time_array, data_array, event_times, window_size=5, n_timepoints=None):
+def create_aligned_windows(time_array, data_array, event_times, window_size=5, n_timepoints=None, interpolate=True):
     """Create time-aligned windows around event times
     
     Args:
@@ -917,6 +926,8 @@ def create_aligned_windows(time_array, data_array, event_times, window_size=5, n
         event_times: List/array of event times to align to
         window_size: Window size in seconds (before and after event)
         n_timepoints: Number of timepoints for output (if None, uses max length found)
+        interpolate: If True, interpolate to common time axis (for high-freq data).
+                     If False, use nearest-neighbor assignment (for sparse data like pupil).
         
     Returns:
         tuple: (aligned_windows array, aligned_time array)
@@ -924,7 +935,7 @@ def create_aligned_windows(time_array, data_array, event_times, window_size=5, n
     if len(event_times) == 0:
         return None, None
     
-    # Create common time axis for interpolation
+    # Create common time axis
     if n_timepoints is None:
         # Estimate based on sampling rate
         time_diffs = np.diff(time_array)
@@ -932,6 +943,51 @@ def create_aligned_windows(time_array, data_array, event_times, window_size=5, n
         n_timepoints = int(2 * window_size / median_dt) + 1
     
     # Common time axis centered at 0
+    aligned_time = np.linspace(-window_size, window_size, n_timepoints)
+    
+    # For sparse data (like pupil), use nearest-neighbor assignment to preserve actual measurements
+    if not interpolate:
+        # Use fixed time resolution matching the native sampling rate
+        # For pupil at 20 fps, this is ~50ms. Use this as our time grid.
+        n_bins = int(2 * window_size / 0.05)  # 50ms resolution
+        bin_centers = np.linspace(-window_size, window_size, n_bins)
+        
+        windows = []
+        for event_time in event_times:
+            # Extract segment around event
+            mask = (time_array >= event_time - window_size) & (time_array <= event_time + window_size)
+            segment_time = time_array[mask]
+            segment_data = data_array[mask]
+            
+            if len(segment_time) < 2:
+                # Not enough data for this event
+                windows.append(np.full(len(bin_centers), np.nan))
+                continue
+            
+            # Center time at event
+            segment_time_centered = segment_time - event_time
+            
+            # For each bin center, find the NEAREST measurement (no averaging!)
+            # This preserves the actual pupil diameter values
+            aligned_data = np.full(len(bin_centers), np.nan)
+            for i, t_center in enumerate(bin_centers):
+                # Find the measurement closest to this time point
+                time_diffs = np.abs(segment_time_centered - t_center)
+                closest_idx = np.argmin(time_diffs)
+                
+                # Only use it if it's reasonably close (within half a sample period)
+                if time_diffs[closest_idx] < 0.075:  # 1.5x the native sample period
+                    aligned_data[i] = segment_data[closest_idx]
+            
+            windows.append(aligned_data)
+        
+        if len(windows) == 0:
+            return None, None
+        
+        windows_array = np.array(windows)
+        return windows_array, bin_centers
+    
+    # Original interpolation approach for high-frequency data
     aligned_time = np.linspace(-window_size, window_size, n_timepoints)
     
     windows = []
@@ -1295,7 +1351,7 @@ def plot_raster_heatmap(windows_padded, aligned_time, event_trials, title,
 # ============================================================================
 
 def plot_average_traces_reward(reward_zone_trials, trial_log_df, capacitive_df, 
-                               treadmill_interp, pupil_diameter_interp, output_folder, window=5, cap_vmax=None):
+                               treadmill_interp, pupil_diameter_data, output_folder, window=5, cap_vmax=None):
     """Plot average traces (mean ± SEM) for reward zone and delivery events
     
     Args:
@@ -1303,7 +1359,7 @@ def plot_average_traces_reward(reward_zone_trials, trial_log_df, capacitive_df,
         trial_log_df: Trial log DataFrame
         capacitive_df: Capacitive DataFrame
         treadmill_interp: Interpolated treadmill speed
-        pupil_diameter_interp: Interpolated pupil diameter (or None)
+        pupil_diameter_data: Tuple of (interpolated_series, raw_times, raw_diameters) or None
         output_folder: Directory to save figures
         window: Window size in seconds
         cap_vmax: Maximum value for capacitive y-axis (optional)
@@ -1344,7 +1400,7 @@ def plot_average_traces_reward(reward_zone_trials, trial_log_df, capacitive_df,
     sem_event_vals = np.nanstd(cap_event_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(cap_event_windows_padded), axis=0))
     
     # Create combined subplot figure
-    num_plots = 3 if pupil_diameter_interp is not None else 2
+    num_plots = 3 if pupil_diameter_data is not None and pupil_diameter_data[0] is not None else 2
     fig, axs = plt.subplots(num_plots, 1, figsize=(12, 10 if num_plots == 2 else 14), sharex=True)
     
     if num_plots == 2:
@@ -1381,73 +1437,37 @@ def plot_average_traces_reward(reward_zone_trials, trial_log_df, capacitive_df,
     axs[1].spines['right'].set_visible(False)
     
     # Plot 3: Pupil diameter (if available)
-    if pupil_diameter_interp is not None:
-        pupil_val = pupil_diameter_interp.values
+    if pupil_diameter_data is not None and pupil_diameter_data[0] is not None:
+        _, pupil_raw_times, pupil_raw_diameters = pupil_diameter_data
         
-        # Pupil aligned to zone entry (using interpolation)
+        # Pupil aligned to zone entry (interpolated to common timeline)
         pupil_zone_windows_padded, aligned_time_pupil = create_aligned_windows(
-            cap_time, pupil_val, zone_entry_times, window
+            pupil_raw_times, pupil_raw_diameters, zone_entry_times, window
         )
         
         mean_pupil = np.nanmean(pupil_zone_windows_padded, axis=0)
         sem_pupil = np.nanstd(pupil_zone_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(pupil_zone_windows_padded), axis=0))
         
-        # Pupil aligned to reward events (using interpolation)
-        pupil_event_windows_padded, aligned_time_pupil_event = create_aligned_windows(
-            cap_time, pupil_val, reward_event_times_flat, window
-        )
-        
-        mean_pupil_event = np.nanmean(pupil_event_windows_padded, axis=0)
-        sem_pupil_event = np.nanstd(pupil_event_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(pupil_event_windows_padded), axis=0))
-        
-        # Create separate pupil figure with 2 subplots
-        fig_pupil, axs_pupil = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
-        
-        # Plot 1: Pupil aligned to zone entry
+        # Plot pupil in the third subplot
         n_pupil_zone = pupil_zone_windows_padded.shape[0]
-        axs_pupil[0].plot(aligned_time_pupil, mean_pupil, color='orange', label=f'Mean Pupil Diameter (n={n_pupil_zone})')
-        axs_pupil[0].fill_between(aligned_time_pupil, mean_pupil - sem_pupil, mean_pupil + sem_pupil,
-                                  color='orange', alpha=0.2, label='SEM')
-        axs_pupil[0].axvline(0, color='red', linestyle='--', label='Reward Zone Onset (t=0)')
-        axs_pupil[0].set_ylabel('Pupil Diameter (pixels)')
-        axs_pupil[0].set_title('Pupil Diameter Aligned to Reward Zone Onset')
-        axs_pupil[0].legend()
-        axs_pupil[0].set_xlim(-5, 5)
-        axs_pupil[0].set_ylim(bottom=0)
-        axs_pupil[0].spines['top'].set_visible(False)
-        axs_pupil[0].spines['right'].set_visible(False)
-        
-        # Plot 2: Pupil aligned to reward events
-        n_pupil_event = pupil_event_windows_padded.shape[0]
-        axs_pupil[1].plot(aligned_time_pupil_event, mean_pupil_event, color='orange', 
-                         label=f'Mean Pupil Diameter (n={n_pupil_event})')
-        axs_pupil[1].fill_between(aligned_time_pupil_event, mean_pupil_event - sem_pupil_event,
-                                   mean_pupil_event + sem_pupil_event, color='orange', alpha=0.2, label='SEM')
-        axs_pupil[1].axvline(0, color='red', linestyle='--', label='Reward Event (t=0)')
-        axs_pupil[1].set_xlabel('Time (s)')
-        axs_pupil[1].set_ylabel('Pupil Diameter (pixels)')
-        axs_pupil[1].set_title('Pupil Diameter Aligned to Reward Events')
-        axs_pupil[1].legend()
-        axs_pupil[1].set_xlim(-5, 5)
-        axs_pupil[1].set_ylim(bottom=0)
-        axs_pupil[1].spines['top'].set_visible(False)
-        axs_pupil[1].spines['right'].set_visible(False)
-        
-        for ax in axs_pupil:
-            ax.set_xticks(np.arange(-5, 6, 1))
-        
-        plt.tight_layout()
-        save_figure(fig_pupil, "pupil_diameter_reward_combined", output_folder)
-        plt.show()
+        axs[2].plot(aligned_time_pupil, mean_pupil, color='orange', linewidth=2, 
+                   label=f'Mean Pupil Diameter (n={n_pupil_zone})')
+        axs[2].fill_between(aligned_time_pupil, mean_pupil - sem_pupil, mean_pupil + sem_pupil,
+                           color='orange', alpha=0.2, label='SEM')
+        axs[2].axvline(0, color='red', linestyle='--', label='Reward Zone Onset (t=0)')
+        axs[2].set_ylabel('Pupil Diameter (z-score)')
+        axs[2].set_title('Pupil Diameter Aligned to Reward Zone Onset (Interpolated)')
+        axs[2].legend()
+        axs[2].set_xlim(-5, 5)
+        axs[2].spines['top'].set_visible(False)
+        axs[2].spines['right'].set_visible(False)
+        axs[2].set_xlabel('Time (s)')
     else:
-        axs[1].set_xlabel('Time from Reward Event (s)')
+        axs[1].set_xlabel('Time (s)')
     
     # Set x-axis formatting for main figure
     for ax in axs:
         ax.set_xticks(np.arange(-5, 6, 1))
-    
-    if num_plots == 2:
-        axs[-1].set_xlabel('Time (s)')
     
     plt.tight_layout()
     save_figure(fig, "reward_zone_analysis_capacitive_treadmill", output_folder)
@@ -1457,7 +1477,7 @@ def plot_average_traces_reward(reward_zone_trials, trial_log_df, capacitive_df,
 
 
 def plot_average_traces_puff(puff_zone_trials, trial_log_df, capacitive_df,
-                             treadmill_interp, pupil_diameter_interp, output_folder, window=5, cap_vmax=None):
+                             treadmill_interp, pupil_diameter_data, output_folder, window=5, cap_vmax=None):
     """Plot average traces (mean ± SEM) for puff zone and delivery events
     
     Args:
@@ -1465,7 +1485,7 @@ def plot_average_traces_puff(puff_zone_trials, trial_log_df, capacitive_df,
         trial_log_df: Trial log DataFrame
         capacitive_df: Capacitive DataFrame
         treadmill_interp: Interpolated treadmill speed
-        pupil_diameter_interp: Interpolated pupil diameter (or None)
+        pupil_diameter_data: Tuple of (interpolated_series, raw_times, raw_diameters) or None
         output_folder: Directory to save figures
         window: Window size in seconds
         cap_vmax: Maximum value for capacitive y-axis (optional)
@@ -1610,13 +1630,13 @@ def plot_average_traces_puff(puff_zone_trials, trial_log_df, capacitive_df,
     plt.show()
     
     # Create pupil plots if available
-    if pupil_diameter_interp is not None:
-        pupil_val = pupil_diameter_interp.values
+    if pupil_diameter_data is not None and pupil_diameter_data[0] is not None:
+        _, pupil_raw_times, pupil_raw_diameters = pupil_diameter_data
         window_pupil = 10
         
-        # Pupil aligned to puff zone entry (using interpolation)
+        # Pupil aligned to puff zone entry (interpolated to common timeline)
         pupil_puff_windows_padded, aligned_time_pupil_puff = create_aligned_windows(
-            cap_time, pupil_val, zone_entry_times, window_pupil
+            pupil_raw_times, pupil_raw_diameters, zone_entry_times, window_pupil
         )
         
         mean_pupil_puff = np.nanmean(pupil_puff_windows_padded, axis=0)
@@ -1629,9 +1649,9 @@ def plot_average_traces_puff(puff_zone_trials, trial_log_df, capacitive_df,
             puff_event_times = pd.to_numeric(trial_log_df['puff_event'], errors='coerce').dropna().values
             
             if len(puff_event_times) > 0:
-                # Use interpolation for puff event windows
+                # Pupil aligned to puff events (interpolated to common timeline)
                 pupil_puff_event_windows_padded, aligned_time_pupil_puff_event = create_aligned_windows(
-                    cap_time, pupil_val, puff_event_times, window_pupil
+                    pupil_raw_times, pupil_raw_diameters, puff_event_times, window_pupil
                 )
                 
                 if pupil_puff_event_windows_padded is not None:
@@ -1654,34 +1674,33 @@ def plot_average_traces_puff(puff_zone_trials, trial_log_df, capacitive_df,
             axs_pupil = [axs_pupil]
         
         # Plot 1: Pupil aligned to puff zone entry
-        axs_pupil[0].plot(aligned_time_pupil_puff, mean_pupil_puff, color='red', 
+        axs_pupil[0].plot(aligned_time_pupil_puff, mean_pupil_puff, color='red', linewidth=2,
                          label=f'Mean Pupil Diameter (n={n_puffs_pupil})')
         axs_pupil[0].fill_between(aligned_time_pupil_puff, mean_pupil_puff - sem_pupil_puff,
                                    mean_pupil_puff + sem_pupil_puff, color='red', alpha=0.2, label='SEM')
         axs_pupil[0].axvline(0, color='red', linestyle='--', label='Puff Zone Entry (t=0)')
-        axs_pupil[0].set_ylabel('Pupil Diameter (pixels)')
-        axs_pupil[0].set_title('Pupil Diameter Aligned to Puff Zone Entry')
+        axs_pupil[0].set_ylabel('Pupil Diameter (z-score)')
+        axs_pupil[0].set_title('Pupil Diameter Aligned to Puff Zone Entry (Interpolated)')
         axs_pupil[0].legend()
         axs_pupil[0].set_xlim(-10, 10)
-        axs_pupil[0].set_ylim(bottom=0)
         axs_pupil[0].spines['top'].set_visible(False)
         axs_pupil[0].spines['right'].set_visible(False)
         
         # Plot 2: Pupil aligned to puff events (if available)
         if pupil_puff_event_data is not None:
             axs_pupil[1].plot(pupil_puff_event_data['time'], pupil_puff_event_data['mean'], 
-                             color='red', label=f'Mean Pupil Diameter (n={pupil_puff_event_data["n"]})')
+                             color='red', linewidth=2,
+                             label=f'Mean Pupil Diameter (n={pupil_puff_event_data["n"]})')
             axs_pupil[1].fill_between(pupil_puff_event_data['time'],
                                        pupil_puff_event_data['mean'] - pupil_puff_event_data['sem'],
                                        pupil_puff_event_data['mean'] + pupil_puff_event_data['sem'],
                                        color='red', alpha=0.2, label='SEM')
             axs_pupil[1].axvline(0, color='red', linestyle='--', label='Puff Event (t=0)')
             axs_pupil[1].set_xlabel('Time (s)')
-            axs_pupil[1].set_ylabel('Pupil Diameter (pixels)')
-            axs_pupil[1].set_title('Pupil Diameter Aligned to Puff Events')
+            axs_pupil[1].set_ylabel('Pupil Diameter (z-score)')
+            axs_pupil[1].set_title('Pupil Diameter Aligned to Puff Events (Interpolated)')
             axs_pupil[1].legend()
             axs_pupil[1].set_xlim(-10, 10)
-            axs_pupil[1].set_ylim(bottom=0)
             axs_pupil[1].spines['top'].set_visible(False)
             axs_pupil[1].spines['right'].set_visible(False)
         else:
@@ -1702,7 +1721,7 @@ def plot_average_traces_puff(puff_zone_trials, trial_log_df, capacitive_df,
 # ============================================================================
 
 def analyze_reward_zones(reward_zone_trials, trial_log_df, capacitive_df, treadmill_interp, 
-                         pupil_diameter_interp, output_folder, window=5):
+                         pupil_diameter_data, output_folder, window=5):
     """Analyze data aligned to reward zone entries and deliveries
     
     Args:
@@ -1710,7 +1729,7 @@ def analyze_reward_zones(reward_zone_trials, trial_log_df, capacitive_df, treadm
         trial_log_df: Trial log DataFrame (needed to get ALL reward events)
         capacitive_df: Capacitive DataFrame
         treadmill_interp: Interpolated treadmill speed
-        pupil_diameter_interp: Interpolated pupil diameter (or None)
+        pupil_diameter_data: Tuple of (interpolated_series, raw_times, raw_diameters) or None
         output_folder: Directory to save figures
         window: Window size in seconds
         
@@ -1807,13 +1826,13 @@ def analyze_reward_zones(reward_zone_trials, trial_log_df, capacitive_df, treadm
     # Analyze reward deliveries - pass trial_log_df to get ALL reward events
     print(f"Analyzing reward deliveries...")
     analyze_reward_deliveries(reward_zone_trials, trial_log_df, cap_time, cap_val, speed_val,
-                             pupil_diameter_interp, output_folder, window, cap_vmin, cap_vmax)
+                             pupil_diameter_data, output_folder, window, cap_vmin, cap_vmax)
     
     return (cap_vmin, cap_vmax)
 
 
 def analyze_reward_deliveries(reward_zone_trials, trial_log_df, cap_time, cap_val, speed_val,
-                              pupil_diameter_interp, output_folder, window=5, cap_vmin=0, cap_vmax=5000):
+                              pupil_diameter_data, output_folder, window=5, cap_vmin=0, cap_vmax=5000):
     """Analyze data aligned to reward delivery times
     
     Args:
@@ -1823,7 +1842,7 @@ def analyze_reward_deliveries(reward_zone_trials, trial_log_df, cap_time, cap_va
         cap_time: Capacitive time array
         cap_val: Capacitive value array
         speed_val: Treadmill speed array
-        pupil_diameter_interp: Interpolated pupil diameter
+        pupil_diameter_data: Tuple of (interpolated_series, raw_times, raw_diameters) or None
         output_folder: Directory to save figures
         window: Window size in seconds
         cap_vmin: Minimum value for capacitive colormap scale
@@ -1897,7 +1916,7 @@ def analyze_reward_deliveries(reward_zone_trials, trial_log_df, cap_time, cap_va
 # ============================================================================
 
 def analyze_puff_zones(puff_zone_trials, trial_log_df, capacitive_df, treadmill_interp, 
-                       pupil_diameter_interp, output_folder, window=10, cap_vmin=0, cap_vmax=5000):
+                       pupil_diameter_data, output_folder, window=10, cap_vmin=0, cap_vmax=5000):
     """Analyze data aligned to puff zone entries and deliveries
     
     Args:
@@ -1905,7 +1924,7 @@ def analyze_puff_zones(puff_zone_trials, trial_log_df, capacitive_df, treadmill_
         trial_log_df: Trial log DataFrame (needed to get ALL puff events)
         capacitive_df: Capacitive DataFrame
         treadmill_interp: Interpolated treadmill speed
-        pupil_diameter_interp: Interpolated pupil diameter (or None)
+        pupil_diameter_data: Tuple of (interpolated_series, raw_times, raw_diameters) or None
         output_folder: Directory to save figures
         window: Window size in seconds
         cap_vmin: Minimum value for capacitive colormap scale
@@ -2424,11 +2443,15 @@ def main():
     
     # Step 5: Process pupil data (if available)
     pupil_diameter_interp = None
+    pupil_diameter_data = None
     if has_pupil_data:
         print("Processing pupil data...")
-        pupil_diameter_interp = process_pupil_data(
+        pupil_interp, pupil_raw_times, pupil_raw_diameters = process_pupil_data(
             data['pupil'], data['frame_log'], data['capacitive']
         )
+        pupil_diameter_interp = pupil_interp
+        if pupil_interp is not None:
+            pupil_diameter_data = (pupil_interp, pupil_raw_times, pupil_raw_diameters)
     
     # Step 6: Plot main timeline
     print("\nGenerating main timeline plot...")
@@ -2449,14 +2472,14 @@ def main():
     if len(reward_zone_trials) > 0:
         cap_vmin, cap_vmax = analyze_reward_zones(
             reward_zone_trials, data['trial_log'], data['capacitive'], treadmill_interp,
-            pupil_diameter_interp, output_folder
+            pupil_diameter_data, output_folder
         )
         
         # Create average trace plots for rewards
         print("\nCreating reward average trace plots...")
         plot_average_traces_reward(
             reward_zone_trials, data['trial_log'], data['capacitive'],
-            treadmill_interp, pupil_diameter_interp, output_folder, cap_vmax=cap_vmax
+            treadmill_interp, pupil_diameter_data, output_folder, cap_vmax=cap_vmax
         )
     
     # Step 8: Match and analyze puff zones (using capacitive scale from reward analysis)
@@ -2468,14 +2491,14 @@ def main():
     if len(puff_zone_trials) > 0:
         analyze_puff_zones(
             puff_zone_trials, data['trial_log'], data['capacitive'], treadmill_interp,
-            pupil_diameter_interp, output_folder, window=10, cap_vmin=cap_vmin, cap_vmax=cap_vmax
+            pupil_diameter_data, output_folder, window=10, cap_vmin=cap_vmin, cap_vmax=cap_vmax
         )
         
         # Create average trace plots for puffs
         print("\nCreating puff average trace plots...")
         plot_average_traces_puff(
             puff_zone_trials, data['trial_log'], data['capacitive'],
-            treadmill_interp, pupil_diameter_interp, output_folder, cap_vmax=cap_vmax
+            treadmill_interp, pupil_diameter_data, output_folder, cap_vmax=cap_vmax
         )
     
     # Step 9: Analyze probe events (using capacitive scale from reward analysis)
