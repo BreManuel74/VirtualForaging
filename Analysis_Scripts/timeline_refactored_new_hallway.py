@@ -519,39 +519,56 @@ def create_empty_texture_arrays(trial_log_df):
     }
 
 
-def interpolate_treadmill_to_capacitive(treadmill_df, capacitive_df):
-    """Interpolate treadmill data to match capacitive timeline
+def uniformly_sample_treadmill(treadmill_df):
+    """Uniformly sample treadmill data at 50 Hz
     
     Args:
-        treadmill_df: Treadmill DataFrame
-        capacitive_df: Capacitive DataFrame
+        treadmill_df: Treadmill DataFrame with 'global_time' and 'speed' columns
         
     Returns:
-        pd.Series: Interpolated treadmill speed in cm/s
+        tuple: (uniform_time, uniform_speed_cm_s)
+            - uniform_time: np.array of uniformly sampled times at 50 Hz
+            - uniform_speed_cm_s: np.array of speed values in cm/s
     """
-    return pd.Series(
-        data=np.interp(
-            capacitive_df['elapsed_time'],
-            treadmill_df['global_time'],
-            treadmill_df['speed']
-        ) / 10.0,
-        index=capacitive_df['elapsed_time']
-    )
+    # Define sampling rate
+    sampling_rate = 50.0  # Hz
+    sampling_interval = 1.0 / sampling_rate  # 0.02 seconds
+    
+    # Get time range from treadmill data
+    time_min = treadmill_df['global_time'].min()
+    time_max = treadmill_df['global_time'].max()
+    
+    # Create uniform time array
+    uniform_time = np.arange(time_min, time_max, sampling_interval)
+    
+    # Interpolate speed to uniform time points and convert to cm/s
+    uniform_speed = np.interp(
+        uniform_time,
+        treadmill_df['global_time'].values,
+        treadmill_df['speed'].values
+    ) / 10.0  # Convert mm/s to cm/s
+    
+    return uniform_time, uniform_speed
 
 
-def interpolate_treadmill_distance_to_capacitive(treadmill_df, capacitive_df):
-    """Interpolate treadmill distance to match capacitive timeline
+def uniformly_sample_treadmill_distance(treadmill_df):
+    """Uniformly sample treadmill distance at 50 Hz
     
     Finds the first non-zero distance value and subtracts it from all distances
     to get the distance moved in meters.
     
     Args:
-        treadmill_df: Treadmill DataFrame
-        capacitive_df: Capacitive DataFrame
+        treadmill_df: Treadmill DataFrame with 'global_time' and 'distance' columns
         
     Returns:
-        pd.Series: Interpolated treadmill distance moved in meters
+        tuple: (uniform_time, uniform_distance_m)
+            - uniform_time: np.array of uniformly sampled times at 50 Hz
+            - uniform_distance_m: np.array of distance moved in meters
     """
+    # Define sampling rate
+    sampling_rate = 50.0  # Hz
+    sampling_interval = 1.0 / sampling_rate  # 0.02 seconds
+    
     # Find the first non-zero distance value
     non_zero_distances = treadmill_df['distance'][treadmill_df['distance'] != 0]
     
@@ -564,33 +581,69 @@ def interpolate_treadmill_distance_to_capacitive(treadmill_df, capacitive_df):
     # Create adjusted distance values (distance moved from start)
     distance_moved = treadmill_df['distance'] - start_distance
     
-    # Interpolate to capacitive timeline and convert to meters
-    return pd.Series(
-        data=np.interp(
-            capacitive_df['elapsed_time'],
-            treadmill_df['global_time'],
-            distance_moved
-        ) / 1000.0,
-        index=capacitive_df['elapsed_time']
+    # Get time range from treadmill data
+    time_min = treadmill_df['global_time'].min()
+    time_max = treadmill_df['global_time'].max()
+    
+    # Create uniform time array
+    uniform_time = np.arange(time_min, time_max, sampling_interval)
+    
+    # Interpolate distance to uniform time points and convert to meters
+    uniform_distance = np.interp(
+        uniform_time,
+        treadmill_df['global_time'].values,
+        distance_moved.values
+    ) / 1000.0  # Convert mm to meters
+    
+    return uniform_time, uniform_distance
+
+
+def uniformly_sample_capacitive(capacitive_df):
+    """Uniformly sample capacitive data at 50 Hz
+    
+    Args:
+        capacitive_df: Capacitive DataFrame with 'elapsed_time' and 'capacitive_value' columns
+        
+    Returns:
+        tuple: (uniform_time, uniform_capacitive)
+            - uniform_time: np.array of uniformly sampled times at 50 Hz
+            - uniform_capacitive: np.array of capacitive sensor values
+    """
+    # Define sampling rate
+    sampling_rate = 50.0  # Hz
+    sampling_interval = 1.0 / sampling_rate  # 0.02 seconds
+    
+    # Get time range from capacitive data
+    time_min = capacitive_df['elapsed_time'].min()
+    time_max = capacitive_df['elapsed_time'].max()
+    
+    # Create uniform time array
+    uniform_time = np.arange(time_min, time_max, sampling_interval)
+    
+    # Interpolate capacitive values to uniform time points
+    uniform_capacitive = np.interp(
+        uniform_time,
+        capacitive_df['elapsed_time'].values,
+        capacitive_df['capacitive_value'].values
     )
+    
+    return uniform_time, uniform_capacitive
 
 
-def process_pupil_data(pupil_df, frame_log_df, capacitive_df):
-    """Process pupil diameter data and interpolate to capacitive timeline
+def process_pupil_data(pupil_df, frame_log_df):
+    """Process pupil diameter data and uniformly sample at 20 Hz
     
     Args:
         pupil_df: Pupil tracking DataFrame
         frame_log_df: Frame log DataFrame with timestamps
-        capacitive_df: Capacitive DataFrame for alignment
         
     Returns:
-        tuple: (interpolated_series, raw_times, raw_diameters_zscore) or (None, None, None) if processing fails
-               - interpolated_series: pd.Series z-scored and interpolated to capacitive timeline (for timeline plots)
-               - raw_times: np.array of raw pupil timestamps at native 20fps
-               - raw_diameters_zscore: np.array of z-scored pupil diameter values (for event-aligned averaging)
+        tuple: (uniform_time, uniform_pupil_zscore) or (None, None) if processing fails
+            - uniform_time: np.array of uniformly sampled times at 20 Hz
+            - uniform_pupil_zscore: np.array of z-scored pupil diameter values
     """
     if pupil_df is None or frame_log_df is None:
-        return None, None, None
+        return None, None
     
     # Rename columns if needed (pupil CSV has generic column names after skipping header rows)
     if pupil_df.columns[0] != 'frame_number':
@@ -618,7 +671,7 @@ def process_pupil_data(pupil_df, frame_log_df, capacitive_df):
         np.nan
     )
     
-    # Interpolate to capacitive timeline
+    # Get valid data
     valid_data_mask = pupil_df['time_seconds'].notna() & pupil_df['pupil_diameter'].notna()
     
     if valid_data_mask.sum() > 1:
@@ -635,21 +688,31 @@ def process_pupil_data(pupil_df, frame_log_df, capacitive_df):
         pupil_std = np.nanstd(valid_diameters)
         valid_diameters_zscore = (valid_diameters - pupil_mean) / pupil_std
         
-        pupil_diameter_interp = pd.Series(
-            data=np.interp(
-                capacitive_df['elapsed_time'],
-                valid_times,
-                valid_diameters_zscore
-            ),
-            index=capacitive_df['elapsed_time']
+        # Define sampling rate for pupil (20 fps)
+        sampling_rate = 20.0  # Hz
+        sampling_interval = 1.0 / sampling_rate  # 0.05 seconds
+        
+        # Get time range
+        time_min = valid_times.min()
+        time_max = valid_times.max()
+        
+        # Create uniform time array
+        uniform_time = np.arange(time_min, time_max, sampling_interval)
+        
+        # Interpolate to uniform time points
+        uniform_pupil_zscore = np.interp(
+            uniform_time,
+            valid_times,
+            valid_diameters_zscore
         )
         
-        print(f"Pupil data processed: {valid_data_mask.sum()} valid measurements at native sampling rate")
+        print(f"Pupil data processed: {valid_data_mask.sum()} valid measurements")
+        print(f"Uniformly sampled at 20 Hz: {len(uniform_time)} samples")
         print(f"Pupil z-score normalization: mean={pupil_mean:.2f} pixels, std={pupil_std:.2f} pixels")
-        return pupil_diameter_interp, valid_times, valid_diameters_zscore
+        return uniform_time, uniform_pupil_zscore
     else:
         print("Warning: Insufficient valid pupil data for interpolation")
-        return None, None, None
+        return None, None
 
 
 # ============================================================================
@@ -1027,22 +1090,26 @@ def create_aligned_windows(time_array, data_array, event_times, window_size=5, n
 # PLOTTING FUNCTIONS: TIMELINE
 # ============================================================================
 
-def plot_main_timeline(capacitive_df, treadmill_interp, treadmill_distance_interp, pupil_diameter_interp,
-                       trial_log_df, texture_data, has_pupil_data, output_folder):
+def plot_main_timeline(cap_time, cap_value, tread_time, tread_speed, tread_dist_time, tread_distance,
+                       pupil_time, pupil_diameter, trial_log_df, texture_data, has_pupil_data, output_folder):
     """Create the main timeline plot with all data streams
     
     Args:
-        capacitive_df: Capacitive sensor DataFrame
-        treadmill_interp: Interpolated treadmill speed
-        treadmill_distance_interp: Interpolated treadmill distance
-        pupil_diameter_interp: Interpolated pupil diameter (or None)
+        cap_time: Uniformly sampled capacitive time array (50 Hz)
+        cap_value: Uniformly sampled capacitive values
+        tread_time: Uniformly sampled treadmill time array (50 Hz)
+        tread_speed: Uniformly sampled treadmill speed (cm/s)
+        tread_dist_time: Uniformly sampled treadmill distance time array (50 Hz)
+        tread_distance: Uniformly sampled treadmill distance (meters)
+        pupil_time: Uniformly sampled pupil time array (20 Hz) or None
+        pupil_diameter: Uniformly sampled pupil diameter (z-scored) or None
         trial_log_df: Trial log DataFrame
         texture_data: Dictionary with processed texture data
         has_pupil_data: Whether pupil data is available
         output_folder: Directory to save figures
     """
     # Determine number of plots: treadmill speed, distance, capacitive, and optionally pupil
-    num_plots = 4 if has_pupil_data and pupil_diameter_interp is not None else 3
+    num_plots = 4 if has_pupil_data and pupil_diameter is not None else 3
     fig, axs = plt.subplots(num_plots, 1, figsize=(14, 12 if num_plots == 4 else 10), sharex=True)
     
     # Ensure axs is always a list
@@ -1053,26 +1120,29 @@ def plot_main_timeline(capacitive_df, treadmill_interp, treadmill_distance_inter
     puff_times = pd.to_numeric(trial_log_df['puff_event'], errors='coerce').dropna() if 'puff_event' in trial_log_df.columns else pd.Series([])
     probe_times = pd.to_numeric(trial_log_df['probe_time'], errors='coerce').dropna() if 'probe_time' in trial_log_df.columns else pd.Series([])
     
+    # Get maximum time for texture intervals
+    max_time = max(cap_time.max(), tread_time.max())
+    
     # Plot treadmill speed (top subplot)
-    plot_treadmill_timeline(axs[0], capacitive_df, treadmill_interp, reward_times, 
-                           puff_times, probe_times, texture_data, has_more_plots=True)
+    plot_treadmill_timeline(axs[0], tread_time, tread_speed, reward_times, 
+                           puff_times, probe_times, texture_data, max_time, has_more_plots=True)
     
     # Plot treadmill distance (second subplot)
-    plot_treadmill_distance_timeline(axs[1], capacitive_df, treadmill_distance_interp, reward_times,
-                                     puff_times, probe_times, texture_data, has_more_plots=True)
+    plot_treadmill_distance_timeline(axs[1], tread_dist_time, tread_distance, reward_times,
+                                     puff_times, probe_times, texture_data, max_time, has_more_plots=True)
     
     # Plot capacitive data (third subplot)
-    plot_capacitive_timeline(axs[2], capacitive_df, reward_times, puff_times, probe_times, 
-                             texture_data, "Capacitive", show_xlabel=not has_pupil_data)
+    plot_capacitive_timeline(axs[2], cap_time, cap_value, reward_times, puff_times, probe_times, 
+                             texture_data, max_time, "Capacitive", show_xlabel=not has_pupil_data)
     
     # Plot pupil data if available (fourth subplot)
-    if num_plots == 4 and pupil_diameter_interp is not None:
-        plot_pupil_timeline(axs[3], capacitive_df, pupil_diameter_interp, reward_times,
-                          puff_times, probe_times, texture_data)
+    if num_plots == 4 and pupil_diameter is not None:
+        plot_pupil_timeline(axs[3], pupil_time, pupil_diameter, reward_times,
+                          puff_times, probe_times, texture_data, max_time)
     
     # Set x-axis limits
-    xmin = capacitive_df['elapsed_time'].min()
-    xmax = capacitive_df['elapsed_time'].max()
+    xmin = cap_time.min()
+    xmax = cap_time.max()
     for ax in axs:
         ax.set_xlim([xmin, xmax])
     
@@ -1083,17 +1153,15 @@ def plot_main_timeline(capacitive_df, treadmill_interp, treadmill_distance_inter
     plt.show()
 
 
-def plot_capacitive_timeline(ax, capacitive_df, reward_times, puff_times, probe_times, 
-                             texture_data, label_prefix="", show_xlabel=True):
+def plot_capacitive_timeline(ax, cap_time, cap_value, reward_times, puff_times, probe_times, 
+                             texture_data, max_time, label_prefix="", show_xlabel=True):
     """Plot capacitive sensor data with event markers"""
-    ax.plot(capacitive_df['elapsed_time'], capacitive_df['capacitive_value'], 
-            label='Capacitive Value (a.u.)', color='C0')
+    ax.plot(cap_time, cap_value, label='Capacitive Value (a.u.)', color='C0')
     
     # Add event markers
     add_event_markers(ax, reward_times, puff_times, probe_times)
     
     # Highlight reward and punish intervals
-    max_time = capacitive_df['elapsed_time'].max()
     add_texture_intervals(ax, texture_data, max_time)
     
     if show_xlabel:
@@ -1104,37 +1172,36 @@ def plot_capacitive_timeline(ax, capacitive_df, reward_times, puff_times, probe_
     ax.set_ylim(bottom=0)
 
 
-def plot_treadmill_timeline(ax, capacitive_df, treadmill_interp, reward_times, 
-                           puff_times, probe_times, texture_data, has_more_plots=False):
+def plot_treadmill_timeline(ax, tread_time, tread_speed, reward_times, 
+                           puff_times, probe_times, texture_data, max_time, has_more_plots=False):
     """Plot treadmill speed data with event markers"""
-    ax.plot(capacitive_df['elapsed_time'], treadmill_interp, 
-            label='Treadmill Speed (interpolated)', color='purple')
+    ax.plot(tread_time, tread_speed, 
+            label='Treadmill Speed (uniformly sampled)', color='purple')
     
     # Add event markers
     add_event_markers(ax, reward_times, puff_times, probe_times)
     
     # Highlight reward and punish intervals
-    max_time = capacitive_df['elapsed_time'].max()
     add_texture_intervals(ax, texture_data, max_time)
     
     if not has_more_plots:
         ax.set_xlabel('Elapsed Time (s)')
     ax.set_ylabel('Speed (cm/s)')
-    ax.set_title('Interpolated Treadmill Speed Over Time with Reward and Puff Events')
+    ax.set_title('Uniformly Sampled Treadmill Speed Over Time with Reward and Puff Events')
     ax.legend(loc='upper right')
 
 
-def plot_treadmill_distance_timeline(ax, capacitive_df, treadmill_distance_interp, reward_times, 
-                                     puff_times, probe_times, texture_data, has_more_plots=False):
+def plot_treadmill_distance_timeline(ax, tread_dist_time, tread_distance, reward_times, 
+                                     puff_times, probe_times, texture_data, max_time, has_more_plots=False):
     """Plot treadmill distance data with event markers"""
-    ax.plot(capacitive_df['elapsed_time'], treadmill_distance_interp, 
-            label='Treadmill Distance (interpolated)', color='teal')
+    ax.plot(tread_dist_time, tread_distance, 
+            label='Treadmill Distance (uniformly sampled)', color='teal')
     
     # Add event markers
     add_event_markers(ax, reward_times, puff_times, probe_times)
     
     # Highlight reward and punish intervals
-    max_time = capacitive_df['elapsed_time'].max()
+    add_texture_intervals(ax, texture_data, max_time)
     add_texture_intervals(ax, texture_data, max_time)
     
     if not has_more_plots:
@@ -1145,24 +1212,22 @@ def plot_treadmill_distance_timeline(ax, capacitive_df, treadmill_distance_inter
     ax.set_ylim(bottom=0)
 
 
-def plot_pupil_timeline(ax, capacitive_df, pupil_diameter_interp, reward_times,
-                       puff_times, probe_times, texture_data):
+def plot_pupil_timeline(ax, pupil_time, pupil_diameter, reward_times,
+                       puff_times, probe_times, texture_data, max_time):
     """Plot pupil diameter data with event markers"""
-    ax.plot(capacitive_df['elapsed_time'], pupil_diameter_interp,
-            label='Pupil Diameter (interpolated)', color='orange')
+    ax.plot(pupil_time, pupil_diameter,
+            label='Pupil Diameter (uniformly sampled)', color='orange')
     
     # Add event markers
     add_event_markers(ax, reward_times, puff_times, probe_times)
     
     # Highlight reward and punish intervals
-    max_time = capacitive_df['elapsed_time'].max()
     add_texture_intervals(ax, texture_data, max_time)
     
     ax.set_xlabel('Elapsed Time (s)')
-    ax.set_ylabel('Pupil Diameter (pixels)')
-    ax.set_title('Interpolated Pupil Diameter Over Time with Reward and Puff Events')
+    ax.set_ylabel('Pupil Diameter (z-score)')
+    ax.set_title('Uniformly Sampled Pupil Diameter Over Time with Reward and Puff Events')
     ax.legend(loc='upper right')
-    ax.set_ylim(bottom=0)
 
 
 def add_event_markers(ax, reward_times, puff_times, probe_times):
@@ -1350,15 +1415,16 @@ def plot_raster_heatmap(windows_padded, aligned_time, event_trials, title,
 # PLOTTING FUNCTIONS: AVERAGE TRACES
 # ============================================================================
 
-def plot_average_traces_reward(reward_zone_trials, trial_log_df, capacitive_df, 
-                               treadmill_interp, pupil_diameter_data, output_folder, window=5, cap_vmax=None):
+def plot_average_traces_reward(reward_zone_trials, trial_log_df, cap_time, cap_val, speed_time, speed_val,
+                               pupil_diameter_data, output_folder, window=5, cap_vmax=None):
     """Plot average traces (mean ± SEM) for reward zone and delivery events
     
     Args:
         reward_zone_trials: List of reward zone trial tuples
         trial_log_df: Trial log DataFrame
-        capacitive_df: Capacitive DataFrame
-        treadmill_interp: Interpolated treadmill speed
+        cap_time: Capacitive time array
+        cap_val: Capacitive value array
+        speed_val: Treadmill speed array
         pupil_diameter_data: Tuple of (interpolated_series, raw_times, raw_diameters) or None
         output_folder: Directory to save figures
         window: Window size in seconds
@@ -1368,20 +1434,20 @@ def plot_average_traces_reward(reward_zone_trials, trial_log_df, capacitive_df,
         print("No reward zones for average trace analysis")
         return
     
-    cap_time = capacitive_df['elapsed_time'].values
-    cap_val = capacitive_df['capacitive_value'].values
-    speed_val = treadmill_interp.values
-    
     # Extract zone entry times
     zone_entry_times = [entry[1] for entry in reward_zone_trials]
     
     # Create speed windows aligned to zone entry (using interpolation)
     speed_windows_padded, aligned_time_speed = create_aligned_windows(
-        cap_time, speed_val, zone_entry_times, window
+        speed_time, speed_val, zone_entry_times, window
     )
     
-    mean_speed = np.nanmean(speed_windows_padded, axis=0)
-    sem_speed = np.nanstd(speed_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(speed_windows_padded), axis=0))
+    # Suppress warnings for empty slice calculations
+    with np.errstate(invalid='ignore'):
+        mean_speed = np.nanmean(speed_windows_padded, axis=0)
+        valid_counts = np.sum(~np.isnan(speed_windows_padded), axis=0)
+        valid_counts = np.where(valid_counts > 0, valid_counts, np.nan)
+        sem_speed = np.nanstd(speed_windows_padded, axis=0) / np.sqrt(valid_counts)
     
     # Get reward event times
     reward_event_times_flat = pd.to_numeric(trial_log_df['reward_event'], errors='coerce').dropna()
@@ -1396,11 +1462,15 @@ def plot_average_traces_reward(reward_zone_trials, trial_log_df, capacitive_df,
         cap_time, cap_val, reward_event_times_flat, window
     )
     
-    mean_event_vals = np.nanmean(cap_event_windows_padded, axis=0)
-    sem_event_vals = np.nanstd(cap_event_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(cap_event_windows_padded), axis=0))
+    # Suppress warnings for empty slice calculations
+    with np.errstate(invalid='ignore'):
+        mean_event_vals = np.nanmean(cap_event_windows_padded, axis=0)
+        valid_counts = np.sum(~np.isnan(cap_event_windows_padded), axis=0)
+        valid_counts = np.where(valid_counts > 0, valid_counts, np.nan)
+        sem_event_vals = np.nanstd(cap_event_windows_padded, axis=0) / np.sqrt(valid_counts)
     
     # Create combined subplot figure
-    num_plots = 3 if pupil_diameter_data is not None and pupil_diameter_data[0] is not None else 2
+    num_plots = 3 if pupil_diameter_data is not None and pupil_diameter_data[1] is not None else 2
     fig, axs = plt.subplots(num_plots, 1, figsize=(12, 10 if num_plots == 2 else 14), sharex=True)
     
     if num_plots == 2:
@@ -1437,7 +1507,7 @@ def plot_average_traces_reward(reward_zone_trials, trial_log_df, capacitive_df,
     axs[1].spines['right'].set_visible(False)
     
     # Plot 3: Pupil diameter (if available)
-    if pupil_diameter_data is not None and pupil_diameter_data[0] is not None:
+    if pupil_diameter_data is not None and pupil_diameter_data[1] is not None:
         _, pupil_raw_times, pupil_raw_diameters = pupil_diameter_data
         
         # Pupil aligned to zone entry (interpolated to common timeline)
@@ -1445,8 +1515,12 @@ def plot_average_traces_reward(reward_zone_trials, trial_log_df, capacitive_df,
             pupil_raw_times, pupil_raw_diameters, zone_entry_times, window
         )
         
-        mean_pupil = np.nanmean(pupil_zone_windows_padded, axis=0)
-        sem_pupil = np.nanstd(pupil_zone_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(pupil_zone_windows_padded), axis=0))
+        # Suppress warnings for empty slice calculations
+        with np.errstate(invalid='ignore'):
+            mean_pupil = np.nanmean(pupil_zone_windows_padded, axis=0)
+            valid_counts = np.sum(~np.isnan(pupil_zone_windows_padded), axis=0)
+            valid_counts = np.where(valid_counts > 0, valid_counts, np.nan)
+            sem_pupil = np.nanstd(pupil_zone_windows_padded, axis=0) / np.sqrt(valid_counts)
         
         # Plot pupil in the third subplot
         n_pupil_zone = pupil_zone_windows_padded.shape[0]
@@ -1476,15 +1550,16 @@ def plot_average_traces_reward(reward_zone_trials, trial_log_df, capacitive_df,
     print(f"Average trace plots created: {n_rewards_speed} zone entries, {n_rewards_event} reward events")
 
 
-def plot_average_traces_puff(puff_zone_trials, trial_log_df, capacitive_df,
-                             treadmill_interp, pupil_diameter_data, output_folder, window=5, cap_vmax=None):
+def plot_average_traces_puff(puff_zone_trials, trial_log_df, cap_time, cap_val, speed_time, speed_val,
+                             pupil_diameter_data, output_folder, window=5, cap_vmax=None):
     """Plot average traces (mean ± SEM) for puff zone and delivery events
     
     Args:
         puff_zone_trials: List of puff zone trial tuples
         trial_log_df: Trial log DataFrame
-        capacitive_df: Capacitive DataFrame
-        treadmill_interp: Interpolated treadmill speed
+        cap_time: Capacitive time array
+        cap_val: Capacitive value array
+        speed_val: Treadmill speed array
         pupil_diameter_data: Tuple of (interpolated_series, raw_times, raw_diameters) or None
         output_folder: Directory to save figures
         window: Window size in seconds
@@ -1494,16 +1569,12 @@ def plot_average_traces_puff(puff_zone_trials, trial_log_df, capacitive_df,
         print("No puff zones for average trace analysis")
         return
     
-    cap_time = capacitive_df['elapsed_time'].values
-    cap_val = capacitive_df['capacitive_value'].values
-    speed_val = treadmill_interp.values
-    
     # Extract zone entry times
     zone_entry_times = [entry[1] for entry in puff_zone_trials]
     
     # Speed aligned to puff zone entry (using interpolation)
     speed_puff_windows_padded, aligned_time_puff = create_aligned_windows(
-        cap_time, speed_val, zone_entry_times, window
+        speed_time, speed_val, zone_entry_times, window
     )
     
     if speed_puff_windows_padded is None:
@@ -1511,8 +1582,13 @@ def plot_average_traces_puff(puff_zone_trials, trial_log_df, capacitive_df,
         return
     
     n_puff_events = speed_puff_windows_padded.shape[0]
-    mean_speed_puff = np.nanmean(speed_puff_windows_padded, axis=0)
-    sem_speed_puff = np.nanstd(speed_puff_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(speed_puff_windows_padded), axis=0))
+    
+    # Suppress warnings for empty slice calculations
+    with np.errstate(invalid='ignore'):
+        mean_speed_puff = np.nanmean(speed_puff_windows_padded, axis=0)
+        valid_counts = np.sum(~np.isnan(speed_puff_windows_padded), axis=0)
+        valid_counts = np.where(valid_counts > 0, valid_counts, np.nan)
+        sem_speed_puff = np.nanstd(speed_puff_windows_padded, axis=0) / np.sqrt(valid_counts)
     
     # Get puff event times
     puff_event_capacitive_data = None
@@ -1530,8 +1606,13 @@ def plot_average_traces_puff(puff_zone_trials, trial_log_df, capacitive_df,
             
             if cap_puff_event_windows_padded is not None:
                 n_puff_event_cap = cap_puff_event_windows_padded.shape[0]
-                mean_cap_puff_event = np.nanmean(cap_puff_event_windows_padded, axis=0)
-                sem_cap_puff_event = np.nanstd(cap_puff_event_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(cap_puff_event_windows_padded), axis=0))
+                
+                # Suppress warnings for empty slice calculations
+                with np.errstate(invalid='ignore'):
+                    mean_cap_puff_event = np.nanmean(cap_puff_event_windows_padded, axis=0)
+                    valid_counts = np.sum(~np.isnan(cap_puff_event_windows_padded), axis=0)
+                    valid_counts = np.where(valid_counts > 0, valid_counts, np.nan)
+                    sem_cap_puff_event = np.nanstd(cap_puff_event_windows_padded, axis=0) / np.sqrt(valid_counts)
                 
                 puff_event_capacitive_data = {
                     'aligned_time': aligned_time_puff_cap,
@@ -1542,13 +1623,18 @@ def plot_average_traces_puff(puff_zone_trials, trial_log_df, capacitive_df,
             
             # Speed aligned to puff events (using interpolation)
             speed_puff_event_windows_padded, aligned_time_puff_speed = create_aligned_windows(
-                cap_time, speed_val, puff_event_times, window
+                speed_time, speed_val, puff_event_times, window
             )
             
             if speed_puff_event_windows_padded is not None:
                 n_puff_event_speed = speed_puff_event_windows_padded.shape[0]
-                mean_speed_puff_event = np.nanmean(speed_puff_event_windows_padded, axis=0)
-                sem_speed_puff_event = np.nanstd(speed_puff_event_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(speed_puff_event_windows_padded), axis=0))
+                
+                # Suppress warnings for empty slice calculations
+                with np.errstate(invalid='ignore'):
+                    mean_speed_puff_event = np.nanmean(speed_puff_event_windows_padded, axis=0)
+                    valid_counts = np.sum(~np.isnan(speed_puff_event_windows_padded), axis=0)
+                    valid_counts = np.where(valid_counts > 0, valid_counts, np.nan)
+                    sem_speed_puff_event = np.nanstd(speed_puff_event_windows_padded, axis=0) / np.sqrt(valid_counts)
                 
                 puff_event_speed_data = {
                     'aligned_time': aligned_time_puff_speed,
@@ -1630,7 +1716,7 @@ def plot_average_traces_puff(puff_zone_trials, trial_log_df, capacitive_df,
     plt.show()
     
     # Create pupil plots if available
-    if pupil_diameter_data is not None and pupil_diameter_data[0] is not None:
+    if pupil_diameter_data is not None and pupil_diameter_data[1] is not None:
         _, pupil_raw_times, pupil_raw_diameters = pupil_diameter_data
         window_pupil = 10
         
@@ -1639,8 +1725,12 @@ def plot_average_traces_puff(puff_zone_trials, trial_log_df, capacitive_df,
             pupil_raw_times, pupil_raw_diameters, zone_entry_times, window_pupil
         )
         
-        mean_pupil_puff = np.nanmean(pupil_puff_windows_padded, axis=0)
-        sem_pupil_puff = np.nanstd(pupil_puff_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(pupil_puff_windows_padded), axis=0))
+        # Suppress warnings for empty slice calculations
+        with np.errstate(invalid='ignore'):
+            mean_pupil_puff = np.nanmean(pupil_puff_windows_padded, axis=0)
+            valid_counts = np.sum(~np.isnan(pupil_puff_windows_padded), axis=0)
+            valid_counts = np.where(valid_counts > 0, valid_counts, np.nan)
+            sem_pupil_puff = np.nanstd(pupil_puff_windows_padded, axis=0) / np.sqrt(valid_counts)
         n_puffs_pupil = pupil_puff_windows_padded.shape[0]
         
         # Pupil aligned to puff events (if available)
@@ -1656,8 +1746,13 @@ def plot_average_traces_puff(puff_zone_trials, trial_log_df, capacitive_df,
                 
                 if pupil_puff_event_windows_padded is not None:
                     n_puffs_pupil_event = pupil_puff_event_windows_padded.shape[0]
-                    mean_pupil_puff_event = np.nanmean(pupil_puff_event_windows_padded, axis=0)
-                    sem_pupil_puff_event = np.nanstd(pupil_puff_event_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(pupil_puff_event_windows_padded), axis=0))
+                    
+                    # Suppress warnings for empty slice calculations
+                    with np.errstate(invalid='ignore'):
+                        mean_pupil_puff_event = np.nanmean(pupil_puff_event_windows_padded, axis=0)
+                        valid_counts = np.sum(~np.isnan(pupil_puff_event_windows_padded), axis=0)
+                        valid_counts = np.where(valid_counts > 0, valid_counts, np.nan)
+                        sem_pupil_puff_event = np.nanstd(pupil_puff_event_windows_padded, axis=0) / np.sqrt(valid_counts)
                     
                     pupil_puff_event_data = {
                         'time': aligned_time_pupil_puff_event,
@@ -1720,15 +1815,17 @@ def plot_average_traces_puff(puff_zone_trials, trial_log_df, capacitive_df,
 # ANALYSIS FUNCTIONS: REWARD ZONES
 # ============================================================================
 
-def analyze_reward_zones(reward_zone_trials, trial_log_df, capacitive_df, treadmill_interp, 
+def analyze_reward_zones(reward_zone_trials, trial_log_df, cap_time, cap_val, speed_time, speed_val,
                          pupil_diameter_data, output_folder, window=5):
     """Analyze data aligned to reward zone entries and deliveries
     
     Args:
         reward_zone_trials: List of (trial_idx, zone_entry, reward_event) tuples
         trial_log_df: Trial log DataFrame (needed to get ALL reward events)
-        capacitive_df: Capacitive DataFrame
-        treadmill_interp: Interpolated treadmill speed
+        cap_time: Capacitive time array
+        cap_val: Capacitive value array
+        speed_time: Treadmill speed time array
+        speed_val: Treadmill speed value array
         pupil_diameter_data: Tuple of (interpolated_series, raw_times, raw_diameters) or None
         output_folder: Directory to save figures
         window: Window size in seconds
@@ -1742,16 +1839,12 @@ def analyze_reward_zones(reward_zone_trials, trial_log_df, capacitive_df, treadm
     
     print(f"\n=== ANALYZING {len(reward_zone_trials)} REWARD ZONES ===")
     
-    cap_time = capacitive_df['elapsed_time'].values
-    cap_val = capacitive_df['capacitive_value'].values
-    speed_val = treadmill_interp.values
-    
     # Extract zone entry times
     zone_entry_times = [entry[1] for entry in reward_zone_trials]
     
     # Create aligned windows for zone entries
     speed_windows, aligned_time_speed = create_aligned_windows(
-        cap_time, speed_val, zone_entry_times, window
+        speed_time, speed_val, zone_entry_times, window
     )
     
     cap_windows, aligned_time_cap = create_aligned_windows(
@@ -1779,8 +1872,12 @@ def analyze_reward_zones(reward_zone_trials, trial_log_df, capacitive_df, treadm
             ])
             
             # Calculate mean and SEM (matching what's plotted in average traces)
-            mean_event_vals = np.nanmean(cap_event_windows_padded, axis=0)
-            sem_event_vals = np.nanstd(cap_event_windows_padded, axis=0) / np.sqrt(np.sum(~np.isnan(cap_event_windows_padded), axis=0))
+            # Suppress warnings for empty slice calculations
+            with np.errstate(invalid='ignore'):
+                mean_event_vals = np.nanmean(cap_event_windows_padded, axis=0)
+                valid_counts = np.sum(~np.isnan(cap_event_windows_padded), axis=0)
+                valid_counts = np.where(valid_counts > 0, valid_counts, np.nan)
+                sem_event_vals = np.nanstd(cap_event_windows_padded, axis=0) / np.sqrt(valid_counts)
             
             # Use the maximum of (mean + SEM) as the upper limit
             cap_vmin = 0
@@ -1825,13 +1922,13 @@ def analyze_reward_zones(reward_zone_trials, trial_log_df, capacitive_df, treadm
     
     # Analyze reward deliveries - pass trial_log_df to get ALL reward events
     print(f"Analyzing reward deliveries...")
-    analyze_reward_deliveries(reward_zone_trials, trial_log_df, cap_time, cap_val, speed_val,
+    analyze_reward_deliveries(reward_zone_trials, trial_log_df, cap_time, cap_val, speed_time, speed_val,
                              pupil_diameter_data, output_folder, window, cap_vmin, cap_vmax)
     
     return (cap_vmin, cap_vmax)
 
 
-def analyze_reward_deliveries(reward_zone_trials, trial_log_df, cap_time, cap_val, speed_val,
+def analyze_reward_deliveries(reward_zone_trials, trial_log_df, cap_time, cap_val, speed_time, speed_val,
                               pupil_diameter_data, output_folder, window=5, cap_vmin=0, cap_vmax=5000):
     """Analyze data aligned to reward delivery times
     
@@ -1878,7 +1975,7 @@ def analyze_reward_deliveries(reward_zone_trials, trial_log_df, cap_time, cap_va
     
     # Create aligned windows
     speed_windows, aligned_time_speed = create_aligned_windows(
-        cap_time, speed_val, reward_times, window
+        speed_time, speed_val, reward_times, window
     )
     
     cap_windows, aligned_time_cap = create_aligned_windows(
@@ -1915,15 +2012,16 @@ def analyze_reward_deliveries(reward_zone_trials, trial_log_df, cap_time, cap_va
 # ANALYSIS FUNCTIONS: PUFF ZONES
 # ============================================================================
 
-def analyze_puff_zones(puff_zone_trials, trial_log_df, capacitive_df, treadmill_interp, 
+def analyze_puff_zones(puff_zone_trials, trial_log_df, cap_time, cap_val, speed_time, speed_val,
                        pupil_diameter_data, output_folder, window=10, cap_vmin=0, cap_vmax=5000):
     """Analyze data aligned to puff zone entries and deliveries
     
     Args:
         puff_zone_trials: List of (trial_idx, zone_entry, puff_event) tuples
         trial_log_df: Trial log DataFrame (needed to get ALL puff events)
-        capacitive_df: Capacitive DataFrame
-        treadmill_interp: Interpolated treadmill speed
+        cap_time: Capacitive time array
+        cap_val: Capacitive value array
+        speed_val: Treadmill speed array
         pupil_diameter_data: Tuple of (interpolated_series, raw_times, raw_diameters) or None
         output_folder: Directory to save figures
         window: Window size in seconds
@@ -1936,16 +2034,12 @@ def analyze_puff_zones(puff_zone_trials, trial_log_df, capacitive_df, treadmill_
     
     print(f"\n=== ANALYZING {len(puff_zone_trials)} PUFF ZONES ===")
     
-    cap_time = capacitive_df['elapsed_time'].values
-    cap_val = capacitive_df['capacitive_value'].values
-    speed_val = treadmill_interp.values
-    
     # Extract zone entry times
     zone_entry_times = [entry[1] for entry in puff_zone_trials]
     
     # Create aligned windows
     speed_windows, aligned_time_speed = create_aligned_windows(
-        cap_time, speed_val, zone_entry_times, window
+        speed_time, speed_val, zone_entry_times, window
     )
     
     cap_windows, aligned_time_cap = create_aligned_windows(
@@ -1984,11 +2078,11 @@ def analyze_puff_zones(puff_zone_trials, trial_log_df, capacitive_df, treadmill_
     if len(puff_delivery_trials) > 0:
         print(f"Analyzing puff deliveries...")
         # Note: Pass puff_zone_trials and trial_log_df so we can include ALL puff events
-        analyze_puff_deliveries(puff_zone_trials, trial_log_df, cap_time, cap_val, speed_val,
+        analyze_puff_deliveries(puff_zone_trials, trial_log_df, cap_time, cap_val, speed_time, speed_val,
                                output_folder, window, cap_vmin, cap_vmax)
 
 
-def analyze_puff_deliveries(puff_zone_trials, trial_log_df, cap_time, cap_val, speed_val,
+def analyze_puff_deliveries(puff_zone_trials, trial_log_df, cap_time, cap_val, speed_time, speed_val,
                             output_folder, window=10, cap_vmin=0, cap_vmax=5000):
     """Analyze data aligned to puff delivery times
     
@@ -2039,7 +2133,7 @@ def analyze_puff_deliveries(puff_zone_trials, trial_log_df, cap_time, cap_val, s
     
     # Create aligned windows
     speed_windows, aligned_time_speed = create_aligned_windows(
-        cap_time, speed_val, puff_times, window
+        speed_time, speed_val, puff_times, window
     )
     
     cap_windows, aligned_time_cap = create_aligned_windows(
@@ -2076,13 +2170,14 @@ def analyze_puff_deliveries(puff_zone_trials, trial_log_df, cap_time, cap_val, s
 # ANALYSIS FUNCTIONS: PROBE EVENTS
 # ============================================================================
 
-def analyze_probe_events(trial_log_df, capacitive_df, treadmill_interp, output_folder, window=5, cap_vmax=None):
+def analyze_probe_events(trial_log_df, cap_time, cap_val, speed_time, speed_val, output_folder, window=5, cap_vmax=None):
     """Analyze probe events with treadmill speed and capacitive value alignment
     
     Args:
         trial_log_df: Trial log DataFrame
-        capacitive_df: Capacitive sensor DataFrame
-        treadmill_interp: Interpolated treadmill speed data
+        cap_time: Capacitive time array
+        cap_val: Capacitive value array
+        speed_val: Treadmill speed array
         output_folder: Directory for saving figures
         window: Time window in seconds (default: 5)
         cap_vmax: Maximum value for capacitive y-axis (optional)
@@ -2104,11 +2199,6 @@ def analyze_probe_events(trial_log_df, capacitive_df, treadmill_interp, output_f
     # Convert probe times to numpy array
     probe_event_times = np.array(probe_event_times, dtype=float)
     
-    # Extract base arrays
-    cap_time = capacitive_df['elapsed_time'].values
-    cap_val = capacitive_df['capacitive_value'].values
-    speed_val = treadmill_interp.values
-    
     # --- Capacitive Value aligned to probe events (using interpolation) ---
     cap_probe_windows_padded, aligned_time_probe = create_aligned_windows(
         cap_time, cap_val, probe_event_times, window
@@ -2120,56 +2210,81 @@ def analyze_probe_events(trial_log_df, capacitive_df, treadmill_interp, output_f
     
     # --- Treadmill Speed aligned to probe events (using interpolation) ---
     speed_probe_windows_padded, _ = create_aligned_windows(
-        cap_time, speed_val, probe_event_times, window
+        speed_time, speed_val, probe_event_times, window
     )
+    
+    # Validate that there's sufficient valid data
+    n_probes = cap_probe_windows_padded.shape[0]
+    
+    # Check for valid data
+    n_valid_speed = np.sum(~np.isnan(speed_probe_windows_padded))
+    n_valid_cap = np.sum(~np.isnan(cap_probe_windows_padded))
+    
+    if n_valid_speed == 0 and n_valid_cap == 0:
+        print("Warning: No valid data in probe event windows. Skipping plot.")
+        return
     
     # --- Combined Subplots: Treadmill Speed and Capacitive Value aligned to probe events ---
     fig, axs = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
     
-    n_probes = cap_probe_windows_padded.shape[0]
-    
     # --- Plot 1: Treadmill Speed aligned to probe events ---
-    mean_speed_probe = np.nanmean(speed_probe_windows_padded, axis=0)
-    sem_speed_probe = np.nanstd(speed_probe_windows_padded, axis=0) / np.sqrt(
-        np.sum(~np.isnan(speed_probe_windows_padded), axis=0)
-    )
-    axs[0].plot(aligned_time_probe, mean_speed_probe, color='purple', label=f'Mean Speed (n={n_probes})', linewidth=1.5)
-    axs[0].fill_between(
-        aligned_time_probe, 
-        mean_speed_probe - sem_speed_probe, 
-        mean_speed_probe + sem_speed_probe,
-        color='purple', alpha=0.2, label='SEM'
-    )
-    axs[0].axvline(0, color='black', linestyle='--', label='Probe Event (t=0)', linewidth=1.5)
+    if n_valid_speed > 0:
+        # Suppress specific warnings for this calculation
+        with np.errstate(invalid='ignore'):
+            mean_speed_probe = np.nanmean(speed_probe_windows_padded, axis=0)
+            valid_counts = np.sum(~np.isnan(speed_probe_windows_padded), axis=0)
+            valid_counts = np.where(valid_counts > 0, valid_counts, np.nan)
+            sem_speed_probe = np.nanstd(speed_probe_windows_padded, axis=0) / np.sqrt(valid_counts)
+        
+        axs[0].plot(aligned_time_probe, mean_speed_probe, color='purple', label=f'Mean Speed (n={n_probes})', linewidth=1.5)
+        axs[0].fill_between(
+            aligned_time_probe, 
+            mean_speed_probe - sem_speed_probe, 
+            mean_speed_probe + sem_speed_probe,
+            color='purple', alpha=0.2, label='SEM'
+        )
+        axs[0].axvline(0, color='black', linestyle='--', label='Probe Event (t=0)', linewidth=1.5)
+        axs[0].legend(loc='upper right')
+    else:
+        axs[0].text(0.5, 0.5, 'No valid speed data', ha='center', va='center',
+                   transform=axs[0].transAxes, fontsize=12, color='gray')
+    
     axs[0].set_ylabel('Speed (cm/s)')
     axs[0].set_title('Treadmill Speed Aligned to Probe Events')
-    axs[0].legend(loc='upper right')
     axs[0].set_xlim(-window, window)
     axs[0].spines['top'].set_visible(False)
     axs[0].spines['right'].set_visible(False)
     
     # --- Plot 2: Capacitive Value aligned to probe events ---
-    mean_cap_probe = np.nanmean(cap_probe_windows_padded, axis=0)
-    sem_cap_probe = np.nanstd(cap_probe_windows_padded, axis=0) / np.sqrt(
-        np.sum(~np.isnan(cap_probe_windows_padded), axis=0)
-    )
-    axs[1].plot(aligned_time_probe, mean_cap_probe, color='C0', label=f'Mean Capacitive Value (n={n_probes})', linewidth=1.5)
-    axs[1].fill_between(
-        aligned_time_probe,
-        mean_cap_probe - sem_cap_probe,
-        mean_cap_probe + sem_cap_probe,
-        color='C0', alpha=0.2, label='SEM'
-    )
-    axs[1].axvline(0, color='black', linestyle='--', label='Probe Event (t=0)', linewidth=1.5)
+    if n_valid_cap > 0:
+        # Suppress specific warnings for this calculation
+        with np.errstate(invalid='ignore'):
+            mean_cap_probe = np.nanmean(cap_probe_windows_padded, axis=0)
+            valid_counts = np.sum(~np.isnan(cap_probe_windows_padded), axis=0)
+            valid_counts = np.where(valid_counts > 0, valid_counts, np.nan)
+            sem_cap_probe = np.nanstd(cap_probe_windows_padded, axis=0) / np.sqrt(valid_counts)
+        
+        axs[1].plot(aligned_time_probe, mean_cap_probe, color='C0', label=f'Mean Capacitive Value (n={n_probes})', linewidth=1.5)
+        axs[1].fill_between(
+            aligned_time_probe,
+            mean_cap_probe - sem_cap_probe,
+            mean_cap_probe + sem_cap_probe,
+            color='C0', alpha=0.2, label='SEM'
+        )
+        axs[1].axvline(0, color='black', linestyle='--', label='Probe Event (t=0)', linewidth=1.5)
+        axs[1].legend(loc='upper right')
+        if cap_vmax is not None:
+            axs[1].set_ylim(0, cap_vmax)
+        else:
+            axs[1].set_ylim(bottom=0)
+    else:
+        axs[1].text(0.5, 0.5, 'No valid capacitive data', ha='center', va='center',
+                   transform=axs[1].transAxes, fontsize=12, color='gray')
+    
     axs[1].set_xlabel('Time from Probe Event (s)')
     axs[1].set_ylabel('Capacitive Value (a.u.)')
     axs[1].set_title('Capacitive Value Aligned to Probe Events')
-    axs[1].legend(loc='upper right')
     axs[1].set_xlim(-window, window)
-    if cap_vmax is not None:
-        axs[1].set_ylim(0, cap_vmax)
-    else:
-        axs[1].set_ylim(bottom=0)
     axs[1].spines['top'].set_visible(False)
     axs[1].spines['right'].set_visible(False)
     axs[1].set_xticks(np.arange(-window, window + 1, 1))
@@ -2273,15 +2388,16 @@ def match_probe_to_revert_times(trial_log_df, texture_data):
 
 
 def analyze_simulated_probe_events(trial_log_df, probe_revert_array, all_revert_times,
-                                   capacitive_df, treadmill_interp, output_folder, window=5, cap_vmax=None):
+                                   cap_time, cap_val, speed_time, speed_val, output_folder, window=5, cap_vmax=None):
     """Analyze simulated probe events for unpaired revert times
     
     Args:
         trial_log_df: Trial log DataFrame
         probe_revert_array: Array of matched probe-revert pairs
         all_revert_times: All texture revert times
-        capacitive_df: Capacitive sensor DataFrame
-        treadmill_interp: Interpolated treadmill speed
+        cap_time: Capacitive time array
+        cap_val: Capacitive value array
+        speed_val: Treadmill speed array
         output_folder: Directory for saving figures
         window: Time window in seconds
         cap_vmax: Maximum value for capacitive y-axis (optional)
@@ -2323,11 +2439,6 @@ def analyze_simulated_probe_events(trial_log_df, probe_revert_array, all_revert_
     # Create simulated probe times (1 second after each unpaired revert)
     simulated_probe_times = unpaired_revert_times + 1.0
     
-    # Extract base arrays
-    cap_time = capacitive_df['elapsed_time'].values
-    cap_val = capacitive_df['capacitive_value'].values
-    speed_val = treadmill_interp.values
-    
     # --- Capacitive Value aligned to simulated probes (using interpolation) ---
     cap_sim_windows_padded, aligned_time_sim = create_aligned_windows(
         cap_time, cap_val, simulated_probe_times, window
@@ -2339,57 +2450,102 @@ def analyze_simulated_probe_events(trial_log_df, probe_revert_array, all_revert_
     
     # --- Treadmill Speed aligned to simulated probes (using interpolation) ---
     speed_sim_windows_padded, _ = create_aligned_windows(
-        cap_time, speed_val, simulated_probe_times, window
+        speed_time, speed_val, simulated_probe_times, window
     )
+    
+    # Validate that there's sufficient valid data
+    n_sim_probes = cap_sim_windows_padded.shape[0]
+    
+    # Check for valid data in speed windows
+    n_valid_speed = np.sum(~np.isnan(speed_sim_windows_padded))
+    if n_valid_speed == 0:
+        print("Warning: No valid speed data in simulated probe windows. Skipping speed plot.")
+        speed_has_data = False
+    else:
+        speed_has_data = True
+    
+    # Check for valid data in capacitive windows
+    n_valid_cap = np.sum(~np.isnan(cap_sim_windows_padded))
+    if n_valid_cap == 0:
+        print("Warning: No valid capacitive data in simulated probe windows. Skipping capacitive plot.")
+        cap_has_data = False
+    else:
+        cap_has_data = True
+    
+    # If neither has data, exit early
+    if not speed_has_data and not cap_has_data:
+        print("No valid data in any simulated probe windows. Skipping analysis.")
+        return
     
     # --- Create Combined Plot ---
     fig, axs = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
     
-    n_sim_probes = cap_sim_windows_padded.shape[0]
-    
     # --- Plot 1: Treadmill Speed ---
-    mean_speed_sim = np.nanmean(speed_sim_windows_padded, axis=0)
-    sem_speed_sim = np.nanstd(speed_sim_windows_padded, axis=0) / np.sqrt(
-        np.sum(~np.isnan(speed_sim_windows_padded), axis=0)
-    )
-    axs[0].plot(aligned_time_sim, mean_speed_sim, color='purple', 
-                label=f'Mean Speed (n={n_sim_probes})', linewidth=1.5)
-    axs[0].fill_between(
-        aligned_time_sim,
-        mean_speed_sim - sem_speed_sim,
-        mean_speed_sim + sem_speed_sim,
-        color='purple', alpha=0.2, label='SEM'
-    )
-    axs[0].axvline(0, color='black', linestyle='--', label='Simulated Probe (t=0)', linewidth=1.5)
+    if speed_has_data:
+        # Suppress specific warnings for this calculation
+        with np.errstate(invalid='ignore'):
+            mean_speed_sim = np.nanmean(speed_sim_windows_padded, axis=0)
+            valid_counts = np.sum(~np.isnan(speed_sim_windows_padded), axis=0)
+            valid_counts = np.where(valid_counts > 0, valid_counts, np.nan)  # Avoid division by zero
+            sem_speed_sim = np.nanstd(speed_sim_windows_padded, axis=0) / np.sqrt(valid_counts)
+        
+        axs[0].plot(aligned_time_sim, mean_speed_sim, color='purple', 
+                    label=f'Mean Speed (n={n_sim_probes})', linewidth=1.5)
+        axs[0].fill_between(
+            aligned_time_sim,
+            mean_speed_sim - sem_speed_sim,
+            mean_speed_sim + sem_speed_sim,
+            color='purple', alpha=0.2, label='SEM'
+        )
+        axs[0].axvline(0, color='black', linestyle='--', label='Simulated Probe (t=0)', linewidth=1.5)
+    else:
+        axs[0].text(0.5, 0.5, 'No valid speed data', ha='center', va='center',
+                   transform=axs[0].transAxes, fontsize=12, color='gray')
+    
     axs[0].set_ylabel('Speed (cm/s)')
     axs[0].set_title('Treadmill Speed Aligned to Simulated Probe Events (1s after unpaired reverts)')
-    axs[0].legend(loc='upper right')
+    if speed_has_data:
+        axs[0].legend(loc='upper right')
     axs[0].set_xlim(-window, window)
     axs[0].spines['top'].set_visible(False)
     axs[0].spines['right'].set_visible(False)
     
     # --- Plot 2: Capacitive Value ---
-    mean_cap_sim = np.nanmean(cap_sim_windows_padded, axis=0)
-    sem_cap_sim = np.nanstd(cap_sim_windows_padded, axis=0) / np.sqrt(
-        np.sum(~np.isnan(cap_sim_windows_padded), axis=0)
-    )
-    axs[1].plot(aligned_time_sim, mean_cap_sim, color='C0', 
-                label=f'Mean Capacitive Value (n={n_sim_probes})', linewidth=1.5)
-    axs[1].fill_between(
-        aligned_time_sim,
-        mean_cap_sim - sem_cap_sim,
-        mean_cap_sim + sem_cap_sim,
-        color='C0', alpha=0.2, label='SEM'
-    )
-    axs[1].axvline(0, color='black', linestyle='--', label='Simulated Probe (t=0)', linewidth=1.5)
-    axs[1].set_xlabel('Time from Simulated Probe Event (s)')
-    axs[1].set_ylabel('Capacitive Value (a.u.)')
-    axs[1].set_title('Capacitive Value Aligned to Simulated Probe Events (1s after unpaired reverts)')
-    axs[1].legend(loc='upper right')
-    axs[1].set_xlim(-window, window)
-    if cap_vmax is not None:
-        axs[1].set_ylim(0, cap_vmax)
+    if cap_has_data:
+        # Suppress specific warnings for this calculation
+        with np.errstate(invalid='ignore'):
+            mean_cap_sim = np.nanmean(cap_sim_windows_padded, axis=0)
+            valid_counts = np.sum(~np.isnan(cap_sim_windows_padded), axis=0)
+            valid_counts = np.where(valid_counts > 0, valid_counts, np.nan)  # Avoid division by zero
+            sem_cap_sim = np.nanstd(cap_sim_windows_padded, axis=0) / np.sqrt(valid_counts)
     else:
+        # Create empty arrays to avoid errors below
+        mean_cap_sim = np.full_like(aligned_time_sim, np.nan)
+        sem_cap_sim = np.full_like(aligned_time_sim, np.nan)
+    
+    if cap_has_data:
+        axs[1].plot(aligned_time_sim, mean_cap_sim, color='C0', 
+                    label=f'Mean Capacitive Value (n={n_sim_probes})', linewidth=1.5)
+        axs[1].fill_between(
+            aligned_time_sim,
+            mean_cap_sim - sem_cap_sim,
+            mean_cap_sim + sem_cap_sim,
+            color='C0', alpha=0.2, label='SEM'
+        )
+        axs[1].axvline(0, color='black', linestyle='--', label='Simulated Probe (t=0)', linewidth=1.5)
+    else:
+        axs[1].text(0.5, 0.5, 'No valid capacitive data', ha='center', va='center',
+                   transform=axs[1].transAxes, fontsize=12, color='gray')
+    
+    axs[1].set_xlabel('Time from Simulated Probe Event (s)')
+    axs[1].set_ylabel('Capacitive Value (a.u)')
+    axs[1].set_title('Capacitive Value Aligned to Simulated Probe Events (1s after unpaired reverts)')
+    if cap_has_data:
+        axs[1].legend(loc='upper right')
+    axs[1].set_xlim(-window, window)
+    if cap_vmax is not None and cap_has_data:
+        axs[1].set_ylim(0, cap_vmax)
+    elif cap_has_data:
         axs[1].set_ylim(bottom=0)
     axs[1].spines['top'].set_visible(False)
     axs[1].spines['right'].set_visible(False)
@@ -2399,7 +2555,14 @@ def analyze_simulated_probe_events(trial_log_df, probe_revert_array, all_revert_
     save_figure(fig, "simulated_probe_events", output_folder)
     plt.show()
     
-    print(f"Simulated probe analysis complete: {n_sim_probes} events analyzed")
+    if speed_has_data and cap_has_data:
+        print(f"Simulated probe analysis complete: {n_sim_probes} events analyzed")
+    elif speed_has_data:
+        print(f"Simulated probe analysis complete: {n_sim_probes} events analyzed (speed data only)")
+    elif cap_has_data:
+        print(f"Simulated probe analysis complete: {n_sim_probes} events analyzed (capacitive data only)")
+    else:
+        print(f"Simulated probe analysis attempted but no valid data available")
 
 
 # ============================================================================
@@ -2430,34 +2593,30 @@ def main():
     print("Processing texture history...")
     texture_data = process_texture_history(data['trial_log'])
     
-    # Step 4: Interpolate treadmill data
-    print("Interpolating treadmill data to capacitive timeline...")
-    treadmill_interp = interpolate_treadmill_to_capacitive(
-        data['treadmill'], data['capacitive']
-    )
+    # Step 4: Uniformly sample all data streams at their native rates
+    print("Uniformly sampling capacitive data at 50 Hz...")
+    cap_time, cap_value = uniformly_sample_capacitive(data['capacitive'])
     
-    print("Interpolating treadmill distance to capacitive timeline...")
-    treadmill_distance_interp = interpolate_treadmill_distance_to_capacitive(
-        data['treadmill'], data['capacitive']
-    )
+    print("Uniformly sampling treadmill speed at 50 Hz...")
+    tread_time, tread_speed = uniformly_sample_treadmill(data['treadmill'])
+    
+    print("Uniformly sampling treadmill distance at 50 Hz...")
+    tread_dist_time, tread_distance = uniformly_sample_treadmill_distance(data['treadmill'])
     
     # Step 5: Process pupil data (if available)
-    pupil_diameter_interp = None
-    pupil_diameter_data = None
+    pupil_time = None
+    pupil_diameter = None
     if has_pupil_data:
-        print("Processing pupil data...")
-        pupil_interp, pupil_raw_times, pupil_raw_diameters = process_pupil_data(
-            data['pupil'], data['frame_log'], data['capacitive']
+        print("Processing and uniformly sampling pupil data at 20 Hz...")
+        pupil_time, pupil_diameter = process_pupil_data(
+            data['pupil'], data['frame_log']
         )
-        pupil_diameter_interp = pupil_interp
-        if pupil_interp is not None:
-            pupil_diameter_data = (pupil_interp, pupil_raw_times, pupil_raw_diameters)
     
     # Step 6: Plot main timeline
     print("\nGenerating main timeline plot...")
     plot_main_timeline(
-        data['capacitive'], treadmill_interp, treadmill_distance_interp, pupil_diameter_interp,
-        data['trial_log'], texture_data, has_pupil_data, output_folder
+        cap_time, cap_value, tread_time, tread_speed, tread_dist_time, tread_distance, 
+        pupil_time, pupil_diameter, data['trial_log'], texture_data, has_pupil_data, output_folder
     )
     
     # Step 7: Match and analyze reward zones
@@ -2469,17 +2628,22 @@ def main():
     # Initialize capacitive scale with defaults
     cap_vmin, cap_vmax = 0, 5000
     
+    # Prepare pupil data tuple (for backward compatibility with analysis functions)
+    pupil_diameter_data = None
+    if pupil_time is not None and pupil_diameter is not None:
+        pupil_diameter_data = (None, pupil_time, pupil_diameter)
+    
     if len(reward_zone_trials) > 0:
         cap_vmin, cap_vmax = analyze_reward_zones(
-            reward_zone_trials, data['trial_log'], data['capacitive'], treadmill_interp,
+            reward_zone_trials, data['trial_log'], cap_time, cap_value, tread_time, tread_speed,
             pupil_diameter_data, output_folder
         )
         
         # Create average trace plots for rewards
         print("\nCreating reward average trace plots...")
         plot_average_traces_reward(
-            reward_zone_trials, data['trial_log'], data['capacitive'],
-            treadmill_interp, pupil_diameter_data, output_folder, cap_vmax=cap_vmax
+            reward_zone_trials, data['trial_log'], cap_time, cap_value, tread_time, tread_speed,
+            pupil_diameter_data, output_folder, cap_vmax=cap_vmax
         )
     
     # Step 8: Match and analyze puff zones (using capacitive scale from reward analysis)
@@ -2490,21 +2654,21 @@ def main():
     
     if len(puff_zone_trials) > 0:
         analyze_puff_zones(
-            puff_zone_trials, data['trial_log'], data['capacitive'], treadmill_interp,
+            puff_zone_trials, data['trial_log'], cap_time, cap_value, tread_time, tread_speed,
             pupil_diameter_data, output_folder, window=10, cap_vmin=cap_vmin, cap_vmax=cap_vmax
         )
         
         # Create average trace plots for puffs
         print("\nCreating puff average trace plots...")
         plot_average_traces_puff(
-            puff_zone_trials, data['trial_log'], data['capacitive'],
-            treadmill_interp, pupil_diameter_data, output_folder, cap_vmax=cap_vmax
+            puff_zone_trials, data['trial_log'], cap_time, cap_value, tread_time, tread_speed,
+            pupil_diameter_data, output_folder, cap_vmax=cap_vmax
         )
     
     # Step 9: Analyze probe events (using capacitive scale from reward analysis)
     print("\nAnalyzing probe events...")
     analyze_probe_events(
-        data['trial_log'], data['capacitive'], treadmill_interp, output_folder, cap_vmax=cap_vmax
+        data['trial_log'], cap_time, cap_value, tread_time, tread_speed, output_folder, cap_vmax=cap_vmax
     )
     
     # Step 10: Match probe times to revert times and analyze simulated probes
@@ -2517,7 +2681,7 @@ def main():
         print("\nAnalyzing simulated probe events...")
         analyze_simulated_probe_events(
             data['trial_log'], probe_revert_array, all_revert_times,
-            data['capacitive'], treadmill_interp, output_folder, cap_vmax=cap_vmax
+            cap_time, cap_value, tread_time, tread_speed, output_folder, cap_vmax=cap_vmax
         )
     
     # Step 11: Summary
