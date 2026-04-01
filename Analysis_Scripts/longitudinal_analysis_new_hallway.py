@@ -104,62 +104,68 @@ def test_matching_logic(trial_log_path):
     
     print(f"\nTotal rows in trial_log: {len(trial_log)}")
     
-    # Extract ALL stay zone entry times (times are chronological events, not organized by trial rows)
-    stay_zone_times = pd.to_numeric(trial_log['stay_texture_change_time'], errors='coerce').dropna().values
-    print(f"Total stay zone entry times: {len(stay_zone_times)}")
-    
-    # Collect all re-entry times to exclude them
-    re_entry_times_set = set()
-    if 'zone_re_entry_time' in trial_log.columns:
-        for val in trial_log['zone_re_entry_time']:
-            if pd.notna(val) and val != '':
-                try:
-                    # Handle both single values and arrays
-                    if isinstance(val, str) and val.strip():
-                        import ast
-                        try:
-                            re_entry_list = ast.literal_eval(val)
-                            if isinstance(re_entry_list, (list, tuple)):
-                                for t in re_entry_list:
-                                    if pd.notna(t):
-                                        re_entry_times_set.add(float(t))
-                            else:
-                                re_entry_times_set.add(float(re_entry_list))
-                        except:
-                            pass
-                    elif not isinstance(val, str):
-                        re_entry_times_set.add(float(val))
-                except (ValueError, TypeError):
-                    pass
-    
-    print(f"Re-entry times found: {len(re_entry_times_set)}")
-    if len(re_entry_times_set) > 0:
-        print(f"  Sample re-entry times: {sorted(list(re_entry_times_set))[:5]}")
-    
-    # Filter out stay_zone_times that match re-entries (within 0.05 seconds)
-    valid_zone_times = []
-    excluded_zones = []
-    excluded_details = []  # Store details for reporting
-    for zone_time in stay_zone_times:
-        is_reentry = False
-        for re_entry_time in re_entry_times_set:
-            if abs(zone_time - re_entry_time) <= 0.05:
-                is_reentry = True
-                excluded_zones.append(zone_time)
-                excluded_details.append((zone_time, re_entry_time, abs(zone_time - re_entry_time)))
-                break
-        if not is_reentry:
-            valid_zone_times.append(zone_time)
-    
-    valid_zone_times = np.array(valid_zone_times)
-    print(f"\nZones excluded as re-entries: {len(excluded_zones)}")
-    if len(excluded_zones) > 0:
-        print(f"  Excluded zone details (first 5):")
-        for zone, reentry, diff in sorted(excluded_details)[:5]:
-            print(f"    Zone {zone:.2f} ← Re-entry {reentry:.2f} (diff={diff:.3f}s)")
-        if len(excluded_zones) > 5:
-            print(f"    ... and {len(excluded_zones) - 5} more")
-    print(f"Valid zone times (after re-entry filtering): {len(valid_zone_times)}")
+    # Extract ALL stay zone entry times (if column exists; older data may not have it)
+    if 'stay_texture_change_time' in trial_log.columns:
+        stay_zone_times = pd.to_numeric(trial_log['stay_texture_change_time'], errors='coerce').dropna().values
+        print(f"Total stay zone entry times: {len(stay_zone_times)}")
+        
+        # Collect all re-entry times to exclude them
+        re_entry_times_set = set()
+        if 'zone_re_entry_time' in trial_log.columns:
+            for val in trial_log['zone_re_entry_time']:
+                if pd.notna(val) and val != '':
+                    try:
+                        # Handle both single values and arrays
+                        if isinstance(val, str) and val.strip():
+                            import ast
+                            try:
+                                re_entry_list = ast.literal_eval(val)
+                                if isinstance(re_entry_list, (list, tuple)):
+                                    for t in re_entry_list:
+                                        if pd.notna(t):
+                                            re_entry_times_set.add(float(t))
+                                else:
+                                    re_entry_times_set.add(float(re_entry_list))
+                            except:
+                                pass
+                        elif not isinstance(val, str):
+                            re_entry_times_set.add(float(val))
+                    except (ValueError, TypeError):
+                        pass
+        
+        print(f"Re-entry times found: {len(re_entry_times_set)}")
+        if len(re_entry_times_set) > 0:
+            print(f"  Sample re-entry times: {sorted(list(re_entry_times_set))[:5]}")
+        
+        # Filter out stay_zone_times that match re-entries (within 0.05 seconds)
+        valid_zone_times = []
+        excluded_zones = []
+        excluded_details = []  # Store details for reporting
+        for zone_time in stay_zone_times:
+            is_reentry = False
+            for re_entry_time in re_entry_times_set:
+                if abs(zone_time - re_entry_time) <= 0.05:
+                    is_reentry = True
+                    excluded_zones.append(zone_time)
+                    excluded_details.append((zone_time, re_entry_time, abs(zone_time - re_entry_time)))
+                    break
+            if not is_reentry:
+                valid_zone_times.append(zone_time)
+        
+        valid_zone_times = np.array(valid_zone_times)
+        print(f"\nZones excluded as re-entries: {len(excluded_zones)}")
+        if len(excluded_zones) > 0:
+            print(f"  Excluded zone details (first 5):")
+            for zone, reentry, diff in sorted(excluded_details)[:5]:
+                print(f"    Zone {zone:.2f} ← Re-entry {reentry:.2f} (diff={diff:.3f}s)")
+            if len(excluded_zones) > 5:
+                print(f"    ... and {len(excluded_zones) - 5} more")
+        print(f"Valid zone times (after re-entry filtering): {len(valid_zone_times)}")
+        total_opportunities = len(valid_zone_times)
+    else:
+        print("\nNote: 'stay_texture_change_time' not found. Using texture_history fallback for opportunities.")
+        total_opportunities = len(trial_log[trial_log['texture_history'] == 'assets/reward_mean100.jpg'])
+        print(f"Reward opportunities (texture_history fallback): {total_opportunities}")
     
     # Collect all reward_event and hits_event times
     reward_event_times = pd.to_numeric(trial_log['reward_event'], errors='coerce').dropna().values
@@ -174,9 +180,8 @@ def test_matching_logic(trial_log_path):
     print(f"\nReward events found: {len(reward_event_times)}")
     print(f"Hits events found: {len(hits_event_times)}")
     
-    # Simple counting: hits = rewards + hits, misses = valid_zones - hits
-    if len(valid_zone_times) > 0:
-        total_opportunities = len(valid_zone_times)
+    # Simple counting: hits = rewards + hits, misses = opportunities - hits
+    if total_opportunities > 0:
         reward_count = len(reward_event_times) + len(hits_event_times)
         misses = total_opportunities - reward_count
         sensitivity = float(reward_count) / float(total_opportunities) if total_opportunities > 0 else 0.0
@@ -383,45 +388,50 @@ def analyze_mouse_data(data_files, markers, starting_conditions, save_lick_plots
                 # Read trial log data for texture history and reward events
                 trial_log = pd.read_csv(row['trial_log'])
                 
-                # Extract ALL stay zone entry times (times are chronological events, not organized by trial rows)
-                stay_zone_times = pd.to_numeric(trial_log['stay_texture_change_time'], errors='coerce').dropna().values
-                
-                # Collect all re-entry times to exclude them
-                re_entry_times_set = set()
-                if 'zone_re_entry_time' in trial_log.columns:
-                    for val in trial_log['zone_re_entry_time']:
-                        if pd.notna(val) and val != '':
-                            try:
-                                # Handle both single values and arrays
-                                if isinstance(val, str) and val.strip():
-                                    import ast
-                                    try:
-                                        re_entry_list = ast.literal_eval(val)
-                                        if isinstance(re_entry_list, (list, tuple)):
-                                            for t in re_entry_list:
-                                                if pd.notna(t):
-                                                    re_entry_times_set.add(float(t))
-                                        else:
-                                            re_entry_times_set.add(float(re_entry_list))
-                                    except:
-                                        pass
-                                elif not isinstance(val, str):
-                                    re_entry_times_set.add(float(val))
-                            except (ValueError, TypeError):
-                                pass
-                
-                # Filter out stay_zone_times that match re-entries (within 0.05 seconds)
-                valid_zone_times = []
-                for zone_time in stay_zone_times:
-                    is_reentry = False
-                    for re_entry_time in re_entry_times_set:
-                        if abs(zone_time - re_entry_time) <= 0.05:
-                            is_reentry = True
-                            break
-                    if not is_reentry:
-                        valid_zone_times.append(zone_time)
-                
-                valid_zone_times = np.array(valid_zone_times)
+                # Extract ALL stay zone entry times (if column exists; older data may not have it)
+                if 'stay_texture_change_time' in trial_log.columns:
+                    stay_zone_times = pd.to_numeric(trial_log['stay_texture_change_time'], errors='coerce').dropna().values
+                    
+                    # Collect all re-entry times to exclude them
+                    re_entry_times_set = set()
+                    if 'zone_re_entry_time' in trial_log.columns:
+                        for val in trial_log['zone_re_entry_time']:
+                            if pd.notna(val) and val != '':
+                                try:
+                                    # Handle both single values and arrays
+                                    if isinstance(val, str) and val.strip():
+                                        import ast
+                                        try:
+                                            re_entry_list = ast.literal_eval(val)
+                                            if isinstance(re_entry_list, (list, tuple)):
+                                                for t in re_entry_list:
+                                                    if pd.notna(t):
+                                                        re_entry_times_set.add(float(t))
+                                            else:
+                                                re_entry_times_set.add(float(re_entry_list))
+                                        except:
+                                            pass
+                                    elif not isinstance(val, str):
+                                        re_entry_times_set.add(float(val))
+                                except (ValueError, TypeError):
+                                    pass
+                    
+                    # Filter out stay_zone_times that match re-entries (within 0.05 seconds)
+                    valid_zone_times = []
+                    for zone_time in stay_zone_times:
+                        is_reentry = False
+                        for re_entry_time in re_entry_times_set:
+                            if abs(zone_time - re_entry_time) <= 0.05:
+                                is_reentry = True
+                                break
+                        if not is_reentry:
+                            valid_zone_times.append(zone_time)
+                    
+                    valid_zone_times = np.array(valid_zone_times)
+                    total_opportunities = len(valid_zone_times)
+                else:
+                    # Fallback for older data without stay_texture_change_time
+                    total_opportunities = len(trial_log[trial_log['texture_history'] == 'assets/reward_mean100.jpg'])
                 
                 # Collect all reward_event and hits_event times
                 reward_event_times = pd.to_numeric(trial_log['reward_event'], errors='coerce').dropna().values
@@ -432,16 +442,14 @@ def analyze_mouse_data(data_files, markers, starting_conditions, save_lick_plots
                 else:
                     hits_event_times = np.array([])  # Empty array if column doesn't exist
                 
-                # Simple counting: hits = rewards + hits, misses = valid_zones - hits
-                if len(valid_zone_times) > 0:
-                    total_opportunities = len(valid_zone_times)
+                # Simple counting: hits = rewards + hits, misses = opportunities - hits
+                if total_opportunities > 0:
                     reward_count = len(reward_event_times) + len(hits_event_times)
                     misses = total_opportunities - reward_count
                     sensitivity = float(reward_count) / float(total_opportunities) if total_opportunities > 0 else 0.0
                 else:
                     reward_count = 0
                     misses = 0
-                    total_opportunities = 0
                     sensitivity = float('nan')
                 
                 # Convert Unix timestamp to datetime and store results
@@ -935,30 +943,9 @@ def main():
                 print(f"Warning: {mouse_name} not found in master CSV file. Skipping...")
                 continue
         
-        # Ask if user wants to save lick detection plots
-       # print("\n" + "=" * 60)
-        save_lick_plots_input = input("Generate lick detection plots for each session? (yes/no): ").lower().strip()
-        save_lick_plots = save_lick_plots_input.startswith('y')
-        
-        output_dir = None
-        if save_lick_plots:
-            # Ask for output directory
-            output_dir = filedialog.askdirectory(
-                title='Select folder to save lick detection plots',
-                initialdir=os.getcwd()
-            )
-            if not output_dir:
-                print("No output directory selected. Lick detection plots will not be saved.")
-                save_lick_plots = False
-            else:
-                print(f"Lick detection plots will be saved to: {output_dir}")
-        #print("=" * 60 + "\n")
-            
         # Analyze data and plot results
         speed_fig, sensitivity_fig, lick_fig, reward_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, condition_speed_fig, level_fig, all_results = analyze_mouse_data(
-            file_paths, markers, starting_conditions, 
-            save_lick_plots=save_lick_plots, 
-            output_dir=output_dir
+            file_paths, markers, starting_conditions
         )
 
         # Configure all figures
