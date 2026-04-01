@@ -26,6 +26,7 @@ import hashlib
 script_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, script_dir)
 import lick_detection_algorithm as lda
+from scipy.stats import norm
 
 # Cache directory for KDE values
 KDE_CACHE_DIR = os.path.join(script_dir, '.kde_cache')
@@ -307,6 +308,10 @@ def analyze_mouse_data(data_files, markers, starting_conditions, save_lick_plots
     reward_fig = plt.figure(figsize=(12, 6))
     avg_reward_fig = plt.figure(figsize=(12, 6))  # Average rewards figure
     sex_reward_fig = plt.figure(figsize=(12, 6))  # Sex-specific average rewards figure
+    false_alarm_fig = plt.figure(figsize=(12, 6))  # False alarms per mouse
+    correct_rejection_fig = plt.figure(figsize=(12, 6))  # Correct rejections per mouse
+    specificity_fig = plt.figure(figsize=(12, 6))  # Specificity per mouse
+    dprime_fig = plt.figure(figsize=(12, 6))  # d-prime per mouse
     colors = generate_colors(len(data_files))  # Generate colors based on number of mice
     
     all_results = []
@@ -325,6 +330,10 @@ def analyze_mouse_data(data_files, markers, starting_conditions, save_lick_plots
         sensitivities = []  # List for sensitivity values
         lick_counts = []  # List for daily lick counts
         session_lengths = []  # List for session lengths in minutes
+        false_alarms_list = []  # List for false alarm counts
+        correct_rejections_list = []  # List for correct rejection counts
+        specificities_list = []  # List for specificity values
+        dprimes_list = []  # List for d-prime values
         
         # Process each date's data
         for timestamp, row in df.iterrows():
@@ -452,6 +461,62 @@ def analyze_mouse_data(data_files, markers, starting_conditions, save_lick_plots
                     misses = 0
                     sensitivity = float('nan')
                 
+                # Compute puff opportunities and false alarms
+                puff_event_times = pd.to_numeric(trial_log['puff_event'], errors='coerce').dropna().values
+                
+                if 'go_texture_change_time' in trial_log.columns:
+                    go_zone_times = np.sort(
+                        pd.to_numeric(trial_log['go_texture_change_time'], errors='coerce').dropna().values
+                    )
+                    puff_opportunities = len(go_zone_times)
+                    
+                    # Count false alarms: each go zone that had at least one puff event is one false alarm.
+                    # A puff belongs to the zone whose go_texture_change_time immediately precedes it.
+                    false_alarm_count = 0
+                    for z_idx, zone_start in enumerate(go_zone_times):
+                        # The zone ends just before the next zone starts (or infinity for the last)
+                        zone_end = go_zone_times[z_idx + 1] if z_idx + 1 < len(go_zone_times) else np.inf
+                        zone_puffs = puff_event_times[
+                            (puff_event_times >= zone_start) & (puff_event_times < zone_end)
+                        ]
+                        if len(zone_puffs) > 0:
+                            false_alarm_count += 1
+                else:
+                    # Older format: use texture_change_time from punish rows as zone start times
+                    punish_rows = trial_log[trial_log['texture_history'] == 'assets/punish_mean100.jpg']
+                    puff_opportunities = len(punish_rows)
+                    punish_zone_times = np.sort(
+                        pd.to_numeric(punish_rows['texture_change_time'], errors='coerce').dropna().values
+                    )
+                    
+                    # Same windowing logic: each zone spans [zone_start, next_zone_start)
+                    false_alarm_count = 0
+                    for z_idx, zone_start in enumerate(punish_zone_times):
+                        zone_end = punish_zone_times[z_idx + 1] if z_idx + 1 < len(punish_zone_times) else np.inf
+                        zone_puffs = puff_event_times[
+                            (puff_event_times >= zone_start) & (puff_event_times < zone_end)
+                        ]
+                        if len(zone_puffs) > 0:
+                            false_alarm_count += 1
+                
+                # Compute correct rejections and specificity
+                if puff_opportunities > 0:
+                    correct_rejection_count = puff_opportunities - false_alarm_count
+                    specificity = float(correct_rejection_count) / float(puff_opportunities)
+                else:
+                    false_alarm_count = 0
+                    correct_rejection_count = 0
+                    specificity = float('nan')
+
+                # Compute d-prime (signal detection theory)
+                # Log-linear correction handles edge cases of hit/FA rate = 0 or 1
+                if total_opportunities > 0 and puff_opportunities > 0:
+                    hr_corrected = (reward_count + 0.5) / (total_opportunities + 1.0)
+                    fa_corrected = (false_alarm_count + 0.5) / (puff_opportunities + 1.0)
+                    dprime = float(norm.ppf(hr_corrected) - norm.ppf(fa_corrected))
+                else:
+                    dprime = float('nan')
+
                 # Convert Unix timestamp to datetime and store results
                 date = datetime.fromtimestamp(int(timestamp))
                 
@@ -481,6 +546,10 @@ def analyze_mouse_data(data_files, markers, starting_conditions, save_lick_plots
                 sensitivities.append(sensitivity)
                 lick_counts.append(lick_count)
                 session_lengths.append(session_length_minutes)
+                false_alarms_list.append(false_alarm_count)
+                correct_rejections_list.append(correct_rejection_count)
+                specificities_list.append(specificity)
+                dprimes_list.append(dprime)
                 
                 #print(f"Processed date {date.strftime('%Y-%m-%d')}: Average speed = {avg_speed:.2f}, Hits = {reward_count}, Misses = {misses}, Session Length = {session_length_minutes:.1f} min")
                 
@@ -498,7 +567,11 @@ def analyze_mouse_data(data_files, markers, starting_conditions, save_lick_plots
             'misses': misses_list,
             'sensitivity': sensitivities,
             'lick_count': lick_counts,
-            'session_length': session_lengths
+            'session_length': session_lengths,
+            'false_alarms': false_alarms_list,
+            'correct_rejections': correct_rejections_list,
+            'specificity': specificities_list,
+            'dprime': dprimes_list
         })
         
         # Sort and remove duplicates
@@ -519,6 +592,9 @@ def analyze_mouse_data(data_files, markers, starting_conditions, save_lick_plots
             'dates': dates,
             'speeds': speeds,
             'hits': hits,
+            'false_alarms': false_alarms_list,
+            'correct_rejections': correct_rejections_list,
+            'dprimes': dprimes_list,
             'session_lengths': session_lengths,
             'starting_condition': conditions[mouse_name],
             'df': results_df
@@ -550,7 +626,27 @@ def analyze_mouse_data(data_files, markers, starting_conditions, save_lick_plots
         plt.figure(reward_fig.number)
         plt.plot(day_numbers, results_df['hits'], 
             f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
-    
+        
+        # Plot false alarm data
+        plt.figure(false_alarm_fig.number)
+        plt.plot(day_numbers, results_df['false_alarms'],
+            f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
+        
+        # Plot correct rejection data
+        plt.figure(correct_rejection_fig.number)
+        plt.plot(day_numbers, results_df['correct_rejections'],
+            f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
+        
+        # Plot specificity data
+        plt.figure(specificity_fig.number)
+        plt.plot(day_numbers, results_df['specificity'],
+            f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
+
+        # Plot d-prime data
+        plt.figure(dprime_fig.number)
+        plt.plot(day_numbers, results_df['dprime'],
+            f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
+
     # Configure speed plot
     plt.figure(speed_fig.number)
     plt.title('Average Speed Over Time')
@@ -636,6 +732,74 @@ def analyze_mouse_data(data_files, markers, starting_conditions, save_lick_plots
     ax.tick_params(axis='x', which='minor', direction='in')
     ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
     
+    # Configure false alarm plot
+    plt.figure(false_alarm_fig.number)
+    plt.title('False Alarms Over Time')
+    plt.xlabel('Training Day')
+    plt.ylabel('Number of False Alarms')
+    plt.grid(False)
+    ax = plt.gca()
+    ax.tick_params(axis='both', direction='in')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.set_ylim(bottom=0)
+    ax.set_xlim(left=0, right=max_day - 0.5)
+    ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
+    ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
+    ax.tick_params(axis='x', which='minor', direction='in')
+    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+    
+    # Configure correct rejection plot
+    plt.figure(correct_rejection_fig.number)
+    plt.title('Correct Rejections Over Time')
+    plt.xlabel('Training Day')
+    plt.ylabel('Number of Correct Rejections')
+    plt.grid(False)
+    ax = plt.gca()
+    ax.tick_params(axis='both', direction='in')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.set_ylim(bottom=0)
+    ax.set_xlim(left=0, right=max_day - 0.5)
+    ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
+    ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
+    ax.tick_params(axis='x', which='minor', direction='in')
+    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+    
+    # Configure specificity plot
+    plt.figure(specificity_fig.number)
+    plt.title('Specificity Over Time')
+    plt.xlabel('Training Day')
+    plt.ylabel('Specificity (Correct Rejections / Puff Opportunities)')
+    plt.grid(False)
+    ax = plt.gca()
+    ax.tick_params(axis='both', direction='in')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.set_ylim(-0.05, 1.05)
+    ax.set_xlim(left=0, right=max_day - 0.5)
+    ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
+    ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
+    ax.tick_params(axis='x', which='minor', direction='in')
+    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+
+    # Configure d-prime plot
+    plt.figure(dprime_fig.number)
+    plt.title("d' Over Time")
+    plt.xlabel('Training Day')
+    plt.ylabel("d' (Signal Detection)")
+    plt.axhline(y=0, color='gray', linestyle='--', linewidth=0.8, alpha=0.6)
+    plt.grid(False)
+    ax = plt.gca()
+    ax.tick_params(axis='both', direction='in')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.set_xlim(left=0, right=max_day - 0.5)
+    ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
+    ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
+    ax.tick_params(axis='x', which='minor', direction='in')
+    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+
     # Calculate average rewards/minute and SEM across mice
     # First, find the maximum number of days
     max_days = max(len(result['hits']) for result in all_results)
@@ -874,7 +1038,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, save_lick_plots
     # Create the level-based analysis plot
     level_fig = analyze_levels(data_files)
 
-    return speed_fig, sensitivity_fig, lick_fig, reward_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, condition_speed_fig, level_fig, all_results
+    return speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, condition_speed_fig, level_fig, all_results
 
 def main():
     # Create and hide the root window
@@ -944,12 +1108,12 @@ def main():
                 continue
         
         # Analyze data and plot results
-        speed_fig, sensitivity_fig, lick_fig, reward_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, condition_speed_fig, level_fig, all_results = analyze_mouse_data(
+        speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, condition_speed_fig, level_fig, all_results = analyze_mouse_data(
             file_paths, markers, starting_conditions
         )
 
         # Configure all figures
-        for fig in [speed_fig, sensitivity_fig, lick_fig, reward_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, condition_speed_fig, level_fig]:
+        for fig in [speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, condition_speed_fig, level_fig]:
             plt.figure(fig.number)
             if len(file_paths) > 10:
                 plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
@@ -959,7 +1123,7 @@ def main():
             plt.tight_layout()
 
         # Display all plots
-        for fig in [speed_fig, sensitivity_fig, lick_fig, reward_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, condition_speed_fig]:
+        for fig in [speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, condition_speed_fig]:
             fig.show()
         plt.show()
 
@@ -977,6 +1141,10 @@ def main():
                 (sensitivity_fig, 'sensitivity', 'Sensitivity plot'),
                 (lick_fig, 'lick_count', 'Lick count plot'),
                 (reward_fig, 'reward_count', 'Reward count plot'),
+                (false_alarm_fig, 'false_alarms', 'False alarms plot'),
+                (correct_rejection_fig, 'correct_rejections', 'Correct rejections plot'),
+                (specificity_fig, 'specificity', 'Specificity plot'),
+                (dprime_fig, 'dprime', "d' plot"),
                 (avg_reward_fig, 'avg_reward', 'Average rewards plot'),
                 (sex_reward_fig, 'sex_reward', 'Sex-specific average rewards plot'),
                 (condition_reward_fig, 'condition_reward', 'Condition-based average rewards plot'),
