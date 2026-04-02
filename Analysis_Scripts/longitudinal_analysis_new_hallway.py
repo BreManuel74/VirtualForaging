@@ -1047,6 +1047,59 @@ def analyze_mouse_data(data_files, markers, starting_conditions, save_lick_plots
     ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
     plt.legend()
 
+    # Create a new figure for condition-based lick count analysis
+    condition_lick_fig = plt.figure(figsize=(12, 6))
+
+    # Group mice by starting condition for lick count (session-indexed arrays, no calendar gaps)
+    condition_lick_groups = {}
+    for result in all_results:
+        condition = result['starting_condition']
+        if condition not in condition_lick_groups:
+            condition_lick_groups[condition] = []
+        df_r = result['df']
+        lick_array = np.full(max_sessions, np.nan)
+        for session_idx, (_, row) in enumerate(df_r.iterrows()):
+            lick_array[session_idx] = row['lick_count']
+        condition_lick_groups[condition].append(lick_array)
+
+    # Plot each condition's lick count data
+    day_numbers = np.arange(0, max_sessions)
+    for condition, lick_list in condition_lick_groups.items():
+        color = condition_color_map[condition]
+        padded_licks = np.array(lick_list)
+
+        # Calculate mean and SEM (only over mice that have data on that day)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', RuntimeWarning)
+            n_mice = np.sum(~np.isnan(padded_licks), axis=0)
+            mean_licks = np.where(n_mice > 0, np.nanmean(padded_licks, axis=0), np.nan)
+            sem_licks = np.where(n_mice > 1,
+                                 np.nanstd(padded_licks, axis=0) / np.sqrt(n_mice),
+                                 0)
+
+        # Plot the data
+        plt.plot(day_numbers, mean_licks, '-', color=color, linewidth=2,
+                label=f'{condition} (n={len(lick_list)})')
+        plt.fill_between(day_numbers, mean_licks - sem_licks, mean_licks + sem_licks,
+                        color=color, alpha=0.2)
+
+    # Configure condition-based lick count plot
+    plt.title('Average Lick Count by Starting Condition')
+    plt.xlabel('Training Day')
+    plt.ylabel('Number of Licks (Mean \u00b1 SEM)')
+    plt.grid(False)
+    ax = plt.gca()
+    ax.tick_params(axis='both', direction='in')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.set_ylim(bottom=0)
+    ax.set_xlim(left=0, right=max_days - 1)
+    ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
+    ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
+    ax.tick_params(axis='x', which='minor', direction='in')
+    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+    plt.legend()
+
     # Create the level-based analysis plot
     level_fig = analyze_levels(data_files)
 
@@ -1104,7 +1157,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, save_lick_plots
         f.write(report_text + "\n")
     print(f"\nMissing data report saved to: {report_path}")
 
-    return speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, condition_speed_fig, level_fig, all_results
+    return speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, condition_speed_fig, condition_lick_fig, level_fig, all_results
 
 def main():
     # Create and hide the root window
@@ -1174,12 +1227,12 @@ def main():
                 continue
         
         # Analyze data and plot results
-        speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, condition_speed_fig, level_fig, all_results = analyze_mouse_data(
+        speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, condition_speed_fig, condition_lick_fig, level_fig, all_results = analyze_mouse_data(
             file_paths, markers, starting_conditions
         )
 
         # Configure all figures
-        for fig in [speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, condition_speed_fig, level_fig]:
+        for fig in [speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, condition_speed_fig, condition_lick_fig, level_fig]:
             plt.figure(fig.number)
             if len(file_paths) > 10:
                 plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
@@ -1189,7 +1242,7 @@ def main():
             plt.tight_layout()
 
         # Display all plots
-        for fig in [speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, condition_speed_fig]:
+        for fig in [speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, condition_speed_fig, condition_lick_fig]:
             fig.show()
         plt.show()
 
@@ -1215,6 +1268,7 @@ def main():
                 (sex_reward_fig, 'sex_reward', 'Sex-specific average rewards plot'),
                 (condition_reward_fig, 'condition_reward', 'Condition-based average rewards plot'),
                 (condition_speed_fig, 'condition_speed', 'Condition-based average speed plot'),
+                (condition_lick_fig, 'condition_lick', 'Condition-based average lick count plot'),
                 (level_fig, 'level_reward', 'Level-based average rewards plot')
             ]
 

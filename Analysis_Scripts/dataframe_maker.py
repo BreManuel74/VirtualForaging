@@ -82,7 +82,7 @@ def create_dataframe(mouse_id=None, save_csv=True, output_file=None, selected_fo
         has_treadmill = any('treadmill.csv' in os.path.basename(f) for f in files)
         has_trial_log = any('trial_log.csv' in os.path.basename(f) for f in files)
         
-        if has_capacitive and has_treadmill and has_trial_log:
+        if has_capacitive or has_treadmill or has_trial_log:
             timestamp = str(base_time)
             if timestamp not in data_by_date:
                 data_by_date[timestamp] = {'date': timestamp}
@@ -229,7 +229,7 @@ def process_all_animals():
                 has_treadmill = any('treadmill.csv' in os.path.basename(f) for f in files)
                 has_trial_log = any('trial_log.csv' in os.path.basename(f) for f in files)
                 
-                if has_capacitive and has_treadmill and has_trial_log:
+                if has_capacitive or has_treadmill or has_trial_log:
                     timestamp = str(base_time)
                     if timestamp not in data_by_date:
                         data_by_date[timestamp] = {'date': timestamp}
