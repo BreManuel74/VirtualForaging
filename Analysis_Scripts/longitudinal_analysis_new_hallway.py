@@ -21,6 +21,7 @@ import colorsys
 import sys
 import pickle
 import hashlib
+import warnings
 
 # Add Analysis_Scripts to path to import lick detection algorithm
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -211,11 +212,16 @@ def analyze_levels(data_files):
         
         # Group by level and calculate rewards/min for each group
         for level in df['level'].unique():
+            if pd.isna(level):  # Skip NaN level entries (partial sessions)
+                continue
             if level not in level_data:
                 level_data[level] = []
                 
             level_group = df[df['level'] == level]
             for _, row in level_group.iterrows():
+                # Skip rows where required files are missing
+                if pd.isna(row.get('trial_log')) or pd.isna(row.get('capacitive')):
+                    continue
                 try:
                     # Read trial log data
                     trial_log = pd.read_csv(row['trial_log'])
@@ -232,7 +238,7 @@ def analyze_levels(data_files):
                     rewards_per_min = hits / session_length if session_length > 0 else 0
                     level_data[level].append(rewards_per_min)
                 except Exception as e:
-                    print(f"Error processing file for level {level}: {str(e)}")
+                    print(f"  [WARN] Level '{level}': could not read file — {str(e)}")
     
     # Calculate statistics for each level
     level_stats = {}
@@ -334,211 +340,216 @@ def analyze_mouse_data(data_files, markers, starting_conditions, save_lick_plots
         correct_rejections_list = []  # List for correct rejection counts
         specificities_list = []  # List for specificity values
         dprimes_list = []  # List for d-prime values
-        
+        session_file_errors = {}  # {date_str: [list of missing file labels]}
+
         # Process each date's data
         for timestamp, row in df.iterrows():
+            date_str = datetime.fromtimestamp(int(timestamp)).strftime('%Y-%m-%d')
+            missing_files = []
             try:
                 # Read the treadmill data from the file path
-                treadmill_data = pd.read_csv(row['treadmill'])
-                
-                # Calculate average speed for this date (convert from mm/s to cm/s)
-                avg_speed = treadmill_data['speed'].mean() / 10.0
-                
-                # Read capacitive data for lick detection
-                capacitive_data = pd.read_csv(row['capacitive'])
-                
-                # Calculate session length in minutes from the elapsed_time column
-                session_length_minutes = capacitive_data['elapsed_time'].max() / 60.0
-                
-                # Use new lick detection algorithm
-                # Prepare data with Time_sec column
-                cap_df = capacitive_data.copy()
-                cap_df['Time_sec'] = cap_df['elapsed_time']
-                
-                # Compute KDE normalization (with caching)
-                capacitive_filepath = row['capacitive']
-                kde_value = get_cached_kde(capacitive_filepath)
-                if kde_value is None:
-                    # Cache miss - compute KDE
-                    kde_value = lda.compute_KDE(cap_df, 'capacitive_value')
-                    cache_kde_value(capacitive_filepath, kde_value)
-                
-                cap_df = lda.compute_KDE_normalizations(cap_df, 'capacitive_value', kde_value)
-                
-                # Detect lick events using dynamic threshold (max_deviation / 2)
-                events_df, threshold_used = lda.detect_events_above_threshold(cap_df, 'capacitive_value', threshold=None)
-                
-                # Count total lick events
-                lick_count = events_df['capacitive_value_event'].sum()
-                
-                # Optionally save lick detection plots
-                if save_lick_plots and output_dir:
-                    mouse_name = os.path.basename(data_file).split('_')[0]
-                    date_str = datetime.fromtimestamp(int(timestamp)).strftime('%Y-%m-%d')
-                    plot_filename = f"{mouse_name}_{date_str}_lick_detection.png"
-                    plot_path = os.path.join(lick_plots_dir, plot_filename)
-                    
-                    # Create summary plot
-                    fig = lda.plot_summary(
-                        cap_df, events_df, 
-                        column='capacitive_value',
-                        kde_value=kde_value, 
-                        threshold=threshold_used,
-                        title=f"{mouse_name} - {date_str} - {lick_count} licks detected",
-                        show=False
-                    )
-                    fig.savefig(plot_path, dpi=150, bbox_inches='tight')
-                    plt.close(fig)
-                
-                # print(f"\nMouse: {os.path.basename(data_file).split('_')[0]}")
-                # print(f"Date: {datetime.fromtimestamp(int(timestamp)).strftime('%Y-%m-%d')}")
-                # print(f"Total licks detected: {lick_count}")
-                
-                # Read trial log data for texture history and reward events
-                trial_log = pd.read_csv(row['trial_log'])
-                
-                # Extract ALL stay zone entry times (if column exists; older data may not have it)
-                if 'stay_texture_change_time' in trial_log.columns:
-                    stay_zone_times = pd.to_numeric(trial_log['stay_texture_change_time'], errors='coerce').dropna().values
-                    
-                    # Collect all re-entry times to exclude them
-                    re_entry_times_set = set()
-                    if 'zone_re_entry_time' in trial_log.columns:
-                        for val in trial_log['zone_re_entry_time']:
-                            if pd.notna(val) and val != '':
-                                try:
-                                    # Handle both single values and arrays
-                                    if isinstance(val, str) and val.strip():
-                                        import ast
-                                        try:
-                                            re_entry_list = ast.literal_eval(val)
-                                            if isinstance(re_entry_list, (list, tuple)):
-                                                for t in re_entry_list:
-                                                    if pd.notna(t):
-                                                        re_entry_times_set.add(float(t))
-                                            else:
-                                                re_entry_times_set.add(float(re_entry_list))
-                                        except:
-                                            pass
-                                    elif not isinstance(val, str):
-                                        re_entry_times_set.add(float(val))
-                                except (ValueError, TypeError):
-                                    pass
-                    
-                    # Filter out stay_zone_times that match re-entries (within 0.05 seconds)
-                    valid_zone_times = []
-                    for zone_time in stay_zone_times:
-                        is_reentry = False
-                        for re_entry_time in re_entry_times_set:
-                            if abs(zone_time - re_entry_time) <= 0.05:
-                                is_reentry = True
-                                break
-                        if not is_reentry:
-                            valid_zone_times.append(zone_time)
-                    
-                    valid_zone_times = np.array(valid_zone_times)
-                    total_opportunities = len(valid_zone_times)
-                else:
-                    # Fallback for older data without stay_texture_change_time
-                    total_opportunities = len(trial_log[trial_log['texture_history'] == 'assets/reward_mean100.jpg'])
-                
-                # Collect all reward_event and hits_event times
-                reward_event_times = pd.to_numeric(trial_log['reward_event'], errors='coerce').dropna().values
-                
-                # Check if hits_event column exists (older data may not have it)
-                if 'hits_event' in trial_log.columns:
-                    hits_event_times = pd.to_numeric(trial_log['hits_event'], errors='coerce').dropna().values
-                else:
-                    hits_event_times = np.array([])  # Empty array if column doesn't exist
-                
-                # Simple counting: hits = rewards + hits, misses = opportunities - hits
-                if total_opportunities > 0:
-                    reward_count = len(reward_event_times) + len(hits_event_times)
-                    misses = total_opportunities - reward_count
-                    sensitivity = float(reward_count) / float(total_opportunities) if total_opportunities > 0 else 0.0
-                else:
-                    reward_count = 0
-                    misses = 0
-                    sensitivity = float('nan')
-                
-                # Compute puff opportunities and false alarms
-                puff_event_times = pd.to_numeric(trial_log['puff_event'], errors='coerce').dropna().values
-                
-                if 'go_texture_change_time' in trial_log.columns:
-                    go_zone_times = np.sort(
-                        pd.to_numeric(trial_log['go_texture_change_time'], errors='coerce').dropna().values
-                    )
-                    puff_opportunities = len(go_zone_times)
-                    
-                    # Count false alarms: each go zone that had at least one puff event is one false alarm.
-                    # A puff belongs to the zone whose go_texture_change_time immediately precedes it.
-                    false_alarm_count = 0
-                    for z_idx, zone_start in enumerate(go_zone_times):
-                        # The zone ends just before the next zone starts (or infinity for the last)
-                        zone_end = go_zone_times[z_idx + 1] if z_idx + 1 < len(go_zone_times) else np.inf
-                        zone_puffs = puff_event_times[
-                            (puff_event_times >= zone_start) & (puff_event_times < zone_end)
-                        ]
-                        if len(zone_puffs) > 0:
-                            false_alarm_count += 1
-                else:
-                    # Older format: use texture_change_time from punish rows as zone start times
-                    punish_rows = trial_log[trial_log['texture_history'] == 'assets/punish_mean100.jpg']
-                    puff_opportunities = len(punish_rows)
-                    punish_zone_times = np.sort(
-                        pd.to_numeric(punish_rows['texture_change_time'], errors='coerce').dropna().values
-                    )
-                    
-                    # Same windowing logic: each zone spans [zone_start, next_zone_start)
-                    false_alarm_count = 0
-                    for z_idx, zone_start in enumerate(punish_zone_times):
-                        zone_end = punish_zone_times[z_idx + 1] if z_idx + 1 < len(punish_zone_times) else np.inf
-                        zone_puffs = puff_event_times[
-                            (puff_event_times >= zone_start) & (puff_event_times < zone_end)
-                        ]
-                        if len(zone_puffs) > 0:
-                            false_alarm_count += 1
-                
-                # Compute correct rejections and specificity
-                if puff_opportunities > 0:
-                    correct_rejection_count = puff_opportunities - false_alarm_count
-                    specificity = float(correct_rejection_count) / float(puff_opportunities)
-                else:
-                    false_alarm_count = 0
-                    correct_rejection_count = 0
-                    specificity = float('nan')
+                try:
+                    treadmill_data = pd.read_csv(row['treadmill'])
+                except Exception:
+                    missing_files.append('treadmill')
+                    treadmill_data = None
 
-                # Compute d-prime (signal detection theory)
-                # Log-linear correction handles edge cases of hit/FA rate = 0 or 1
-                if total_opportunities > 0 and puff_opportunities > 0:
-                    hr_corrected = (reward_count + 0.5) / (total_opportunities + 1.0)
-                    fa_corrected = (false_alarm_count + 0.5) / (puff_opportunities + 1.0)
-                    dprime = float(norm.ppf(hr_corrected) - norm.ppf(fa_corrected))
+                # Read capacitive data for lick detection
+                try:
+                    capacitive_data = pd.read_csv(row['capacitive'])
+                except Exception:
+                    missing_files.append('capacitive')
+                    capacitive_data = None
+
+                # Read trial log
+                try:
+                    trial_log = pd.read_csv(row['trial_log'])
+                except Exception:
+                    missing_files.append('trial_log')
+                    trial_log = None
+
+                if len(missing_files) == 3:
+                    # All three files missing — nothing to process for this date
+                    session_file_errors[date_str] = missing_files
+                    print(f"  [WARN] {date_str}: all files missing — skipping session entirely")
+                    continue
+
+                if missing_files:
+                    session_file_errors[date_str] = missing_files
+                    print(f"  [WARN] {date_str}: missing files: {', '.join(missing_files)} — partial session kept")
+
+                # ── Treadmill-derived metrics ─────────────────────────────
+                if treadmill_data is not None:
+                    avg_speed = treadmill_data['speed'].mean() / 10.0
                 else:
+                    avg_speed = float('nan')
+
+                # ── Capacitive-derived metrics ────────────────────────────
+                if capacitive_data is not None:
+                    session_length_minutes = capacitive_data['elapsed_time'].max() / 60.0
+
+                    cap_df = capacitive_data.copy()
+                    cap_df['Time_sec'] = cap_df['elapsed_time']
+
+                    # Compute KDE normalization (with caching)
+                    capacitive_filepath = row['capacitive']
+                    kde_value = get_cached_kde(capacitive_filepath)
+                    if kde_value is None:
+                        kde_value = lda.compute_KDE(cap_df, 'capacitive_value')
+                        cache_kde_value(capacitive_filepath, kde_value)
+
+                    cap_df = lda.compute_KDE_normalizations(cap_df, 'capacitive_value', kde_value)
+                    events_df, threshold_used = lda.detect_events_above_threshold(cap_df, 'capacitive_value', threshold=None)
+                    lick_count = events_df['capacitive_value_event'].sum()
+
+                    if save_lick_plots and output_dir:
+                        mouse_name_plot = os.path.basename(data_file).split('_')[0]
+                        plot_filename = f"{mouse_name_plot}_{date_str}_lick_detection.png"
+                        plot_path = os.path.join(lick_plots_dir, plot_filename)
+                        fig = lda.plot_summary(
+                            cap_df, events_df,
+                            column='capacitive_value',
+                            kde_value=kde_value,
+                            threshold=threshold_used,
+                            title=f"{mouse_name_plot} - {date_str} - {lick_count} licks detected",
+                            show=False
+                        )
+                        fig.savefig(plot_path, dpi=150, bbox_inches='tight')
+                        plt.close(fig)
+                else:
+                    session_length_minutes = float('nan')
+                    lick_count = float('nan')
+
+                # ── Trial-log-derived metrics ─────────────────────────────
+                if trial_log is not None:
+                    # Extract ALL stay zone entry times (if column exists; older data may not have it)
+                    if 'stay_texture_change_time' in trial_log.columns:
+                        stay_zone_times = pd.to_numeric(trial_log['stay_texture_change_time'], errors='coerce').dropna().values
+
+                        # Collect all re-entry times to exclude them
+                        re_entry_times_set = set()
+                        if 'zone_re_entry_time' in trial_log.columns:
+                            for val in trial_log['zone_re_entry_time']:
+                                if pd.notna(val) and val != '':
+                                    try:
+                                        # Handle both single values and arrays
+                                        if isinstance(val, str) and val.strip():
+                                            import ast
+                                            try:
+                                                re_entry_list = ast.literal_eval(val)
+                                                if isinstance(re_entry_list, (list, tuple)):
+                                                    for t in re_entry_list:
+                                                        if pd.notna(t):
+                                                            re_entry_times_set.add(float(t))
+                                                else:
+                                                    re_entry_times_set.add(float(re_entry_list))
+                                            except:
+                                                pass
+                                        elif not isinstance(val, str):
+                                            re_entry_times_set.add(float(val))
+                                    except (ValueError, TypeError):
+                                        pass
+
+                        # Filter out stay_zone_times that match re-entries (within 0.05 seconds)
+                        valid_zone_times = []
+                        for zone_time in stay_zone_times:
+                            is_reentry = False
+                            for re_entry_time in re_entry_times_set:
+                                if abs(zone_time - re_entry_time) <= 0.05:
+                                    is_reentry = True
+                                    break
+                            if not is_reentry:
+                                valid_zone_times.append(zone_time)
+
+                        valid_zone_times = np.array(valid_zone_times)
+                        total_opportunities = len(valid_zone_times)
+                    else:
+                        # Fallback for older data without stay_texture_change_time
+                        total_opportunities = len(trial_log[trial_log['texture_history'] == 'assets/reward_mean100.jpg'])
+
+                    # Collect all reward_event and hits_event times
+                    reward_event_times = pd.to_numeric(trial_log['reward_event'], errors='coerce').dropna().values
+
+                    # Check if hits_event column exists (older data may not have it)
+                    if 'hits_event' in trial_log.columns:
+                        hits_event_times = pd.to_numeric(trial_log['hits_event'], errors='coerce').dropna().values
+                    else:
+                        hits_event_times = np.array([])  # Empty array if column doesn't exist
+
+                    # Simple counting: hits = rewards + hits, misses = opportunities - hits
+                    if total_opportunities > 0:
+                        reward_count = len(reward_event_times) + len(hits_event_times)
+                        misses = total_opportunities - reward_count
+                        sensitivity = float(reward_count) / float(total_opportunities) if total_opportunities > 0 else 0.0
+                    else:
+                        reward_count = 0
+                        misses = 0
+                        sensitivity = float('nan')
+
+                    # Compute puff opportunities and false alarms
+                    puff_event_times = pd.to_numeric(trial_log['puff_event'], errors='coerce').dropna().values
+
+                    if 'go_texture_change_time' in trial_log.columns:
+                        go_zone_times = np.sort(
+                            pd.to_numeric(trial_log['go_texture_change_time'], errors='coerce').dropna().values
+                        )
+                        puff_opportunities = len(go_zone_times)
+
+                        # Count false alarms: each go zone that had at least one puff event is one false alarm.
+                        false_alarm_count = 0
+                        for z_idx, zone_start in enumerate(go_zone_times):
+                            zone_end = go_zone_times[z_idx + 1] if z_idx + 1 < len(go_zone_times) else np.inf
+                            zone_puffs = puff_event_times[
+                                (puff_event_times >= zone_start) & (puff_event_times < zone_end)
+                            ]
+                            if len(zone_puffs) > 0:
+                                false_alarm_count += 1
+                    else:
+                        # Older format: use texture_change_time from punish rows as zone start times
+                        punish_rows = trial_log[trial_log['texture_history'] == 'assets/punish_mean100.jpg']
+                        puff_opportunities = len(punish_rows)
+                        punish_zone_times = np.sort(
+                            pd.to_numeric(punish_rows['texture_change_time'], errors='coerce').dropna().values
+                        )
+
+                        false_alarm_count = 0
+                        for z_idx, zone_start in enumerate(punish_zone_times):
+                            zone_end = punish_zone_times[z_idx + 1] if z_idx + 1 < len(punish_zone_times) else np.inf
+                            zone_puffs = puff_event_times[
+                                (puff_event_times >= zone_start) & (puff_event_times < zone_end)
+                            ]
+                            if len(zone_puffs) > 0:
+                                false_alarm_count += 1
+
+                    # Compute correct rejections and specificity
+                    if puff_opportunities > 0:
+                        correct_rejection_count = puff_opportunities - false_alarm_count
+                        specificity = float(correct_rejection_count) / float(puff_opportunities)
+                    else:
+                        false_alarm_count = 0
+                        correct_rejection_count = 0
+                        specificity = float('nan')
+
+                    # Compute d-prime (signal detection theory)
+                    # Log-linear correction handles edge cases of hit/FA rate = 0 or 1
+                    if total_opportunities > 0 and puff_opportunities > 0:
+                        hr_corrected = (reward_count + 0.5) / (total_opportunities + 1.0)
+                        fa_corrected = (false_alarm_count + 0.5) / (puff_opportunities + 1.0)
+                        dprime = float(norm.ppf(hr_corrected) - norm.ppf(fa_corrected))
+                    else:
+                        dprime = float('nan')
+                else:
+                    reward_count = float('nan')
+                    misses = float('nan')
+                    sensitivity = float('nan')
+                    false_alarm_count = float('nan')
+                    correct_rejection_count = float('nan')
+                    specificity = float('nan')
                     dprime = float('nan')
 
                 # Convert Unix timestamp to datetime and store results
                 date = datetime.fromtimestamp(int(timestamp))
-                
-                # ENABLE THIS SECTION FOR DETAILED DEBUG OUTPUT
-                # print(f"\n{'='*60}")
-                # print(f"Date: {date.strftime('%Y-%m-%d')}")
-                # print(f"File: {os.path.basename(row['trial_log'])}")
-                # print(f"{'='*60}")
-                # print(f"Stay zone entries (reward trials): {len(stay_zone_times)}")
-                # print(f"Re-entry times found: {len(re_entry_times_set)}")
-                # print(f"Valid zones (after re-entry filtering): {len(valid_zone_times)}")
-                # print(f"Reward events: {len(reward_event_times)}")
-                # print(f"Hits events: {len(hits_event_times)}")
-                # if len(valid_zone_times) > 0:
-                #     print(f"\nMatching results:")
-                #     print(f"  - Reward events matched: {len(reward_matched_set)}")
-                #     print(f"  - Hits events matched: {len(hits_matched_set)}")
-                #     print(f"  - Total hits: {reward_count}")
-                #     print(f"  - Misses: {misses}")
-                #     print(f"  - Sensitivity: {sensitivity:.3f}")
-                # print(f"{'='*60}\n")
-                
+
                 dates.append(date)
                 speeds.append(avg_speed)
                 hits.append(reward_count)
@@ -550,13 +561,9 @@ def analyze_mouse_data(data_files, markers, starting_conditions, save_lick_plots
                 correct_rejections_list.append(correct_rejection_count)
                 specificities_list.append(specificity)
                 dprimes_list.append(dprime)
-                
-                #print(f"Processed date {date.strftime('%Y-%m-%d')}: Average speed = {avg_speed:.2f}, Hits = {reward_count}, Misses = {misses}, Session Length = {session_length_minutes:.1f} min")
-                
+
             except Exception as e:
                 print(f"Error processing date {timestamp}: {str(e)}")
-                print("Raw treadmill data:")
-                print(row['treadmill'][:500])  # Print first 500 chars
                 continue
         
         # Create results DataFrame
@@ -597,54 +604,57 @@ def analyze_mouse_data(data_files, markers, starting_conditions, save_lick_plots
             'dprimes': dprimes_list,
             'session_lengths': session_lengths,
             'starting_condition': conditions[mouse_name],
-            'df': results_df
+            'df': results_df,
+            'session_file_errors': session_file_errors,
         })
-        
-        # Plot this mouse's data with sequential day numbers and specified marker
-        day_numbers = np.arange(0, len(results_df))
-        mouse_name = os.path.basename(data_file).split("_")[0]
-        
-        # Use color based on starting condition for all plots
+
+    # ── Date-aligned per-mouse plots ─────────────────────────────────────────
+    # Plotting is deferred to here, after the data-collection loop, so that
+    # every mouse is placed on a shared date-based x-axis.  Missing sessions
+    # for a given mouse leave a gap rather than compressing the axis leftward.
+    all_dates_flat = [d for result in all_results for d in result['df']['date']]
+    global_start = min(all_dates_flat).date()
+    global_end   = max(all_dates_flat).date()
+    total_days   = (global_end - global_start).days + 1
+    # max_sessions: number of unique training days (no calendar gaps)
+    max_sessions = max(len(result['df']) for result in all_results)
+
+    for result in all_results:
+        mouse_name      = result['mouse']
+        df_r            = result['df']
         condition_color = condition_color_map[conditions[mouse_name]]
-        
-        # Plot speed data
+        day_numbers     = list(range(len(df_r)))  # sequential session index, no calendar gaps
+
         plt.figure(speed_fig.number)
-        plt.plot(day_numbers, results_df['average_speed'], 
-            f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
-        
-        # Plot sensitivity data
-        plt.figure(sensitivity_fig.number)
-        plt.plot(day_numbers, results_df['sensitivity'], 
-            f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
-            
-        # Plot lick count data
-        plt.figure(lick_fig.number)
-        plt.plot(day_numbers, results_df['lick_count'], 
-            f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
-            
-        # Plot reward count data
-        plt.figure(reward_fig.number)
-        plt.plot(day_numbers, results_df['hits'], 
-            f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
-        
-        # Plot false alarm data
-        plt.figure(false_alarm_fig.number)
-        plt.plot(day_numbers, results_df['false_alarms'],
-            f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
-        
-        # Plot correct rejection data
-        plt.figure(correct_rejection_fig.number)
-        plt.plot(day_numbers, results_df['correct_rejections'],
-            f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
-        
-        # Plot specificity data
-        plt.figure(specificity_fig.number)
-        plt.plot(day_numbers, results_df['specificity'],
+        plt.plot(day_numbers, df_r['average_speed'],
             f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
 
-        # Plot d-prime data
+        plt.figure(sensitivity_fig.number)
+        plt.plot(day_numbers, df_r['sensitivity'],
+            f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
+
+        plt.figure(lick_fig.number)
+        plt.plot(day_numbers, df_r['lick_count'],
+            f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
+
+        plt.figure(reward_fig.number)
+        plt.plot(day_numbers, df_r['hits'],
+            f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
+
+        plt.figure(false_alarm_fig.number)
+        plt.plot(day_numbers, df_r['false_alarms'],
+            f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
+
+        plt.figure(correct_rejection_fig.number)
+        plt.plot(day_numbers, df_r['correct_rejections'],
+            f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
+
+        plt.figure(specificity_fig.number)
+        plt.plot(day_numbers, df_r['specificity'],
+            f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
+
         plt.figure(dprime_fig.number)
-        plt.plot(day_numbers, results_df['dprime'],
+        plt.plot(day_numbers, df_r['dprime'],
             f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
 
     # Configure speed plot
@@ -658,7 +668,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, save_lick_plots
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     ax.set_ylim(bottom=0)
-    max_day = max(len(result['df']) for result in all_results)
+    max_day = max_sessions
     ax.set_xlim(left=0, right=max_day - 0.5)  # Add padding to prevent data points from being cut off
     # Dynamic tick spacing based on data range
     if max_day <= 10:
@@ -801,8 +811,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, save_lick_plots
     ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
 
     # Calculate average rewards/minute and SEM across mice
-    # First, find the maximum number of days
-    max_days = max(len(result['hits']) for result in all_results)
+    max_days = max_sessions
     
     # Dynamic tick spacing based on data range for aggregate plots
     if max_days <= 10:
@@ -820,41 +829,39 @@ def analyze_mouse_data(data_files, markers, starting_conditions, save_lick_plots
     else:
         agg_major_spacing = 20
         agg_minor_spacing = 5
-    
-    # Initialize arrays for rewards per minute (all mice)
-    all_rewards_per_min = np.zeros((len(data_files), max_days))
-    all_rewards_per_min[:] = np.nan  # Fill with NaN initially
-    
-    # Initialize arrays for sex-specific rewards per minute
-    male_rewards_per_min = []
+
+    # Build session-indexed per-mouse rewards-per-minute arrays (no calendar gaps)
+    all_rewards_per_min = np.full((len(data_files), max_sessions), np.nan)
+    male_rewards_per_min   = []
     female_rewards_per_min = []
-    
-    # Fill in the rewards per minute data
+
     for i, result in enumerate(all_results):
-        rewards = np.array(result['hits'])
-        session_lengths = np.array(result['session_lengths'])
-        # Calculate rewards per minute
-        rewards_per_min = rewards / session_lengths
-        all_rewards_per_min[i, :len(rewards_per_min)] = rewards_per_min
-        
-        # Separate data by sex based on marker type
+        df_r    = result['df']
+        rpm_row = np.full(max_sessions, np.nan)
+        for session_idx, (_, row) in enumerate(df_r.iterrows()):
+            if pd.notna(row['session_length']) and row['session_length'] > 0 and pd.notna(row['hits']):
+                rpm_row[session_idx] = row['hits'] / row['session_length']
+        all_rewards_per_min[i] = rpm_row
+
         mouse_name = result['mouse']
         if markers[mouse_name] == 's':  # Male
-            male_rewards_per_min.append(rewards_per_min)
+            male_rewards_per_min.append(rpm_row)
         else:  # Female (marker 'o')
-            female_rewards_per_min.append(rewards_per_min)
-    
-    # Convert lists to arrays and pad with NaN to make them rectangular
+            female_rewards_per_min.append(rpm_row)
+
     if male_rewards_per_min:
-        male_rewards_per_min = np.array([np.pad(x, (0, max_days - len(x)), 
-                                               constant_values=np.nan) for x in male_rewards_per_min])
+        male_rewards_per_min = np.array(male_rewards_per_min)
     if female_rewards_per_min:
-        female_rewards_per_min = np.array([np.pad(x, (0, max_days - len(x)), 
-                                                constant_values=np.nan) for x in female_rewards_per_min])
+        female_rewards_per_min = np.array(female_rewards_per_min)
     
-    # Calculate mean and SEM across mice for each day
-    mean_rewards_per_min = np.nanmean(all_rewards_per_min, axis=0)
-    sem_rewards_per_min = np.nanstd(all_rewards_per_min, axis=0) / np.sqrt(np.sum(~np.isnan(all_rewards_per_min), axis=0))
+    # Calculate mean and SEM across mice for each day (only over mice that have data on that day)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', RuntimeWarning)
+        n_all = np.sum(~np.isnan(all_rewards_per_min), axis=0)
+        mean_rewards_per_min = np.where(n_all > 0, np.nanmean(all_rewards_per_min, axis=0), np.nan)
+        sem_rewards_per_min = np.where(n_all > 1,
+                                       np.nanstd(all_rewards_per_min, axis=0) / np.sqrt(n_all),
+                                       0)
     
     # Plot average rewards/minute with SEM
     plt.figure(avg_reward_fig.number)
@@ -889,30 +896,32 @@ def analyze_mouse_data(data_files, markers, starting_conditions, save_lick_plots
         # Check if we have any non-NaN values
         valid_male_data = np.any(~np.isnan(male_rewards_per_min))
         if valid_male_data:
-            mean_male = np.nanmean(male_rewards_per_min, axis=0)
-            # Only calculate SEM where we have more than one value
-            n_male = np.sum(~np.isnan(male_rewards_per_min), axis=0)
-            sem_male = np.where(n_male > 1, 
-                              np.nanstd(male_rewards_per_min, axis=0) / np.sqrt(n_male),
-                              0)
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', RuntimeWarning)
+                n_male = np.sum(~np.isnan(male_rewards_per_min), axis=0)
+                mean_male = np.where(n_male > 0, np.nanmean(male_rewards_per_min, axis=0), np.nan)
+                sem_male = np.where(n_male > 1,
+                                    np.nanstd(male_rewards_per_min, axis=0) / np.sqrt(n_male),
+                                    0)
             plt.plot(day_numbers, mean_male, '-', color='green', linewidth=2, label=f'Male (n={len(male_rewards_per_min)})')
-            plt.fill_between(day_numbers, mean_male - sem_male, mean_male + sem_male, 
-                           color='green', alpha=0.2)
+            plt.fill_between(day_numbers, mean_male - sem_male, mean_male + sem_male,
+                             color='green', alpha=0.2)
 
     # Plot female data if available
     if len(female_rewards_per_min) > 0:
         # Check if we have any non-NaN values
         valid_female_data = np.any(~np.isnan(female_rewards_per_min))
         if valid_female_data:
-            mean_female = np.nanmean(female_rewards_per_min, axis=0)
-            # Only calculate SEM where we have more than one value
-            n_female = np.sum(~np.isnan(female_rewards_per_min), axis=0)
-            sem_female = np.where(n_female > 1,
-                                np.nanstd(female_rewards_per_min, axis=0) / np.sqrt(n_female),
-                                0)
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', RuntimeWarning)
+                n_female = np.sum(~np.isnan(female_rewards_per_min), axis=0)
+                mean_female = np.where(n_female > 0, np.nanmean(female_rewards_per_min, axis=0), np.nan)
+                sem_female = np.where(n_female > 1,
+                                      np.nanstd(female_rewards_per_min, axis=0) / np.sqrt(n_female),
+                                      0)
             plt.plot(day_numbers, mean_female, '-', color='purple', linewidth=2, label=f'Female (n={len(female_rewards_per_min)})')
-            plt.fill_between(day_numbers, mean_female - sem_female, mean_female + sem_female, 
-                           color='purple', alpha=0.2)
+            plt.fill_between(day_numbers, mean_female - sem_female, mean_female + sem_female,
+                             color='purple', alpha=0.2)
 
     # Configure sex-specific rewards plot
     plt.title('Sex-Specific Average Rewards Per Minute')
@@ -934,35 +943,36 @@ def analyze_mouse_data(data_files, markers, starting_conditions, save_lick_plots
     # Create a new figure for condition-based analysis
     condition_reward_fig = plt.figure(figsize=(12, 6))
     
-    # Group mice by starting condition
+    # Group mice by starting condition (session-indexed arrays, no calendar gaps)
     condition_groups = {}
     for result in all_results:
         condition = result['starting_condition']
         if condition not in condition_groups:
             condition_groups[condition] = []
-        rewards = np.array(result['hits'])
-        session_lengths = np.array(result['session_lengths'])
-        rewards_per_min = rewards / session_lengths
-        condition_groups[condition].append(rewards_per_min)
-    
+        df_r = result['df']
+        rpm_array = np.full(max_sessions, np.nan)
+        for session_idx, (_, row) in enumerate(df_r.iterrows()):
+            if pd.notna(row['session_length']) and row['session_length'] > 0 and pd.notna(row['hits']):
+                rpm_array[session_idx] = row['hits'] / row['session_length']
+        condition_groups[condition].append(rpm_array)
+
     # Plot each condition's data
+    day_numbers = np.arange(0, max_sessions)
     for condition, rewards_list in condition_groups.items():
         color = condition_color_map[condition]
-        # Pad arrays to make them equal length
-        max_len = max(len(r) for r in rewards_list)
-        padded_rewards = np.array([np.pad(r, (0, max_len - len(r)), 
-                                        constant_values=np.nan) for r in rewards_list])
-        
-        # Calculate mean and SEM
-        mean_rewards = np.nanmean(padded_rewards, axis=0)
-        n_mice = np.sum(~np.isnan(padded_rewards), axis=0)
-        sem_rewards = np.where(n_mice > 1,
-                             np.nanstd(padded_rewards, axis=0) / np.sqrt(n_mice),
-                             0)
-        
+        padded_rewards = np.array(rewards_list)
+
+        # Calculate mean and SEM (only over mice that have data on that day)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', RuntimeWarning)
+            n_mice = np.sum(~np.isnan(padded_rewards), axis=0)
+            mean_rewards = np.where(n_mice > 0, np.nanmean(padded_rewards, axis=0), np.nan)
+            sem_rewards = np.where(n_mice > 1,
+                                   np.nanstd(padded_rewards, axis=0) / np.sqrt(n_mice),
+                                   0)
+
         # Plot the data
-        day_numbers = np.arange(0, max_len)
-        plt.plot(day_numbers, mean_rewards, '-', color=color, linewidth=2, 
+        plt.plot(day_numbers, mean_rewards, '-', color=color, linewidth=2,
                 label=f'{condition} (n={len(rewards_list)})')
         plt.fill_between(day_numbers, mean_rewards - sem_rewards, mean_rewards + sem_rewards,
                         color=color, alpha=0.2)
@@ -987,33 +997,35 @@ def analyze_mouse_data(data_files, markers, starting_conditions, save_lick_plots
     # Create a new figure for condition-based speed analysis
     condition_speed_fig = plt.figure(figsize=(12, 6))
     
-    # Group mice by starting condition for speed
+    # Group mice by starting condition for speed (session-indexed arrays, no calendar gaps)
     condition_speed_groups = {}
     for result in all_results:
         condition = result['starting_condition']
         if condition not in condition_speed_groups:
             condition_speed_groups[condition] = []
-        speeds = np.array(result['speeds'])
-        condition_speed_groups[condition].append(speeds)
-    
+        df_r = result['df']
+        speed_array = np.full(max_sessions, np.nan)
+        for session_idx, (_, row) in enumerate(df_r.iterrows()):
+            speed_array[session_idx] = row['average_speed']
+        condition_speed_groups[condition].append(speed_array)
+
     # Plot each condition's speed data
+    day_numbers = np.arange(0, max_sessions)
     for condition, speed_list in condition_speed_groups.items():
         color = condition_color_map[condition]
-        # Pad arrays to make them equal length
-        max_len = max(len(s) for s in speed_list)
-        padded_speeds = np.array([np.pad(s, (0, max_len - len(s)), 
-                                        constant_values=np.nan) for s in speed_list])
-        
-        # Calculate mean and SEM
-        mean_speeds = np.nanmean(padded_speeds, axis=0)
-        n_mice = np.sum(~np.isnan(padded_speeds), axis=0)
-        sem_speeds = np.where(n_mice > 1,
-                             np.nanstd(padded_speeds, axis=0) / np.sqrt(n_mice),
-                             0)
-        
+        padded_speeds = np.array(speed_list)
+
+        # Calculate mean and SEM (only over mice that have data on that day)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', RuntimeWarning)
+            n_mice = np.sum(~np.isnan(padded_speeds), axis=0)
+            mean_speeds = np.where(n_mice > 0, np.nanmean(padded_speeds, axis=0), np.nan)
+            sem_speeds = np.where(n_mice > 1,
+                                  np.nanstd(padded_speeds, axis=0) / np.sqrt(n_mice),
+                                  0)
+
         # Plot the data
-        day_numbers = np.arange(0, max_len)
-        plt.plot(day_numbers, mean_speeds, '-', color=color, linewidth=2, 
+        plt.plot(day_numbers, mean_speeds, '-', color=color, linewidth=2,
                 label=f'{condition} (n={len(speed_list)})')
         plt.fill_between(day_numbers, mean_speeds - sem_speeds, mean_speeds + sem_speeds,
                         color=color, alpha=0.2)
@@ -1037,6 +1049,60 @@ def analyze_mouse_data(data_files, markers, starting_conditions, save_lick_plots
 
     # Create the level-based analysis plot
     level_fig = analyze_levels(data_files)
+
+    # ── Missing data report ───────────────────────────────────────────────────
+    all_session_dates = set(
+        d.date() for result in all_results for d in result['df']['date']
+    )
+
+    report_lines = []
+    report_lines.append("=" * 70)
+    report_lines.append("MISSING DATA REPORT")
+    report_lines.append(f"Global date range: {global_start}  →  {global_end}  ({total_days} calendar days)")
+    report_lines.append(f"Session dates across all mice: {len(all_session_dates)}")
+    report_lines.append("=" * 70)
+
+    for result in all_results:
+        mouse_name  = result['mouse']
+        mouse_dates = set(d.date() for d in result['df']['date'])
+        file_errors = result.get('session_file_errors', {})
+        error_dates = set(datetime.strptime(ds, '%Y-%m-%d').date() for ds in file_errors)
+        fully_missing = sorted(all_session_dates - mouse_dates - error_dates)
+        present       = sorted(mouse_dates)
+
+        report_lines.append(f"\nMouse: {mouse_name}")
+        report_lines.append(f"  Sessions present   : {len(present)}")
+        for d in present:
+            day_offset = (d - global_start).days
+            report_lines.append(f"    Day {day_offset:>3}  {d}")
+
+        if file_errors:
+            report_lines.append(f"  Incomplete sessions (missing file): {len(file_errors)}")
+            for date_str, missing_types in sorted(file_errors.items()):
+                d = datetime.strptime(date_str, '%Y-%m-%d').date()
+                day_offset = (d - global_start).days
+                report_lines.append(f"    Day {day_offset:>3}  {date_str}  <-- MISSING FILE(S): {', '.join(missing_types)}")
+
+        if fully_missing:
+            report_lines.append(f"  Fully absent dates : {len(fully_missing)}")
+            for d in fully_missing:
+                day_offset = (d - global_start).days
+                report_lines.append(f"    Day {day_offset:>3}  {d}  <-- NO SESSION")
+
+        if not file_errors and not fully_missing:
+            report_lines.append(f"  Missing sessions   : none")
+
+    report_lines.append("\n" + "=" * 70)
+    report_text = "\n".join(report_lines)
+
+    print("\n" + report_text)
+
+    report_dir = output_dir if output_dir else os.path.dirname(os.path.abspath(data_files[0]))
+    timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+    report_path = os.path.join(report_dir, f"missing_data_report_{timestamp_str}.txt")
+    with open(report_path, "w", encoding="utf-8") as f:
+        f.write(report_text + "\n")
+    print(f"\nMissing data report saved to: {report_path}")
 
     return speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, condition_speed_fig, level_fig, all_results
 
