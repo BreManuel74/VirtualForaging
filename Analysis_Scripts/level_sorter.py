@@ -388,7 +388,207 @@ def extract_level_transitions(session_row: pd.Series) -> list[dict]:
     return results
 
 
-def write_transitions_report(transitions_df: pd.DataFrame, filepath: str) -> None:
+def sanity_check_global_transitions(
+    combined: pd.DataFrame,
+    transitions_df: pd.DataFrame,
+) -> dict[str, list[dict]]:
+    """
+    Independent sanity check: concatenate ALL reward_events for each animal
+    across all sessions in order and walk through a deduplicated level sequence
+    applying thresholds — no carry-in bookkeeping, just sequential counting.
+
+    Cross-session level continuations (where session N ends mid-level and
+    session N+1 resumes the same level) are collapsed into a single level
+    visit so the global reward cursor advances by exactly 'threshold' per level.
+
+    The resulting completed transitions are compared against transitions_df
+    (per-session carry-in method).  Any animal whose timestamps disagree is
+    flagged — indicating a discrepancy between the session_end_rewards value
+    recorded in the log and the actual reward count in the trial_log.
+
+    Returns
+    -------
+    dict[str, list[dict]]
+        { animal_id: [] }           — clean (lists are empty)
+        { animal_id: [{skip:True}] } — inconclusive (missing trial_log)
+        { animal_id: [{type:..}] }  — mismatches found
+    """
+    report: dict[str, list[dict]] = {}
+
+    for animal_id, animal_rows in combined.groupby('animal_id', sort=True):
+        sessions       = animal_rows.sort_values('session_num')
+        global_rewards: list[float] = []
+        global_levels:  list[tuple[str, int]] = []  # (level_name, session_num)
+        skipped:        list[int]  = []
+        prev_end_level: str | None = None
+
+        for _, sess in sessions.iterrows():
+            sess_num       = int(sess['session_num'])
+            trial_log_path = sess.get('trial_log')
+            log_entries    = sess.get('log_entries')
+
+            # Build this session's ordered clean level list and find its end level
+            sess_levels:   list[str] = []
+            this_end_level: str | None = None
+            if log_entries is not None and isinstance(log_entries, pd.DataFrame) and not log_entries.empty:
+                entries = log_entries.copy()
+                if 'Time' in entries.columns:
+                    entries = entries.sort_values('Time')
+                for _, le in entries.iterrows():
+                    lvl_str = str(le.get('Level', ''))
+                    clean   = lvl_str.split('(')[0].strip()
+                    if '(Session End' in lvl_str:
+                        this_end_level = clean
+                    else:
+                        sess_levels.append(clean)
+
+            # Skip first level of this session if it continues exactly where
+            # the previous session ended (it's the same level, not a new visit)
+            if sess_levels and sess_levels[0] == prev_end_level:
+                sess_levels = sess_levels[1:]
+
+            for lv in sess_levels:
+                global_levels.append((lv, sess_num))
+            prev_end_level = this_end_level
+
+            # Accumulate reward timestamps  
+            if not isinstance(trial_log_path, str) or not trial_log_path:
+                if sess_levels:
+                    skipped.append(sess_num)
+                continue
+            try:
+                tl = pd.read_csv(trial_log_path)
+                if 'reward_event' in tl.columns:
+                    global_rewards.extend(tl['reward_event'].dropna().tolist())
+                else:
+                    skipped.append(sess_num)
+            except Exception:
+                skipped.append(sess_num)
+
+        if skipped:
+            reason = f'missing/unreadable trial_log for session(s) {skipped}'
+            print(f'  [SANITY ?]    {animal_id}: inconclusive — {reason}')
+            report[animal_id] = [{'skip': True, 'reason': reason}]
+            continue
+
+        # Walk through global levels, consuming exactly 'threshold' rewards each
+        global_completed: list[dict] = []
+        reward_idx = 0
+        for level_name, sess_num in global_levels:
+            threshold = get_reward_threshold(level_name, animal_id)
+            if threshold is None:
+                continue
+            end_idx = reward_idx + threshold - 1
+            if end_idx < len(global_rewards):
+                global_completed.append({
+                    'level':         level_name,
+                    'session_num':   sess_num,
+                    'transition_ts': global_rewards[end_idx],
+                })
+                reward_idx += threshold
+            else:
+                reward_idx = len(global_rewards)  # exhaust remaining
+
+        # Per-session completed subset (completed=True with a real timestamp)
+        animal_tdf   = transitions_df[transitions_df['animal_id'] == animal_id]
+        ps_completed = animal_tdf[
+            (animal_tdf['completed'] == True) &
+            (animal_tdf['transition_ts'].notna())
+        ].reset_index(drop=True)
+
+        mismatches: list[dict] = []
+        n_compare = min(len(global_completed), len(ps_completed))
+
+        # Walk element-by-element to pin down the FIRST divergence
+        first_divergence: dict | None = None
+        for idx in range(n_compare):
+            gc   = global_completed[idx]
+            pc   = ps_completed.iloc[idx]
+            g_lv = gc['level']
+            p_lv = pc.get('level', '')
+            g_ts = float(gc['transition_ts'])
+            p_ts = float(pc['transition_ts'])
+
+            if g_lv != p_lv:
+                first_divergence = {
+                    'type':               'level_order_mismatch',
+                    'position':           idx + 1,
+                    'global_level':       g_lv,
+                    'global_session':     int(gc['session_num']) + 1,
+                    'global_ts':          g_ts,
+                    'persession_level':   p_lv,
+                    'persession_session': int(pc['session_num']) + 1,
+                    'persession_ts':      p_ts,
+                }
+                break
+            elif abs(g_ts - p_ts) > 0.001:
+                first_divergence = {
+                    'type':               'timestamp_mismatch',
+                    'position':           idx + 1,
+                    'level':              g_lv,
+                    'global_session':     int(gc['session_num']) + 1,
+                    'global_ts':          g_ts,
+                    'persession_session': int(pc['session_num']) + 1,
+                    'persession_ts':      p_ts,
+                }
+                break
+
+        if first_divergence is not None:
+            mismatches.append(first_divergence)
+
+        # Count difference — report what's extra/missing if the common entries all agreed
+        if len(global_completed) != len(ps_completed):
+            count_info: dict = {
+                'type':             'count_mismatch',
+                'global_count':     len(global_completed),
+                'persession_count': len(ps_completed),
+            }
+            if first_divergence is None:
+                # Common entries matched perfectly; describe the orphan entry
+                if len(global_completed) > len(ps_completed):
+                    orphan = global_completed[n_compare]
+                    count_info['extra_source']  = 'global'
+                    count_info['extra_level']   = orphan['level']
+                    count_info['extra_session'] = int(orphan['session_num']) + 1
+                    count_info['extra_ts']      = float(orphan['transition_ts'])
+                else:
+                    orphan = ps_completed.iloc[n_compare]
+                    count_info['extra_source']  = 'per-session'
+                    count_info['extra_level']   = orphan.get('level', '?')
+                    count_info['extra_session'] = int(orphan['session_num']) + 1
+                    count_info['extra_ts']      = float(orphan['transition_ts'])
+            mismatches.append(count_info)
+
+        report[animal_id] = mismatches
+        if not mismatches:
+            print(f'  [SANITY OK]   {animal_id}: '
+                  f'{len(global_completed)} completed transition(s) verified')
+        else:
+            print(f'  [SANITY FAIL] {animal_id}: {len(mismatches)} mismatch(es)')
+            for m in mismatches:
+                t = m.get('type', '')
+                if t == 'timestamp_mismatch':
+                    print(f'    transition #{m["position"]} ({m["level"]}): '
+                          f'global session {m["global_session"]}={m["global_ts"]:.2f}s '
+                          f'vs per-session session {m["persession_session"]}={m["persession_ts"]:.2f}s')
+                elif t == 'level_order_mismatch':
+                    print(f'    transition #{m["position"]}: '
+                          f'global={m["global_level"]} (session {m["global_session"]}, {m["global_ts"]:.2f}s) '
+                          f'vs per-session={m["persession_level"]} (session {m["persession_session"]}, {m["persession_ts"]:.2f}s)')
+                elif t == 'count_mismatch':
+                    base = (f'    count: global={m["global_count"]} '
+                            f'vs per-session={m["persession_count"]}')
+                    if 'extra_source' in m:
+                        base += (f' — {m["extra_source"]} has extra: '
+                                 f'{m["extra_level"]} session {m["extra_session"]} '
+                                 f'at {m["extra_ts"]:.2f}s')
+                    print(base)
+
+    return report
+
+
+def write_transitions_report(transitions_df: pd.DataFrame, filepath: str,
+                              sanity_report: dict | None = None) -> None:
     """
     Write a human-readable text file listing every level transition time for
     every mouse, grouped by animal → session → level.
@@ -409,6 +609,42 @@ def write_transitions_report(transitions_df: pd.DataFrame, filepath: str) -> Non
         '=' * 70,
         '',
     ]
+
+    if sanity_report:
+        lines.append('SANITY CHECK  (global sequential count vs per-session carry-in)')
+        lines.append('-' * 70)
+        for aid, ms in sorted(sanity_report.items()):
+            if not ms:
+                lines.append(f'  {aid:<12}  OK')
+            elif ms[0].get('skip'):
+                lines.append(f'  {aid:<12}  INCONCLUSIVE — {ms[0]["reason"]}')
+            else:
+                lines.append(f'  {aid:<12}  FAIL  ({len(ms)} mismatch(es))')
+                for m in ms:
+                    t = m.get('type', '')
+                    if t == 'timestamp_mismatch':
+                        lines.append(
+                            f'    transition #{m["position"]} ({m["level"]}): '
+                            f'global session {m["global_session"]}={m["global_ts"]:.2f}s '
+                            f'vs per-session session {m["persession_session"]}={m["persession_ts"]:.2f}s'
+                        )
+                    elif t == 'level_order_mismatch':
+                        lines.append(
+                            f'    transition #{m["position"]}: '
+                            f'global={m["global_level"]} (session {m["global_session"]}, {m["global_ts"]:.2f}s) '
+                            f'vs per-session={m["persession_level"]} (session {m["persession_session"]}, {m["persession_ts"]:.2f}s)'
+                        )
+                    elif t == 'count_mismatch':
+                        base = (f'    count: global={m["global_count"]} '
+                                f'per-session={m["persession_count"]}')
+                        if 'extra_source' in m:
+                            base += (f' — {m["extra_source"]} has extra: '
+                                     f'{m["extra_level"]} session {m["extra_session"]} '
+                                     f'at {m["extra_ts"]:.2f}s')
+                        lines.append(base)
+        lines.append('')
+        lines.append('=' * 70)
+        lines.append('')
 
     for animal_id, grp in transitions_df.groupby('animal_id', sort=True):
         lines.append(f'=== {animal_id} ===')
@@ -553,12 +789,16 @@ def main():
     trans_cols = [c for c in trans_cols if c in transitions_df.columns]
     print(transitions_df[trans_cols].head(20).to_string(index=False))
 
-    # Save full transitions report as a text file
+    # Run sanity check: global sequential count vs per-session carry-in
+    print('\nRunning sanity check...')
+    sanity_report = sanity_check_global_transitions(combined, transitions_df)
+
+    # Save full transitions report (with sanity results) as a text file
     if not transitions_df.empty:
         from datetime import datetime as _dt
-        ts_stamp   = _dt.now().strftime('%Y%m%d_%H%M%S')
+        ts_stamp    = _dt.now().strftime('%Y%m%d_%H%M%S')
         report_path = os.path.join(MOUSEPORTAL_DIR, f'level_transitions_{ts_stamp}.txt')
-        write_transitions_report(transitions_df, report_path)
+        write_transitions_report(transitions_df, report_path, sanity_report=sanity_report)
 
 
 if __name__ == '__main__':
