@@ -714,6 +714,111 @@ def build_transitions_df(combined: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# Level-boundary helpers for downstream analysis
+# ---------------------------------------------------------------------------
+def save_transitions_csv(transitions_df: pd.DataFrame, filepath: str) -> None:
+    """
+    Save transitions_df to a CSV so downstream scripts can load it without
+    re-running the full level_sorter pipeline.
+
+    Columns written:
+        animal_id, session_num, date, level, transition_ts, completed
+        (plus carry_in, threshold, needed, session_start_level if present)
+    """
+    cols_wanted = ['animal_id', 'session_num', 'date', 'session_start_level',
+                   'level', 'carry_in', 'threshold', 'needed',
+                   'transition_ts', 'completed']
+    cols_to_write = [c for c in cols_wanted if c in transitions_df.columns]
+    transitions_df[cols_to_write].to_csv(filepath, index=False)
+    print(f'Transitions CSV saved → {filepath}')
+
+
+def assign_trial_levels(
+    trial_log_df: pd.DataFrame,
+    transitions_df: pd.DataFrame,
+    animal_id: str,
+    date,
+    time_col: str = 'texture_change_time',
+) -> pd.DataFrame:
+    """
+    Annotate a trial_log DataFrame with the level active at each trial.
+
+    For the given animal + date, level boundaries are taken from
+    transitions_df: a level is active from its previous level's transition_ts
+    (or 0 for the first level) up to (but not including) its own transition_ts.
+    The last level in the session extends to infinity.
+
+    Parameters
+    ----------
+    trial_log_df   : DataFrame with a column giving trial timestamps (seconds).
+    transitions_df : Output of build_transitions_df() or a CSV loaded from
+                     save_transitions_csv().
+    animal_id      : e.g. 'CAH1'
+    date           : date string 'YYYY-MM-DD' or datetime.date — must match
+                     the 'date' column in transitions_df.
+    time_col       : Column in trial_log_df to bin against (default:
+                     'texture_change_time').
+
+    Returns
+    -------
+    trial_log_df with a new 'level' column added (original columns unchanged).
+
+    Example
+    -------
+    >>> import pandas as pd
+    >>> from level_sorter import assign_trial_levels
+    >>> tdf = pd.read_csv('transitions.csv')
+    >>> tl  = pd.read_csv('1769454506trial_log.csv')
+    >>> tl  = assign_trial_levels(tl, tdf, 'CAH1', '2026-01-26')
+    >>> tl[['texture_change_time', 'reward_event', 'level']].head()
+    """
+    import numpy as np
+
+    if time_col not in trial_log_df.columns:
+        raise ValueError(f"time_col '{time_col}' not found in trial_log_df; "
+                         f"available columns: {list(trial_log_df.columns)}")
+
+    # Normalise date for comparison
+    date_ts = pd.Timestamp(date).normalize()
+
+    mask = (
+        (transitions_df['animal_id'] == animal_id) &
+        (pd.to_datetime(transitions_df['date']).dt.normalize() == date_ts)
+    )
+    session_rows = transitions_df[mask].copy()
+
+    if session_rows.empty:
+        raise ValueError(
+            f"No transitions found for animal '{animal_id}' on date '{date}'. "
+            f"Check that transitions_df contains this animal/date combination."
+        )
+
+    # Build boundary arrays.
+    # boundaries[i] = start time of level_labels[i]  (0 for the first level)
+    # Each level starts when the PREVIOUS level's transition_ts is crossed.
+    levels = session_rows['level'].tolist()
+    trans_ts = session_rows['transition_ts'].tolist()  # NaN for incomplete last level
+
+    # boundaries: when does each level begin?
+    boundaries = [0.0]
+    for ts in trans_ts[:-1]:          # all but the last (last extends to end)
+        boundaries.append(float(ts) if pd.notna(ts) else float('inf'))
+
+    # np.searchsorted: for each trial time t, find i such that
+    #   boundaries[i] <= t < boundaries[i+1]
+    # 'right' side: boundaries[i] <= t  (a trial exactly at a boundary
+    # belongs to the NEW level, matching the log behaviour)
+    trial_times = trial_log_df[time_col].to_numpy(dtype=float)
+    boundaries_arr = np.array(boundaries, dtype=float)
+    indices = np.searchsorted(boundaries_arr, trial_times, side='right') - 1
+    indices = np.clip(indices, 0, len(levels) - 1)
+
+    result = trial_log_df.copy()
+    result['level'] = [levels[i] for i in indices]
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 def load_data() -> tuple[
@@ -799,6 +904,9 @@ def main():
         ts_stamp    = _dt.now().strftime('%Y%m%d_%H%M%S')
         report_path = os.path.join(MOUSEPORTAL_DIR, f'level_transitions_{ts_stamp}.txt')
         write_transitions_report(transitions_df, report_path, sanity_report=sanity_report)
+
+        csv_path = os.path.join(MOUSEPORTAL_DIR, f'transitions_{ts_stamp}.csv')
+        save_transitions_csv(transitions_df, csv_path)
 
 
 if __name__ == '__main__':
