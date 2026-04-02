@@ -202,8 +202,8 @@ def test_matching_logic(trial_log_path):
         print("\nNo valid zones found!")
         print("="*80 + "\n")
 
-def analyze_levels(data_files, transitions_csv_path):
-    """Analyze rewards/min for each level across all mice.
+def analyze_levels(data_files, transitions_csv_path, animal_conditions=None):
+    """Analyze rewards/min for each level across all mice, split by starting condition.
 
     Uses a transitions CSV (produced by level_sorter.py) to slice each session's
     trial_log into per-level time windows.  Multi-session level visits (where a
@@ -218,8 +218,14 @@ def analyze_levels(data_files, transitions_csv_path):
         start_ts = previous level's transition_ts in this session, or 0
         end_ts   = this level's transition_ts (completed) or capacitive
                    elapsed_time.max() (incomplete last level of session)
+
+    Parameters
+    ----------
+    animal_conditions : dict[str, str] | None
+        Mapping of animal_id -> starting_condition (e.g. {'CAH1': 'SC', 'CAH2': 'VF'}).
+        When provided, the bar chart is split into grouped bars by condition.
     """
-    # (animal_id, level) -> {'rewards': int, 'duration_min': float}
+    # (animal_id, level) -> {'rewards': int, 'duration_min': float, 'condition': str}
     animal_level_accum: dict[tuple, dict] = {}
 
     # Load transitions CSV -------------------------------------------------------
@@ -318,70 +324,102 @@ def analyze_levels(data_files, transitions_csv_path):
                 count = int(np.sum((reward_events >= start_t) & (reward_events < end_t)))
                 count += int(np.sum((hits_events   >= start_t) & (hits_events   < end_t)))
 
+                condition = (animal_conditions or {}).get(animal_id, 'Unknown')
                 key = (animal_id, level)
                 if key not in animal_level_accum:
-                    animal_level_accum[key] = {'rewards': 0, 'duration_min': 0.0}
+                    animal_level_accum[key] = {'rewards': 0, 'duration_min': 0.0,
+                                               'condition': condition}
                 animal_level_accum[key]['rewards']      += count
                 animal_level_accum[key]['duration_min'] += duration_min
 
     # Collapse accumulators: one rpm per (animal, level) -------------------------
-    # level_data[level] = [rpm_animal1, rpm_animal2, ...]
-    level_data: dict[str, list[float]] = {}
+    # condition_level_data[condition][level] = [rpm_animal1, rpm_animal2, ...]
+    condition_level_data: dict[str, dict[str, list[float]]] = {}
     for (animal_id, level), accum in animal_level_accum.items():
         if accum['duration_min'] > 0:
-            rpm = accum['rewards'] / accum['duration_min']
-            level_data.setdefault(level, []).append(rpm)
-    
-    # Calculate statistics for each level
-    level_stats = {}
-    for level, rewards in level_data.items():
-        if rewards:  # Only process if we have data
-            level_stats[level] = {
-                'mean': np.mean(rewards),
-                'sem': np.std(rewards) / np.sqrt(len(rewards)),
-                'n': len(rewards)
-            }
-    
-    # Create bar plot
-    level_fig = plt.figure(figsize=(15, 8))  # Larger figure size
-    # Sort levels - numerical levels first, then alphabetically
+            rpm       = accum['rewards'] / accum['duration_min']
+            condition = accum['condition']
+            condition_level_data.setdefault(condition, {}).setdefault(level, []).append(rpm)
+
+    # Sort levels ----------------------------------------------------------------
     def sort_key(x):
-        # Try to extract level number if it follows "level_X" pattern
         if x.startswith('level_'):
             try:
                 return (0, int(x.split('_')[1].split('.')[0]))
             except (ValueError, IndexError):
                 pass
-        # Otherwise sort alphabetically (put after numbered levels)
         return (1, x)
-    
-    levels = sorted(level_stats.keys(), key=sort_key)
-    means = [level_stats[level]['mean'] for level in levels]
-    sems = [level_stats[level]['sem'] for level in levels]
-    
-    # Plot bars
-    bars = plt.bar(range(len(levels)), means, yerr=sems, capsize=5, label='Mean rewards per minute')
-    plt.xticks(range(len(levels)), levels, rotation=45, ha='right')
-    
-    # Configure plot
-    plt.title('Average Rewards Per Minute by Level')
-    plt.xlabel('Level')
-    plt.ylabel('Rewards per Minute (Mean ± SEM)')
-    plt.grid(False)
-    ax = plt.gca()
+
+    all_levels = sorted(
+        {lv for cond_data in condition_level_data.values() for lv in cond_data},
+        key=sort_key,
+    )
+    conditions_sorted = sorted(condition_level_data.keys())
+    n_conditions = len(conditions_sorted)
+    n_levels     = len(all_levels)
+
+    # Assign one color per condition using the existing generate_colors helper
+    cond_colors = generate_colors(max(n_conditions, 1))
+    cond_color_map = {c: cond_colors[i] for i, c in enumerate(conditions_sorted)}
+
+    # Grouped bar chart ----------------------------------------------------------
+    level_fig, ax = plt.subplots(figsize=(max(15, n_levels * 0.8), 8))
+
+    bar_width   = 0.8 / max(n_conditions, 1)
+    x_positions = np.arange(n_levels)
+
+    for cond_idx, condition in enumerate(conditions_sorted):
+        cond_data = condition_level_data[condition]
+        means = []
+        sems  = []
+        ns    = []
+        for level in all_levels:
+            vals = cond_data.get(level, [])
+            if vals:
+                means.append(float(np.mean(vals)))
+                sems.append(float(np.std(vals) / np.sqrt(len(vals))))
+                ns.append(len(vals))
+            else:
+                means.append(np.nan)
+                sems.append(np.nan)
+                ns.append(0)
+
+        offset = (cond_idx - (n_conditions - 1) / 2) * bar_width
+        bars = ax.bar(
+            x_positions + offset, means,
+            width=bar_width, yerr=sems,
+            capsize=4,
+            color=cond_color_map[condition],
+            label=condition,
+            error_kw={'elinewidth': 1.2},
+        )
+
+        # n= annotations above each bar
+        for xi, (m, n_val) in enumerate(zip(means, ns)):
+            if n_val > 0 and not np.isnan(m):
+                ax.text(
+                    x_positions[xi] + offset,
+                    m + (sems[xi] if not np.isnan(sems[xi]) else 0),
+                    f'n={n_val}',
+                    ha='center', va='bottom',
+                    fontsize=7,
+                    color=cond_color_map[condition],
+                )
+
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(
+        [lv.replace('level_', 'L').replace('.json', '') for lv in all_levels],
+        rotation=45, ha='right',
+    )
+    ax.set_title('Average Rewards Per Minute by Level — by Starting Condition')
+    ax.set_xlabel('Level')
+    ax.set_ylabel('Rewards per Minute (Mean ± SEM)')
+    ax.set_ylim(bottom=0)
     ax.tick_params(axis='both', direction='in')
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
-    
-    # Adjust layout to prevent label cutoff
-    plt.subplots_adjust(bottom=0.2)
-    
-    # Add sample size annotations
-    for i, level in enumerate(levels):
-        n = level_stats[level]['n']
-        plt.text(i, means[i], f'n={n}', ha='center', va='bottom')
-    
-    plt.tight_layout()
+    ax.legend(title='Starting Condition')
+    level_fig.tight_layout()
     return level_fig
 
 def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv_path=None, save_lick_plots=False, output_dir=None):
@@ -1192,8 +1230,53 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
     plt.legend()
 
+    # Create collapsed condition bar plot (one average rpm per mouse, collapsed across all days)
+    condition_bar_fig, ax_bar = plt.subplots(figsize=(8, 6))
+
+    condition_mouse_rpms: dict[str, list] = {}
+    for result in all_results:
+        condition = result['starting_condition']
+        df_r = result['df']
+        session_rpms = []
+        for _, row in df_r.iterrows():
+            if pd.notna(row['session_length']) and row['session_length'] > 0 and pd.notna(row['hits']):
+                session_rpms.append(row['hits'] / row['session_length'])
+        if session_rpms:
+            if condition not in condition_mouse_rpms:
+                condition_mouse_rpms[condition] = []
+            condition_mouse_rpms[condition].append((result['mouse'], float(np.mean(session_rpms))))
+
+    conditions_sorted_bar = sorted(condition_mouse_rpms.keys())
+    x_pos_bar = np.arange(len(conditions_sorted_bar))
+
+    rng_bar = np.random.default_rng(seed=42)
+    for ci, condition in enumerate(conditions_sorted_bar):
+        entries = condition_mouse_rpms[condition]
+        mouse_rpms = [v for _, v in entries]
+        mean_rpm = float(np.mean(mouse_rpms))
+        sem_rpm  = float(np.std(mouse_rpms, ddof=1) / np.sqrt(len(mouse_rpms))) if len(mouse_rpms) > 1 else 0.0
+        color = condition_color_map[condition]
+        ax_bar.bar(ci, mean_rpm, width=0.5, color=color, alpha=0.8,
+                   yerr=sem_rpm, capsize=7, error_kw={'elinewidth': 1.5, 'capthick': 1.5})
+        jitter = (rng_bar.random(len(mouse_rpms)) - 0.5) * 0.22
+        for j, (mouse_name_bar, rpm_val) in enumerate(entries):
+            ax_bar.plot(ci + jitter[j], rpm_val, 'o',
+                        color='white', markeredgecolor=color,
+                        markeredgewidth=1.8, markersize=7, zorder=3)
+
+    ax_bar.set_xticks(x_pos_bar)
+    ax_bar.set_xticklabels(conditions_sorted_bar)
+    ax_bar.set_title('Average Reward Rate by Starting Condition\n(collapsed across all sessions)')
+    ax_bar.set_xlabel('Starting Condition')
+    ax_bar.set_ylabel('Rewards per Minute (Mean \u00b1 SEM)')
+    ax_bar.set_ylim(bottom=0)
+    ax_bar.tick_params(axis='both', direction='in')
+    ax_bar.spines['top'].set_visible(False)
+    ax_bar.spines['right'].set_visible(False)
+    condition_bar_fig.tight_layout()
+
     # Create the level-based analysis plot
-    level_fig = analyze_levels(data_files, transitions_csv_path)
+    level_fig = analyze_levels(data_files, transitions_csv_path, animal_conditions=conditions)
 
     # ── Missing data report ───────────────────────────────────────────────────
     all_session_dates = set(
