@@ -209,6 +209,8 @@ _ALL_PLOT_KEYS = {
     'avg_reward', 'sex_reward',
     'condition_reward', 'condition_speed', 'condition_lick', 'condition_bar', 'condition_speed_bar',
     'levels', 'level_speed', 'level_speed_condition',
+    'avg_lick_rate', 'sex_lick_rate', 'condition_lick_rate', 'condition_lick_bar',
+    'level_lick', 'level_lick_condition',
 }
 
 _PLOT_LABELS = [
@@ -222,14 +224,20 @@ _PLOT_LABELS = [
     ('dprime',              "Individual: d' over time"),
     ('avg_reward',          'Aggregate: Average reward rate across all mice'),
     ('sex_reward',          'Aggregate: Sex-specific average reward rate'),
+    ('avg_lick_rate',       'Aggregate: Average lick rate across all mice'),
+    ('sex_lick_rate',       'Aggregate: Sex-specific average lick rate'),
     ('condition_reward',    'Condition: Reward rate over time (line)'),
     ('condition_speed',     'Condition: Speed over time'),
     ('condition_lick',      'Condition: Lick count over time'),
+    ('condition_lick_rate', 'Condition: Lick rate over time (line)'),
     ('condition_bar',       'Condition: Reward rate — collapsed bar chart'),
     ('condition_speed_bar', 'Condition: Average speed — collapsed bar chart'),
+    ('condition_lick_bar',  'Condition: Lick rate — collapsed bar chart'),
     ('levels',              'Level: Reward rate by level (requires transitions CSV)'),
     ('level_speed',           'Level: Average speed by level — collapsed (requires transitions CSV)'),
     ('level_speed_condition', 'Level: Average speed by level — by condition (requires transitions CSV)'),
+    ('level_lick',            'Level: Average lick rate by level — collapsed (requires transitions CSV)'),
+    ('level_lick_condition',  'Level: Average lick rate by level — by condition (requires transitions CSV)'),
 ]
 
 
@@ -299,13 +307,13 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
     # Load transitions CSV -------------------------------------------------------
     if not transitions_csv_path:
         print("  [WARN] No transitions CSV provided — level plot will be empty.")
-        return plt.figure(figsize=(15, 8)), None, None
+        return plt.figure(figsize=(15, 8)), None, None, None, None
     try:
         transitions_df = pd.read_csv(transitions_csv_path)
         transitions_df['date'] = pd.to_datetime(transitions_df['date'])
     except Exception as e:
         print(f"  [ERROR] Cannot read transitions CSV: {e}")
-        return plt.figure(figsize=(15, 8)), None, None
+        return plt.figure(figsize=(15, 8)), None, None, None, None
 
     # Build lookup (animal_id, date_normalised) -> {trial_log, capacitive} ------
     session_lookup = {}
@@ -348,13 +356,26 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
             if 'reward_event' not in tl.columns or 'texture_change_time' not in tl.columns:
                 continue
 
-            # Session end time — needed for the last incomplete level visit
+            # Session end time and lick event detection from capacitive data -----
+            lick_event_times = np.array([])
             session_end_time = None
             if isinstance(capacitive_path, str) and not pd.isna(capacitive_path):
                 try:
                     cap = pd.read_csv(capacitive_path)
                     if 'elapsed_time' in cap.columns:
                         session_end_time = float(cap['elapsed_time'].max())
+                    if 'capacitive_value' in cap.columns:
+                        cap_df = cap.copy()
+                        cap_df['Time_sec'] = cap_df['elapsed_time']
+                        kde_val = get_cached_kde(capacitive_path)
+                        if kde_val is None:
+                            kde_val = lda.compute_KDE(cap_df, 'capacitive_value')
+                            cache_kde_value(capacitive_path, kde_val)
+                        cap_df = lda.compute_KDE_normalizations(cap_df, 'capacitive_value', kde_val)
+                        events_df, _ = lda.detect_events_above_threshold(
+                            cap_df, 'capacitive_value', threshold=None)
+                        mask_evt = events_df['capacitive_value_event'] == 1
+                        lick_event_times = events_df.loc[mask_evt, 'Time_sec'].values.astype(float)
                 except Exception:
                     pass
             if session_end_time is None:
@@ -409,7 +430,8 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
                 if key not in animal_level_accum:
                     animal_level_accum[key] = {'rewards': 0, 'duration_min': 0.0,
                                                'condition': condition,
-                                               'speed_sum': 0.0, 'speed_count': 0}
+                                               'speed_sum': 0.0, 'speed_count': 0,
+                                               'lick_count': 0}
                 animal_level_accum[key]['rewards']      += count
                 animal_level_accum[key]['duration_min'] += duration_min
                 if treadmill_df is not None and len(treadmill_df) > 0:
@@ -417,12 +439,17 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
                     lvl_speeds = treadmill_df.loc[mask, 'speed'].values / 10.0
                     animal_level_accum[key]['speed_sum']   += float(np.sum(lvl_speeds))
                     animal_level_accum[key]['speed_count'] += len(lvl_speeds)
+                if len(lick_event_times) > 0:
+                    lick_mask = (lick_event_times >= start_t) & (lick_event_times < end_t)
+                    animal_level_accum[key]['lick_count'] += int(np.sum(lick_mask))
 
-    # Collapse accumulators: one rpm and mean speed per (animal, level) ----------
+    # Collapse accumulators: one rpm, mean speed, and mean lick rate per (animal, level)
     # condition_level_data[condition][level] = [rpm_animal1, rpm_animal2, ...]
     condition_level_data: dict[str, dict[str, list[float]]] = {}
     condition_level_speed: dict[str, dict[str, list[float]]] = {}
     collapsed_level_speed: dict[str, list[float]] = {}
+    condition_level_lick: dict[str, dict[str, list[float]]] = {}
+    collapsed_level_lick: dict[str, list[float]] = {}
     for (animal_id, level), accum in animal_level_accum.items():
         condition = accum['condition']
         if accum['duration_min'] > 0:
@@ -432,6 +459,10 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
             mean_spd = accum['speed_sum'] / accum['speed_count']
             condition_level_speed.setdefault(condition, {}).setdefault(level, []).append(mean_spd)
             collapsed_level_speed.setdefault(level, []).append(mean_spd)
+        if accum['lick_count'] > 0 and accum['duration_min'] > 0:
+            lpm = accum['lick_count'] / accum['duration_min']
+            condition_level_lick.setdefault(condition, {}).setdefault(level, []).append(lpm)
+            collapsed_level_lick.setdefault(level, []).append(lpm)
 
     # Sort levels ----------------------------------------------------------------
     def sort_key(x):
@@ -606,7 +637,97 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
         ax_scc.legend(title='Starting Condition')
         level_speed_condition_fig.tight_layout()
 
-    return level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig
+    # ── Collapsed lick rate by level (all mice) ───────────────────────────────
+    level_lick_collapsed_fig = None
+    if 'level_lick' in selected_plots and collapsed_level_lick:
+        all_levels_lk = sorted(collapsed_level_lick.keys(), key=sort_key)
+        level_lick_collapsed_fig, ax_lk = plt.subplots(
+            figsize=(max(15, len(all_levels_lk) * 0.8), 8))
+        x_lk = np.arange(len(all_levels_lk))
+        lk_means, lk_sems, lk_ns = [], [], []
+        for lv in all_levels_lk:
+            vals = collapsed_level_lick[lv]
+            lk_means.append(float(np.mean(vals)))
+            lk_sems.append(float(np.std(vals) / np.sqrt(len(vals))))
+            lk_ns.append(len(vals))
+        ax_lk.bar(x_lk, lk_means, yerr=lk_sems, capsize=4, color='steelblue',
+                  error_kw={'elinewidth': 1.2})
+        for xi, (m, n_val) in enumerate(zip(lk_means, lk_ns)):
+            if n_val > 0 and not np.isnan(m):
+                ax_lk.text(xi, m + (lk_sems[xi] if not np.isnan(lk_sems[xi]) else 0),
+                           f'n={n_val}', ha='center', va='bottom', fontsize=7)
+        ax_lk.set_xticks(x_lk)
+        ax_lk.set_xticklabels(
+            [lv.replace('level_', 'L').replace('.json', '') for lv in all_levels_lk],
+            rotation=45, ha='right',
+        )
+        ax_lk.set_title('Average Lick Rate by Level — All Mice')
+        ax_lk.set_xlabel('Level')
+        ax_lk.set_ylabel('Licks per Minute (Mean ± SEM)')
+        ax_lk.set_ylim(bottom=0)
+        ax_lk.tick_params(axis='both', direction='in')
+        ax_lk.spines['top'].set_visible(False)
+        ax_lk.spines['right'].set_visible(False)
+        level_lick_collapsed_fig.tight_layout()
+
+    # ── Lick rate by level split by condition ─────────────────────────────────
+    level_lick_condition_fig = None
+    if 'level_lick_condition' in selected_plots and condition_level_lick:
+        all_levels_lkc = sorted(
+            {lv for cd in condition_level_lick.values() for lv in cd},
+            key=sort_key,
+        )
+        conds_lkc = sorted(condition_level_lick.keys())
+        n_conds_lkc = len(conds_lkc)
+        level_lick_condition_fig, ax_lkc = plt.subplots(
+            figsize=(max(15, len(all_levels_lkc) * 0.8), 8))
+        bw_lkc = 0.8 / max(n_conds_lkc, 1)
+        x_lkc = np.arange(len(all_levels_lkc))
+        for ci, cond in enumerate(conds_lkc):
+            cdata = condition_level_lick[cond]
+            means_lkc, sems_lkc, ns_lkc = [], [], []
+            for lv in all_levels_lkc:
+                vals = cdata.get(lv, [])
+                if vals:
+                    means_lkc.append(float(np.mean(vals)))
+                    sems_lkc.append(float(np.std(vals) / np.sqrt(len(vals))))
+                    ns_lkc.append(len(vals))
+                else:
+                    means_lkc.append(np.nan)
+                    sems_lkc.append(np.nan)
+                    ns_lkc.append(0)
+            offset_lkc = (ci - (n_conds_lkc - 1) / 2) * bw_lkc
+            ax_lkc.bar(
+                x_lkc + offset_lkc, means_lkc,
+                width=bw_lkc, yerr=sems_lkc, capsize=4,
+                color=cond_color_map.get(cond, 'gray'),
+                label=cond,
+                error_kw={'elinewidth': 1.2},
+            )
+            for xi, (m, n_val) in enumerate(zip(means_lkc, ns_lkc)):
+                if n_val > 0 and not np.isnan(m):
+                    ax_lkc.text(
+                        x_lkc[xi] + offset_lkc,
+                        m + (sems_lkc[xi] if not np.isnan(sems_lkc[xi]) else 0),
+                        f'n={n_val}', ha='center', va='bottom', fontsize=7,
+                        color=cond_color_map.get(cond, 'gray'),
+                    )
+        ax_lkc.set_xticks(x_lkc)
+        ax_lkc.set_xticklabels(
+            [lv.replace('level_', 'L').replace('.json', '') for lv in all_levels_lkc],
+            rotation=45, ha='right',
+        )
+        ax_lkc.set_title('Average Lick Rate by Level — by Starting Condition')
+        ax_lkc.set_xlabel('Level')
+        ax_lkc.set_ylabel('Licks per Minute (Mean ± SEM)')
+        ax_lkc.set_ylim(bottom=0)
+        ax_lkc.tick_params(axis='both', direction='in')
+        ax_lkc.spines['top'].set_visible(False)
+        ax_lkc.spines['right'].set_visible(False)
+        ax_lkc.legend(title='Starting Condition')
+        level_lick_condition_fig.tight_layout()
+
+    return level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig
 
 def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv_path=None, selected_plots=None, save_lick_plots=False, output_dir=None):
     # Create dictionaries to map mouse names to markers and starting conditions
@@ -632,6 +753,8 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     reward_fig            = plt.figure(figsize=(12, 6)) if 'reward_count'       in selected_plots else None
     avg_reward_fig        = plt.figure(figsize=(12, 6)) if 'avg_reward'         in selected_plots else None
     sex_reward_fig        = plt.figure(figsize=(12, 6)) if 'sex_reward'         in selected_plots else None
+    avg_lick_rate_fig     = plt.figure(figsize=(12, 6)) if 'avg_lick_rate'      in selected_plots else None
+    sex_lick_rate_fig     = plt.figure(figsize=(12, 6)) if 'sex_lick_rate'      in selected_plots else None
     false_alarm_fig       = plt.figure(figsize=(12, 6)) if 'false_alarms'       in selected_plots else None
     correct_rejection_fig = plt.figure(figsize=(12, 6)) if 'correct_rejections' in selected_plots else None
     specificity_fig       = plt.figure(figsize=(12, 6)) if 'specificity'        in selected_plots else None
@@ -1277,6 +1400,108 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
         plt.legend()
 
+    # Build session-indexed per-mouse licks-per-minute arrays (no calendar gaps)
+    all_licks_per_min = np.full((len(data_files), max_sessions), np.nan)
+    male_licks_per_min   = []
+    female_licks_per_min = []
+
+    for i, result in enumerate(all_results):
+        df_r    = result['df']
+        lpm_row = np.full(max_sessions, np.nan)
+        for session_idx, (_, row) in enumerate(df_r.iterrows()):
+            if pd.notna(row['session_length']) and row['session_length'] > 0 and pd.notna(row['lick_count']):
+                lpm_row[session_idx] = row['lick_count'] / row['session_length']
+        all_licks_per_min[i] = lpm_row
+        mouse_name = result['mouse']
+        if markers[mouse_name] == 's':
+            male_licks_per_min.append(lpm_row)
+        else:
+            female_licks_per_min.append(lpm_row)
+
+    if male_licks_per_min:
+        male_licks_per_min = np.array(male_licks_per_min)
+    if female_licks_per_min:
+        female_licks_per_min = np.array(female_licks_per_min)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', RuntimeWarning)
+        n_all_lpm = np.sum(~np.isnan(all_licks_per_min), axis=0)
+        mean_licks_per_min = np.where(n_all_lpm > 0, np.nanmean(all_licks_per_min, axis=0), np.nan)
+        sem_licks_per_min  = np.where(n_all_lpm > 1,
+                                      np.nanstd(all_licks_per_min, axis=0) / np.sqrt(n_all_lpm),
+                                      0)
+
+    # Plot average licks/minute with SEM
+    if avg_lick_rate_fig is not None:
+        plt.figure(avg_lick_rate_fig.number)
+        day_numbers = np.arange(0, max_days)
+        plt.plot(day_numbers, mean_licks_per_min, '-', color='black', linewidth=2, label='Mean')
+        plt.fill_between(day_numbers,
+                         mean_licks_per_min - sem_licks_per_min,
+                         mean_licks_per_min + sem_licks_per_min,
+                         color='gray', alpha=0.3, label='SEM')
+        plt.title('Average Lick Rate Across Mice')
+        plt.xlabel('Day')
+        plt.ylabel('Licks per Minute (Mean \u00b1 SEM)')
+        plt.grid(False)
+        ax = plt.gca()
+        ax.tick_params(axis='both', direction='in')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.set_ylim(bottom=0)
+        ax.set_xlim(left=0, right=max_days - 1)
+        ax.xaxis.set_major_locator(plt.MultipleLocator(5))
+        ax.xaxis.set_minor_locator(plt.MultipleLocator(1))
+        ax.tick_params(axis='x', which='minor', direction='in')
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+        plt.legend()
+
+    # Plot sex-specific average licks/minute with SEM
+    if sex_lick_rate_fig is not None:
+        plt.figure(sex_lick_rate_fig.number)
+        day_numbers = np.arange(0, max_days)
+        if len(male_licks_per_min) > 0:
+            if np.any(~np.isnan(male_licks_per_min)):
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    n_male_lpm = np.sum(~np.isnan(male_licks_per_min), axis=0)
+                    mean_male_lpm = np.where(n_male_lpm > 0, np.nanmean(male_licks_per_min, axis=0), np.nan)
+                    sem_male_lpm  = np.where(n_male_lpm > 1,
+                                             np.nanstd(male_licks_per_min, axis=0) / np.sqrt(n_male_lpm),
+                                             0)
+                plt.plot(day_numbers, mean_male_lpm, '-', color='green', linewidth=2,
+                         label=f'Male (n={len(male_licks_per_min)})')
+                plt.fill_between(day_numbers, mean_male_lpm - sem_male_lpm,
+                                 mean_male_lpm + sem_male_lpm, color='green', alpha=0.2)
+        if len(female_licks_per_min) > 0:
+            if np.any(~np.isnan(female_licks_per_min)):
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    n_female_lpm = np.sum(~np.isnan(female_licks_per_min), axis=0)
+                    mean_female_lpm = np.where(n_female_lpm > 0, np.nanmean(female_licks_per_min, axis=0), np.nan)
+                    sem_female_lpm  = np.where(n_female_lpm > 1,
+                                               np.nanstd(female_licks_per_min, axis=0) / np.sqrt(n_female_lpm),
+                                               0)
+                plt.plot(day_numbers, mean_female_lpm, '-', color='purple', linewidth=2,
+                         label=f'Female (n={len(female_licks_per_min)})')
+                plt.fill_between(day_numbers, mean_female_lpm - sem_female_lpm,
+                                 mean_female_lpm + sem_female_lpm, color='purple', alpha=0.2)
+        plt.title('Sex-Specific Average Lick Rate')
+        plt.xlabel('Training Day')
+        plt.ylabel('Licks per Minute (Mean \u00b1 SEM)')
+        plt.grid(False)
+        ax = plt.gca()
+        ax.tick_params(axis='both', direction='in')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.set_ylim(bottom=0)
+        ax.set_xlim(left=0, right=max_days - 1)
+        ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
+        ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
+        ax.tick_params(axis='x', which='minor', direction='in')
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+        plt.legend()
+
     # Create a new figure for condition-based analysis
     condition_reward_fig = plt.figure(figsize=(12, 6)) if 'condition_reward' in selected_plots else None
     if condition_reward_fig is not None:
@@ -1437,6 +1662,53 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
         plt.legend()
 
+    # Create a new figure for condition-based lick rate analysis
+    condition_lick_rate_fig = plt.figure(figsize=(12, 6)) if 'condition_lick_rate' in selected_plots else None
+    if condition_lick_rate_fig is not None:
+        condition_lick_rate_groups = {}
+        for result in all_results:
+            condition = result['starting_condition']
+            if condition not in condition_lick_rate_groups:
+                condition_lick_rate_groups[condition] = []
+            df_r = result['df']
+            lpm_array = np.full(max_sessions, np.nan)
+            for session_idx, (_, row) in enumerate(df_r.iterrows()):
+                if pd.notna(row['session_length']) and row['session_length'] > 0 and pd.notna(row['lick_count']):
+                    lpm_array[session_idx] = row['lick_count'] / row['session_length']
+            condition_lick_rate_groups[condition].append(lpm_array)
+
+        day_numbers = np.arange(0, max_sessions)
+        for condition, lpm_list in condition_lick_rate_groups.items():
+            color = condition_color_map[condition]
+            padded_lpms = np.array(lpm_list)
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', RuntimeWarning)
+                n_mice = np.sum(~np.isnan(padded_lpms), axis=0)
+                mean_lpms = np.where(n_mice > 0, np.nanmean(padded_lpms, axis=0), np.nan)
+                sem_lpms  = np.where(n_mice > 1,
+                                     np.nanstd(padded_lpms, axis=0) / np.sqrt(n_mice),
+                                     0)
+            plt.plot(day_numbers, mean_lpms, '-', color=color, linewidth=2,
+                     label=f'{condition} (n={len(lpm_list)})')
+            plt.fill_between(day_numbers, mean_lpms - sem_lpms, mean_lpms + sem_lpms,
+                             color=color, alpha=0.2)
+
+        plt.title('Average Lick Rate by Starting Condition')
+        plt.xlabel('Training Day')
+        plt.ylabel('Licks per Minute (Mean \u00b1 SEM)')
+        plt.grid(False)
+        ax = plt.gca()
+        ax.tick_params(axis='both', direction='in')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.set_ylim(bottom=0)
+        ax.set_xlim(left=0, right=max_days - 1)
+        ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
+        ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
+        ax.tick_params(axis='x', which='minor', direction='in')
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+        plt.legend()
+
     # Create collapsed condition bar plot (one average rpm per mouse, collapsed across all days)
     condition_bar_fig = None
     if 'condition_bar' in selected_plots:
@@ -1528,10 +1800,60 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax_sbar.spines['right'].set_visible(False)
         condition_speed_bar_fig.tight_layout()
 
+    # Create collapsed condition bar plot for lick rate
+    condition_lick_bar_fig = None
+    if 'condition_lick_bar' in selected_plots:
+        condition_lick_bar_fig, ax_lbar = plt.subplots(figsize=(8, 6))
+
+        condition_mouse_lpms: dict[str, list] = {}
+        for result in all_results:
+            condition = result['starting_condition']
+            df_r = result['df']
+            session_lpms = []
+            for _, row in df_r.iterrows():
+                if pd.notna(row['session_length']) and row['session_length'] > 0 and pd.notna(row['lick_count']):
+                    session_lpms.append(row['lick_count'] / row['session_length'])
+            if session_lpms:
+                if condition not in condition_mouse_lpms:
+                    condition_mouse_lpms[condition] = []
+                condition_mouse_lpms[condition].append((result['mouse'], float(np.mean(session_lpms))))
+
+        conditions_sorted_lbar = sorted(condition_mouse_lpms.keys())
+        x_pos_lbar = np.arange(len(conditions_sorted_lbar))
+
+        rng_lbar = np.random.default_rng(seed=42)
+        for ci, condition in enumerate(conditions_sorted_lbar):
+            entries = condition_mouse_lpms[condition]
+            mouse_lpms = [v for _, v in entries]
+            mean_lpm = float(np.mean(mouse_lpms))
+            sem_lpm  = float(np.std(mouse_lpms, ddof=1) / np.sqrt(len(mouse_lpms))) if len(mouse_lpms) > 1 else 0.0
+            color = condition_color_map[condition]
+            ax_lbar.bar(ci, mean_lpm, width=0.5, color=color, alpha=0.8,
+                        yerr=sem_lpm, capsize=7, error_kw={'elinewidth': 1.5, 'capthick': 1.5})
+            jitter = (rng_lbar.random(len(mouse_lpms)) - 0.5) * 0.22
+            for j, (mouse_name_lbar, lpm_val) in enumerate(entries):
+                ax_lbar.plot(ci + jitter[j], lpm_val, 'o',
+                             color='white', markeredgecolor=color,
+                             markeredgewidth=1.8, markersize=7, zorder=3)
+
+        ax_lbar.set_xticks(x_pos_lbar)
+        ax_lbar.set_xticklabels(conditions_sorted_lbar)
+        ax_lbar.set_title('Average Lick Rate by Starting Condition\n(collapsed across all sessions)')
+        ax_lbar.set_xlabel('Starting Condition')
+        ax_lbar.set_ylabel('Licks per Minute (Mean \u00b1 SEM)')
+        ax_lbar.set_ylim(bottom=0)
+        ax_lbar.tick_params(axis='both', direction='in')
+        ax_lbar.spines['top'].set_visible(False)
+        ax_lbar.spines['right'].set_visible(False)
+        condition_lick_bar_fig.tight_layout()
+
     # Create the level-based analysis plots
     level_reward_fig = level_speed_collapsed_fig = level_speed_condition_fig = None
-    if any(k in selected_plots for k in ('levels', 'level_speed', 'level_speed_condition')):
-        level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig = analyze_levels(
+    level_lick_collapsed_fig = level_lick_condition_fig = None
+    if any(k in selected_plots for k in ('levels', 'level_speed', 'level_speed_condition',
+                                          'level_lick', 'level_lick_condition')):
+        level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, \
+        level_lick_collapsed_fig, level_lick_condition_fig = analyze_levels(
             data_files, transitions_csv_path, animal_conditions=conditions,
             selected_plots=selected_plots,
         )
@@ -1590,7 +1912,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         f.write(report_text + "\n")
     print(f"\nMissing data report saved to: {report_path}")
 
-    return speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, condition_speed_fig, condition_lick_fig, condition_bar_fig, condition_speed_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, all_results
+    return speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_lick_fig, condition_lick_rate_fig, condition_bar_fig, condition_speed_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, all_results
 
 def main():
     # Create and hide the root window
@@ -1647,7 +1969,8 @@ def main():
 
         # Select transitions CSV only if a level plot was requested
         transitions_csv_path = None
-        if any(k in selected_plots for k in ('levels', 'level_speed', 'level_speed_condition')):
+        if any(k in selected_plots for k in ('levels', 'level_speed', 'level_speed_condition',
+                                              'level_lick', 'level_lick_condition')):
             transitions_csv_path = filedialog.askopenfilename(
                 title='Select transitions CSV (from level_sorter.py) — cancel to skip level plot',
                 filetypes=[('CSV files', '*.csv'), ('All files', '*.*')],
@@ -1679,7 +2002,7 @@ def main():
                 continue
         
         # Analyze data and plot results
-        speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, condition_speed_fig, condition_lick_fig, condition_bar_fig, condition_speed_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, all_results = analyze_mouse_data(
+        speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_lick_fig, condition_lick_rate_fig, condition_bar_fig, condition_speed_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, all_results = analyze_mouse_data(
             file_paths, markers, starting_conditions,
             transitions_csv_path=transitions_csv_path,
             selected_plots=selected_plots,
@@ -1690,9 +2013,11 @@ def main():
             speed_fig, sensitivity_fig, lick_fig, reward_fig,
             false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig,
             avg_reward_fig, sex_reward_fig,
-            condition_reward_fig, condition_speed_fig, condition_lick_fig,
-            condition_bar_fig, condition_speed_bar_fig,
+            avg_lick_rate_fig, sex_lick_rate_fig,
+            condition_reward_fig, condition_speed_fig, condition_lick_fig, condition_lick_rate_fig,
+            condition_bar_fig, condition_speed_bar_fig, condition_lick_bar_fig,
             level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig,
+            level_lick_collapsed_fig, level_lick_condition_fig,
         ] if f is not None]
 
         # Configure all figures (add legend only when labeled artists exist, then tight layout)
@@ -1729,14 +2054,20 @@ def main():
             (dprime_fig,            'dprime',              "d' plot"),
             (avg_reward_fig,        'avg_reward',          'Average rewards plot'),
             (sex_reward_fig,        'sex_reward',          'Sex-specific average rewards plot'),
+            (avg_lick_rate_fig,     'avg_lick_rate',       'Average lick rate plot'),
+            (sex_lick_rate_fig,     'sex_lick_rate',       'Sex-specific lick rate plot'),
             (condition_reward_fig,  'condition_reward',    'Condition-based average rewards plot'),
             (condition_speed_fig,   'condition_speed',     'Condition-based average speed plot'),
             (condition_lick_fig,    'condition_lick',      'Condition-based average lick count plot'),
+            (condition_lick_rate_fig, 'condition_lick_rate', 'Condition-based lick rate plot'),
             (condition_bar_fig,      'condition_bar',       'Condition collapsed bar chart'),
             (condition_speed_bar_fig,'condition_speed_bar', 'Condition speed collapsed bar chart'),
+            (condition_lick_bar_fig, 'condition_lick_bar',  'Condition lick rate collapsed bar chart'),
             (level_reward_fig,              'level_reward',          'Level-based average rewards plot'),
             (level_speed_collapsed_fig,     'level_speed',           'Level-based average speed — collapsed'),
             (level_speed_condition_fig,     'level_speed_condition', 'Level-based average speed — by condition'),
+            (level_lick_collapsed_fig,      'level_lick',            'Level-based average lick rate — collapsed'),
+            (level_lick_condition_fig,      'level_lick_condition',  'Level-based average lick rate — by condition'),
         ]
 
         for fig, name, title in plot_configs:
