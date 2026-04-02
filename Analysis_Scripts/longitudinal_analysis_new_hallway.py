@@ -207,8 +207,8 @@ _ALL_PLOT_KEYS = {
     'speed', 'sensitivity', 'lick_count', 'reward_count',
     'false_alarms', 'correct_rejections', 'specificity', 'dprime',
     'avg_reward', 'sex_reward',
-    'condition_reward', 'condition_speed', 'condition_lick', 'condition_bar',
-    'levels',
+    'condition_reward', 'condition_speed', 'condition_lick', 'condition_bar', 'condition_speed_bar',
+    'levels', 'level_speed', 'level_speed_condition',
 }
 
 _PLOT_LABELS = [
@@ -226,7 +226,10 @@ _PLOT_LABELS = [
     ('condition_speed',     'Condition: Speed over time'),
     ('condition_lick',      'Condition: Lick count over time'),
     ('condition_bar',       'Condition: Reward rate — collapsed bar chart'),
+    ('condition_speed_bar', 'Condition: Average speed — collapsed bar chart'),
     ('levels',              'Level: Reward rate by level (requires transitions CSV)'),
+    ('level_speed',           'Level: Average speed by level — collapsed (requires transitions CSV)'),
+    ('level_speed_condition', 'Level: Average speed by level — by condition (requires transitions CSV)'),
 ]
 
 
@@ -267,7 +270,7 @@ def _ask_plot_selection(root):
     return frozenset(key for key, var in vars_.items() if var.get())
 
 
-def analyze_levels(data_files, transitions_csv_path, animal_conditions=None):
+def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, selected_plots=None):
     """Analyze rewards/min for each level across all mice, split by starting condition.
 
     Uses a transitions CSV (produced by level_sorter.py) to slice each session's
@@ -296,13 +299,13 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None):
     # Load transitions CSV -------------------------------------------------------
     if not transitions_csv_path:
         print("  [WARN] No transitions CSV provided — level plot will be empty.")
-        return plt.figure(figsize=(15, 8))
+        return plt.figure(figsize=(15, 8)), None, None
     try:
         transitions_df = pd.read_csv(transitions_csv_path)
         transitions_df['date'] = pd.to_datetime(transitions_df['date'])
     except Exception as e:
         print(f"  [ERROR] Cannot read transitions CSV: {e}")
-        return plt.figure(figsize=(15, 8))
+        return plt.figure(figsize=(15, 8)), None, None
 
     # Build lookup (animal_id, date_normalised) -> {trial_log, capacitive} ------
     session_lookup = {}
@@ -319,6 +322,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None):
             session_lookup[(animal_id, date_key)] = {
                 'trial_log':  row.get('trial_log'),
                 'capacitive': row.get('capacitive'),
+                'treadmill':  row.get('treadmill'),
             }
 
     # Accumulate rewards and time per (animal, level) across all sessions ---------
@@ -332,6 +336,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None):
                 continue
             trial_log_path  = sess_info.get('trial_log')
             capacitive_path = sess_info.get('capacitive')
+            treadmill_path  = sess_info.get('treadmill')
 
             if not isinstance(trial_log_path, str) or pd.isna(trial_log_path):
                 continue
@@ -355,6 +360,16 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None):
             if session_end_time is None:
                 tc_vals = tl['texture_change_time'].dropna()
                 session_end_time = float(tc_vals.max()) if len(tc_vals) else None
+
+            # Load treadmill speed data for this session -----------------------
+            treadmill_df = None
+            if isinstance(treadmill_path, str) and not pd.isna(treadmill_path):
+                try:
+                    tm = pd.read_csv(treadmill_path)
+                    if 'global_time' in tm.columns and 'speed' in tm.columns:
+                        treadmill_df = tm[['global_time', 'speed']].dropna()
+                except Exception:
+                    pass
 
             levels   = session_group['level'].tolist()
             trans_ts = session_group['transition_ts'].tolist()
@@ -393,18 +408,30 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None):
                 key = (animal_id, level)
                 if key not in animal_level_accum:
                     animal_level_accum[key] = {'rewards': 0, 'duration_min': 0.0,
-                                               'condition': condition}
+                                               'condition': condition,
+                                               'speed_sum': 0.0, 'speed_count': 0}
                 animal_level_accum[key]['rewards']      += count
                 animal_level_accum[key]['duration_min'] += duration_min
+                if treadmill_df is not None and len(treadmill_df) > 0:
+                    mask = (treadmill_df['global_time'] >= start_t) & (treadmill_df['global_time'] < end_t)
+                    lvl_speeds = treadmill_df.loc[mask, 'speed'].values / 10.0
+                    animal_level_accum[key]['speed_sum']   += float(np.sum(lvl_speeds))
+                    animal_level_accum[key]['speed_count'] += len(lvl_speeds)
 
-    # Collapse accumulators: one rpm per (animal, level) -------------------------
+    # Collapse accumulators: one rpm and mean speed per (animal, level) ----------
     # condition_level_data[condition][level] = [rpm_animal1, rpm_animal2, ...]
     condition_level_data: dict[str, dict[str, list[float]]] = {}
+    condition_level_speed: dict[str, dict[str, list[float]]] = {}
+    collapsed_level_speed: dict[str, list[float]] = {}
     for (animal_id, level), accum in animal_level_accum.items():
+        condition = accum['condition']
         if accum['duration_min'] > 0:
-            rpm       = accum['rewards'] / accum['duration_min']
-            condition = accum['condition']
+            rpm = accum['rewards'] / accum['duration_min']
             condition_level_data.setdefault(condition, {}).setdefault(level, []).append(rpm)
+        if accum['speed_count'] > 0:
+            mean_spd = accum['speed_sum'] / accum['speed_count']
+            condition_level_speed.setdefault(condition, {}).setdefault(level, []).append(mean_spd)
+            collapsed_level_speed.setdefault(level, []).append(mean_spd)
 
     # Sort levels ----------------------------------------------------------------
     def sort_key(x):
@@ -428,7 +455,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None):
     cond_color_map = {c: cond_colors[i] for i, c in enumerate(conditions_sorted)}
 
     # Grouped bar chart ----------------------------------------------------------
-    level_fig, ax = plt.subplots(figsize=(max(15, n_levels * 0.8), 8))
+    level_reward_fig, ax = plt.subplots(figsize=(max(15, n_levels * 0.8), 8))
 
     bar_width   = 0.8 / max(n_conditions, 1)
     x_positions = np.arange(n_levels)
@@ -484,8 +511,102 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None):
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     ax.legend(title='Starting Condition')
-    level_fig.tight_layout()
-    return level_fig
+    level_reward_fig.tight_layout()
+
+    if selected_plots is None:
+        selected_plots = set(_ALL_PLOT_KEYS)
+
+    # ── Collapsed speed by level (all mice) ───────────────────────────────────
+    level_speed_collapsed_fig = None
+    if 'level_speed' in selected_plots and collapsed_level_speed:
+        all_levels_spd = sorted(collapsed_level_speed.keys(), key=sort_key)
+        level_speed_collapsed_fig, ax_sc = plt.subplots(
+            figsize=(max(15, len(all_levels_spd) * 0.8), 8))
+        x_sc = np.arange(len(all_levels_spd))
+        sc_means, sc_sems, sc_ns = [], [], []
+        for lv in all_levels_spd:
+            vals = collapsed_level_speed[lv]
+            sc_means.append(float(np.mean(vals)))
+            sc_sems.append(float(np.std(vals) / np.sqrt(len(vals))))
+            sc_ns.append(len(vals))
+        ax_sc.bar(x_sc, sc_means, yerr=sc_sems, capsize=4, color='steelblue',
+                  error_kw={'elinewidth': 1.2})
+        for xi, (m, n_val) in enumerate(zip(sc_means, sc_ns)):
+            if n_val > 0 and not np.isnan(m):
+                ax_sc.text(xi, m + (sc_sems[xi] if not np.isnan(sc_sems[xi]) else 0),
+                           f'n={n_val}', ha='center', va='bottom', fontsize=7)
+        ax_sc.set_xticks(x_sc)
+        ax_sc.set_xticklabels(
+            [lv.replace('level_', 'L').replace('.json', '') for lv in all_levels_spd],
+            rotation=45, ha='right',
+        )
+        ax_sc.set_title('Average Speed by Level — All Mice')
+        ax_sc.set_xlabel('Level')
+        ax_sc.set_ylabel('Average Speed cm/s (Mean ± SEM)')
+        ax_sc.set_ylim(bottom=0)
+        ax_sc.tick_params(axis='both', direction='in')
+        ax_sc.spines['top'].set_visible(False)
+        ax_sc.spines['right'].set_visible(False)
+        level_speed_collapsed_fig.tight_layout()
+
+    # ── Speed by level split by condition ────────────────────────────────────
+    level_speed_condition_fig = None
+    if 'level_speed_condition' in selected_plots and condition_level_speed:
+        all_levels_sc = sorted(
+            {lv for cd in condition_level_speed.values() for lv in cd},
+            key=sort_key,
+        )
+        conds_sc = sorted(condition_level_speed.keys())
+        n_conds_sc = len(conds_sc)
+        level_speed_condition_fig, ax_scc = plt.subplots(
+            figsize=(max(15, len(all_levels_sc) * 0.8), 8))
+        bw_sc = 0.8 / max(n_conds_sc, 1)
+        x_scc = np.arange(len(all_levels_sc))
+        for ci, cond in enumerate(conds_sc):
+            cdata = condition_level_speed[cond]
+            means_c, sems_c, ns_c = [], [], []
+            for lv in all_levels_sc:
+                vals = cdata.get(lv, [])
+                if vals:
+                    means_c.append(float(np.mean(vals)))
+                    sems_c.append(float(np.std(vals) / np.sqrt(len(vals))))
+                    ns_c.append(len(vals))
+                else:
+                    means_c.append(np.nan)
+                    sems_c.append(np.nan)
+                    ns_c.append(0)
+            offset_c = (ci - (n_conds_sc - 1) / 2) * bw_sc
+            ax_scc.bar(
+                x_scc + offset_c, means_c,
+                width=bw_sc, yerr=sems_c, capsize=4,
+                color=cond_color_map.get(cond, 'gray'),
+                label=cond,
+                error_kw={'elinewidth': 1.2},
+            )
+            for xi, (m, n_val) in enumerate(zip(means_c, ns_c)):
+                if n_val > 0 and not np.isnan(m):
+                    ax_scc.text(
+                        x_scc[xi] + offset_c,
+                        m + (sems_c[xi] if not np.isnan(sems_c[xi]) else 0),
+                        f'n={n_val}', ha='center', va='bottom', fontsize=7,
+                        color=cond_color_map.get(cond, 'gray'),
+                    )
+        ax_scc.set_xticks(x_scc)
+        ax_scc.set_xticklabels(
+            [lv.replace('level_', 'L').replace('.json', '') for lv in all_levels_sc],
+            rotation=45, ha='right',
+        )
+        ax_scc.set_title('Average Speed by Level — by Starting Condition')
+        ax_scc.set_xlabel('Level')
+        ax_scc.set_ylabel('Average Speed cm/s (Mean ± SEM)')
+        ax_scc.set_ylim(bottom=0)
+        ax_scc.tick_params(axis='both', direction='in')
+        ax_scc.spines['top'].set_visible(False)
+        ax_scc.spines['right'].set_visible(False)
+        ax_scc.legend(title='Starting Condition')
+        level_speed_condition_fig.tight_layout()
+
+    return level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig
 
 def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv_path=None, selected_plots=None, save_lick_plots=False, output_dir=None):
     # Create dictionaries to map mouse names to markers and starting conditions
@@ -1363,9 +1484,57 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax_bar.spines['right'].set_visible(False)
         condition_bar_fig.tight_layout()
 
-    # Create the level-based analysis plot
-    level_fig = analyze_levels(data_files, transitions_csv_path, animal_conditions=conditions) \
-        if 'levels' in selected_plots else None
+    # Create collapsed condition bar plot for speed
+    condition_speed_bar_fig = None
+    if 'condition_speed_bar' in selected_plots:
+        condition_speed_bar_fig, ax_sbar = plt.subplots(figsize=(8, 6))
+
+        condition_mouse_speeds: dict[str, list] = {}
+        for result in all_results:
+            condition = result['starting_condition']
+            df_r = result['df']
+            session_speeds = pd.to_numeric(df_r['average_speed'], errors='coerce').dropna().tolist()
+            if session_speeds:
+                if condition not in condition_mouse_speeds:
+                    condition_mouse_speeds[condition] = []
+                condition_mouse_speeds[condition].append((result['mouse'], float(np.mean(session_speeds))))
+
+        conditions_sorted_sbar = sorted(condition_mouse_speeds.keys())
+        x_pos_sbar = np.arange(len(conditions_sorted_sbar))
+
+        rng_sbar = np.random.default_rng(seed=42)
+        for ci, condition in enumerate(conditions_sorted_sbar):
+            entries = condition_mouse_speeds[condition]
+            mouse_speeds = [v for _, v in entries]
+            mean_spd = float(np.mean(mouse_speeds))
+            sem_spd  = float(np.std(mouse_speeds, ddof=1) / np.sqrt(len(mouse_speeds))) if len(mouse_speeds) > 1 else 0.0
+            color = condition_color_map[condition]
+            ax_sbar.bar(ci, mean_spd, width=0.5, color=color, alpha=0.8,
+                        yerr=sem_spd, capsize=7, error_kw={'elinewidth': 1.5, 'capthick': 1.5})
+            jitter = (rng_sbar.random(len(mouse_speeds)) - 0.5) * 0.22
+            for j, (mouse_name_sbar, spd_val) in enumerate(entries):
+                ax_sbar.plot(ci + jitter[j], spd_val, 'o',
+                             color='white', markeredgecolor=color,
+                             markeredgewidth=1.8, markersize=7, zorder=3)
+
+        ax_sbar.set_xticks(x_pos_sbar)
+        ax_sbar.set_xticklabels(conditions_sorted_sbar)
+        ax_sbar.set_title('Average Speed by Starting Condition\n(collapsed across all sessions)')
+        ax_sbar.set_xlabel('Starting Condition')
+        ax_sbar.set_ylabel('Average Speed cm/s (Mean \u00b1 SEM)')
+        ax_sbar.set_ylim(bottom=0)
+        ax_sbar.tick_params(axis='both', direction='in')
+        ax_sbar.spines['top'].set_visible(False)
+        ax_sbar.spines['right'].set_visible(False)
+        condition_speed_bar_fig.tight_layout()
+
+    # Create the level-based analysis plots
+    level_reward_fig = level_speed_collapsed_fig = level_speed_condition_fig = None
+    if any(k in selected_plots for k in ('levels', 'level_speed', 'level_speed_condition')):
+        level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig = analyze_levels(
+            data_files, transitions_csv_path, animal_conditions=conditions,
+            selected_plots=selected_plots,
+        )
 
     # ── Missing data report ───────────────────────────────────────────────────
     all_session_dates = set(
@@ -1421,7 +1590,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         f.write(report_text + "\n")
     print(f"\nMissing data report saved to: {report_path}")
 
-    return speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, condition_speed_fig, condition_lick_fig, condition_bar_fig, level_fig, all_results
+    return speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, condition_speed_fig, condition_lick_fig, condition_bar_fig, condition_speed_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, all_results
 
 def main():
     # Create and hide the root window
@@ -1476,9 +1645,9 @@ def main():
             print("No plots selected. Exiting...")
             return
 
-        # Select transitions CSV only if the level plot was requested
+        # Select transitions CSV only if a level plot was requested
         transitions_csv_path = None
-        if 'levels' in selected_plots:
+        if any(k in selected_plots for k in ('levels', 'level_speed', 'level_speed_condition')):
             transitions_csv_path = filedialog.askopenfilename(
                 title='Select transitions CSV (from level_sorter.py) — cancel to skip level plot',
                 filetypes=[('CSV files', '*.csv'), ('All files', '*.*')],
@@ -1510,7 +1679,7 @@ def main():
                 continue
         
         # Analyze data and plot results
-        speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, condition_speed_fig, condition_lick_fig, condition_bar_fig, level_fig, all_results = analyze_mouse_data(
+        speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, condition_speed_fig, condition_lick_fig, condition_bar_fig, condition_speed_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, all_results = analyze_mouse_data(
             file_paths, markers, starting_conditions,
             transitions_csv_path=transitions_csv_path,
             selected_plots=selected_plots,
@@ -1522,7 +1691,8 @@ def main():
             false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig,
             avg_reward_fig, sex_reward_fig,
             condition_reward_fig, condition_speed_fig, condition_lick_fig,
-            condition_bar_fig, level_fig,
+            condition_bar_fig, condition_speed_bar_fig,
+            level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig,
         ] if f is not None]
 
         # Configure all figures (add legend only when labeled artists exist, then tight layout)
@@ -1542,46 +1712,45 @@ def main():
             fig.show()
         plt.show()
 
-        # Ask if user wants to save the plots
-        save = input("Would you like to save the plots? (yes/no): ").lower().strip()
-        if save.startswith('y'):
-            # Set common plot parameters
-            plt.rcParams['font.family'] = 'sans-serif'
-            plt.rcParams['font.sans-serif'] = ['Arial']
-            plt.rcParams['svg.fonttype'] = 'none'
+        # Save all selected plots automatically
+        plt.rcParams['font.family'] = 'sans-serif'
+        plt.rcParams['font.sans-serif'] = ['Arial']
+        plt.rcParams['svg.fonttype'] = 'none'
 
-            # Plot configurations to save (skip None figures)
-            plot_configs = [
-                (speed_fig,             'speed',               'Speed plot'),
-                (sensitivity_fig,       'sensitivity',         'Sensitivity plot'),
-                (lick_fig,              'lick_count',          'Lick count plot'),
-                (reward_fig,            'reward_count',        'Reward count plot'),
-                (false_alarm_fig,       'false_alarms',        'False alarms plot'),
-                (correct_rejection_fig, 'correct_rejections',  'Correct rejections plot'),
-                (specificity_fig,       'specificity',         'Specificity plot'),
-                (dprime_fig,            'dprime',              "d' plot"),
-                (avg_reward_fig,        'avg_reward',          'Average rewards plot'),
-                (sex_reward_fig,        'sex_reward',          'Sex-specific average rewards plot'),
-                (condition_reward_fig,  'condition_reward',    'Condition-based average rewards plot'),
-                (condition_speed_fig,   'condition_speed',     'Condition-based average speed plot'),
-                (condition_lick_fig,    'condition_lick',      'Condition-based average lick count plot'),
-                (condition_bar_fig,     'condition_bar',       'Condition collapsed bar chart'),
-                (level_fig,             'level_reward',        'Level-based average rewards plot'),
-            ]
+        # Plot configurations to save (skip None figures)
+        plot_configs = [
+            (speed_fig,             'speed',               'Speed plot'),
+            (sensitivity_fig,       'sensitivity',         'Sensitivity plot'),
+            (lick_fig,              'lick_count',          'Lick count plot'),
+            (reward_fig,            'reward_count',        'Reward count plot'),
+            (false_alarm_fig,       'false_alarms',        'False alarms plot'),
+            (correct_rejection_fig, 'correct_rejections',  'Correct rejections plot'),
+            (specificity_fig,       'specificity',         'Specificity plot'),
+            (dprime_fig,            'dprime',              "d' plot"),
+            (avg_reward_fig,        'avg_reward',          'Average rewards plot'),
+            (sex_reward_fig,        'sex_reward',          'Sex-specific average rewards plot'),
+            (condition_reward_fig,  'condition_reward',    'Condition-based average rewards plot'),
+            (condition_speed_fig,   'condition_speed',     'Condition-based average speed plot'),
+            (condition_lick_fig,    'condition_lick',      'Condition-based average lick count plot'),
+            (condition_bar_fig,      'condition_bar',       'Condition collapsed bar chart'),
+            (condition_speed_bar_fig,'condition_speed_bar', 'Condition speed collapsed bar chart'),
+            (level_reward_fig,              'level_reward',          'Level-based average rewards plot'),
+            (level_speed_collapsed_fig,     'level_speed',           'Level-based average speed — collapsed'),
+            (level_speed_condition_fig,     'level_speed_condition', 'Level-based average speed — by condition'),
+        ]
 
-            # Save all plots
-            for fig, name, title in plot_configs:
-                if fig is None:
-                    continue
-                save_path = filedialog.asksaveasfilename(
-                    defaultextension=".svg",
-                    filetypes=[("SVG files", "*.svg"), ("All files", "*.*")],
-                    title=f"Save {title} as",
-                    initialfile=f"mouse_{name}_comparison_{len(file_paths)}mice.svg"
-                )
-                if save_path:
-                    fig.savefig(save_path, bbox_inches='tight', format='svg')
-                    print(f"{title} saved to: {save_path}")
+        for fig, name, title in plot_configs:
+            if fig is None:
+                continue
+            save_path = filedialog.asksaveasfilename(
+                defaultextension=".svg",
+                filetypes=[("SVG files", "*.svg"), ("All files", "*.*")],
+                title=f"Save {title} as",
+                initialfile=f"mouse_{name}_comparison_{len(file_paths)}mice.svg"
+            )
+            if save_path:
+                fig.savefig(save_path, bbox_inches='tight', format='svg')
+                print(f"{title} saved to: {save_path}")
     else:
         print("No file selected. Exiting...")
 if __name__ == "__main__":
