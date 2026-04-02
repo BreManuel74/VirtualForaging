@@ -202,6 +202,71 @@ def test_matching_logic(trial_log_path):
         print("\nNo valid zones found!")
         print("="*80 + "\n")
 
+# ── Plot selection ────────────────────────────────────────────────────────────
+_ALL_PLOT_KEYS = {
+    'speed', 'sensitivity', 'lick_count', 'reward_count',
+    'false_alarms', 'correct_rejections', 'specificity', 'dprime',
+    'avg_reward', 'sex_reward',
+    'condition_reward', 'condition_speed', 'condition_lick', 'condition_bar',
+    'levels',
+}
+
+_PLOT_LABELS = [
+    ('speed',               'Individual: Average speed over time'),
+    ('sensitivity',         'Individual: Sensitivity over time'),
+    ('lick_count',          'Individual: Lick count over time'),
+    ('reward_count',        'Individual: Reward count over time'),
+    ('false_alarms',        'Individual: False alarms over time'),
+    ('correct_rejections',  'Individual: Correct rejections over time'),
+    ('specificity',         'Individual: Specificity over time'),
+    ('dprime',              "Individual: d' over time"),
+    ('avg_reward',          'Aggregate: Average reward rate across all mice'),
+    ('sex_reward',          'Aggregate: Sex-specific average reward rate'),
+    ('condition_reward',    'Condition: Reward rate over time (line)'),
+    ('condition_speed',     'Condition: Speed over time'),
+    ('condition_lick',      'Condition: Lick count over time'),
+    ('condition_bar',       'Condition: Reward rate — collapsed bar chart'),
+    ('levels',              'Level: Reward rate by level (requires transitions CSV)'),
+]
+
+
+def _ask_plot_selection(root):
+    """Show a checkbox dialog and return the frozenset of selected plot keys."""
+    dialog = tk.Toplevel(root)
+    dialog.title('Select Plots to Generate')
+    dialog.resizable(False, False)
+    dialog.grab_set()
+
+    tk.Label(dialog, text='Select which plots to generate:',
+             font=('Arial', 11, 'bold')).pack(anchor='w', padx=14, pady=(12, 4))
+
+    vars_ = {}
+    for key, label in _PLOT_LABELS:
+        var = tk.BooleanVar(value=True)
+        vars_[key] = var
+        tk.Checkbutton(dialog, text=label, variable=var, anchor='w').pack(
+            fill='x', padx=22, pady=1)
+
+    btn_frame = tk.Frame(dialog)
+    btn_frame.pack(fill='x', padx=14, pady=(8, 12))
+
+    def _select_all():
+        for v in vars_.values():
+            v.set(True)
+
+    def _deselect_all():
+        for v in vars_.values():
+            v.set(False)
+
+    tk.Button(btn_frame, text='Select All',   command=_select_all).pack(side='left',  padx=4)
+    tk.Button(btn_frame, text='Deselect All', command=_deselect_all).pack(side='left', padx=4)
+    tk.Button(btn_frame, text='OK', command=dialog.destroy,
+              default='active').pack(side='right', padx=4)
+
+    root.wait_window(dialog)
+    return frozenset(key for key, var in vars_.items() if var.get())
+
+
 def analyze_levels(data_files, transitions_csv_path, animal_conditions=None):
     """Analyze rewards/min for each level across all mice, split by starting condition.
 
@@ -422,11 +487,13 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None):
     level_fig.tight_layout()
     return level_fig
 
-def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv_path=None, save_lick_plots=False, output_dir=None):
+def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv_path=None, selected_plots=None, save_lick_plots=False, output_dir=None):
     # Create dictionaries to map mouse names to markers and starting conditions
     markers = {os.path.basename(file).split("_")[0]: marker for file, marker in zip(data_files, markers)}
     conditions = {os.path.basename(file).split("_")[0]: condition for file, condition in zip(data_files, starting_conditions)}
-    
+    if selected_plots is None:
+        selected_plots = set(_ALL_PLOT_KEYS)
+
     # Create output directory for lick detection plots if needed
     if save_lick_plots and output_dir:
         lick_plots_dir = os.path.join(output_dir, 'lick_detection_plots')
@@ -438,16 +505,16 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     condition_colors = generate_colors(len(unique_conditions))
     condition_color_map = {condition: color for condition, color in zip(unique_conditions, condition_colors)}
     
-    speed_fig = plt.figure(figsize=(12, 6))
-    sensitivity_fig = plt.figure(figsize=(12, 6))
-    lick_fig = plt.figure(figsize=(12, 6))
-    reward_fig = plt.figure(figsize=(12, 6))
-    avg_reward_fig = plt.figure(figsize=(12, 6))  # Average rewards figure
-    sex_reward_fig = plt.figure(figsize=(12, 6))  # Sex-specific average rewards figure
-    false_alarm_fig = plt.figure(figsize=(12, 6))  # False alarms per mouse
-    correct_rejection_fig = plt.figure(figsize=(12, 6))  # Correct rejections per mouse
-    specificity_fig = plt.figure(figsize=(12, 6))  # Specificity per mouse
-    dprime_fig = plt.figure(figsize=(12, 6))  # d-prime per mouse
+    speed_fig             = plt.figure(figsize=(12, 6)) if 'speed'              in selected_plots else None
+    sensitivity_fig       = plt.figure(figsize=(12, 6)) if 'sensitivity'        in selected_plots else None
+    lick_fig              = plt.figure(figsize=(12, 6)) if 'lick_count'         in selected_plots else None
+    reward_fig            = plt.figure(figsize=(12, 6)) if 'reward_count'       in selected_plots else None
+    avg_reward_fig        = plt.figure(figsize=(12, 6)) if 'avg_reward'         in selected_plots else None
+    sex_reward_fig        = plt.figure(figsize=(12, 6)) if 'sex_reward'         in selected_plots else None
+    false_alarm_fig       = plt.figure(figsize=(12, 6)) if 'false_alarms'       in selected_plots else None
+    correct_rejection_fig = plt.figure(figsize=(12, 6)) if 'correct_rejections' in selected_plots else None
+    specificity_fig       = plt.figure(figsize=(12, 6)) if 'specificity'        in selected_plots else None
+    dprime_fig            = plt.figure(figsize=(12, 6)) if 'dprime'             in selected_plots else None
     colors = generate_colors(len(data_files))  # Generate colors based on number of mice
     
     all_results = []
@@ -755,52 +822,48 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         condition_color = condition_color_map[conditions[mouse_name]]
         day_numbers     = list(range(len(df_r)))  # sequential session index, no calendar gaps
 
-        plt.figure(speed_fig.number)
-        plt.plot(day_numbers, df_r['average_speed'],
-            f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
+        if speed_fig is not None:
+            plt.figure(speed_fig.number)
+            plt.plot(day_numbers, df_r['average_speed'],
+                f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
 
-        plt.figure(sensitivity_fig.number)
-        plt.plot(day_numbers, df_r['sensitivity'],
-            f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
+        if sensitivity_fig is not None:
+            plt.figure(sensitivity_fig.number)
+            plt.plot(day_numbers, df_r['sensitivity'],
+                f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
 
-        plt.figure(lick_fig.number)
-        plt.plot(day_numbers, df_r['lick_count'],
-            f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
+        if lick_fig is not None:
+            plt.figure(lick_fig.number)
+            plt.plot(day_numbers, df_r['lick_count'],
+                f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
 
-        plt.figure(reward_fig.number)
-        plt.plot(day_numbers, df_r['hits'],
-            f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
+        if reward_fig is not None:
+            plt.figure(reward_fig.number)
+            plt.plot(day_numbers, df_r['hits'],
+                f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
 
-        plt.figure(false_alarm_fig.number)
-        plt.plot(day_numbers, df_r['false_alarms'],
-            f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
+        if false_alarm_fig is not None:
+            plt.figure(false_alarm_fig.number)
+            plt.plot(day_numbers, df_r['false_alarms'],
+                f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
 
-        plt.figure(correct_rejection_fig.number)
-        plt.plot(day_numbers, df_r['correct_rejections'],
-            f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
+        if correct_rejection_fig is not None:
+            plt.figure(correct_rejection_fig.number)
+            plt.plot(day_numbers, df_r['correct_rejections'],
+                f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
 
-        plt.figure(specificity_fig.number)
-        plt.plot(day_numbers, df_r['specificity'],
-            f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
+        if specificity_fig is not None:
+            plt.figure(specificity_fig.number)
+            plt.plot(day_numbers, df_r['specificity'],
+                f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
 
-        plt.figure(dprime_fig.number)
-        plt.plot(day_numbers, df_r['dprime'],
-            f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
+        if dprime_fig is not None:
+            plt.figure(dprime_fig.number)
+            plt.plot(day_numbers, df_r['dprime'],
+                f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
 
-    # Configure speed plot
-    plt.figure(speed_fig.number)
-    plt.title('Average Speed Over Time')
-    plt.xlabel('Training Day')
-    plt.ylabel('Average Speed (cm/s)')
-    plt.grid(False)
-    ax = plt.gca()
-    ax.tick_params(axis='both', direction='in')
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.set_ylim(bottom=0)
+    # Tick spacing for individual mouse plots
     max_day = max_sessions
-    ax.set_xlim(left=0, right=max_day - 0.5)  # Add padding to prevent data points from being cut off
-    # Dynamic tick spacing based on data range
     if max_day <= 10:
         major_spacing = 1
         minor_spacing = 1
@@ -816,129 +879,150 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     else:
         major_spacing = 20
         minor_spacing = 5
-    ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
-    ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
-    ax.tick_params(axis='x', which='minor', direction='in')
-    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
-    
+
+    # Configure speed plot
+    if speed_fig is not None:
+        plt.figure(speed_fig.number)
+        plt.title('Average Speed Over Time')
+        plt.xlabel('Training Day')
+        plt.ylabel('Average Speed (cm/s)')
+        plt.grid(False)
+        ax = plt.gca()
+        ax.tick_params(axis='both', direction='in')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.set_ylim(bottom=0)
+        ax.set_xlim(left=0, right=max_day - 0.5)
+        ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
+        ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
+        ax.tick_params(axis='x', which='minor', direction='in')
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+
     # Configure sensitivity plot
-    plt.figure(sensitivity_fig.number)
-    plt.title('Sensitivity Over Time')
-    plt.xlabel('Day')
-    plt.ylabel('Sensitivity (Hits / Total Trials)')
-    plt.grid(False)
-    ax = plt.gca()
-    ax.tick_params(axis='both', direction='in')
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.set_ylim(-0.05, 1.05)  # Sensitivity is between 0 and 1
-    ax.set_xlim(left=0, right=max_day - 0.5)  # Add padding to prevent data points from being cut off
-    ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
-    ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
-    ax.tick_params(axis='x', which='minor', direction='in')
-    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
-    
+    if sensitivity_fig is not None:
+        plt.figure(sensitivity_fig.number)
+        plt.title('Sensitivity Over Time')
+        plt.xlabel('Day')
+        plt.ylabel('Sensitivity (Hits / Total Trials)')
+        plt.grid(False)
+        ax = plt.gca()
+        ax.tick_params(axis='both', direction='in')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.set_ylim(-0.05, 1.05)  # Sensitivity is between 0 and 1
+        ax.set_xlim(left=0, right=max_day - 0.5)
+        ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
+        ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
+        ax.tick_params(axis='x', which='minor', direction='in')
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+
     # Configure lick count plot
-    plt.figure(lick_fig.number)
-    plt.title('Lick Counts Over Time')
-    plt.xlabel('Training Day')
-    plt.ylabel('Number of Licks')
-    plt.grid(False)
-    ax = plt.gca()
-    ax.tick_params(axis='both', direction='in')
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.set_ylim(bottom=0)  # Lick counts cannot be negative
-    ax.set_xlim(left=0, right=max_day - 0.5)  # Add padding to prevent data points from being cut off
-    ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
-    ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
-    ax.tick_params(axis='x', which='minor', direction='in')
-    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
-    
+    if lick_fig is not None:
+        plt.figure(lick_fig.number)
+        plt.title('Lick Counts Over Time')
+        plt.xlabel('Training Day')
+        plt.ylabel('Number of Licks')
+        plt.grid(False)
+        ax = plt.gca()
+        ax.tick_params(axis='both', direction='in')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.set_ylim(bottom=0)  # Lick counts cannot be negative
+        ax.set_xlim(left=0, right=max_day - 0.5)
+        ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
+        ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
+        ax.tick_params(axis='x', which='minor', direction='in')
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+
     # Configure reward count plot
-    plt.figure(reward_fig.number)
-    plt.title('Total Reward Count Over Time')
-    plt.xlabel('Training Day')
-    plt.ylabel('Number of Rewards')
-    plt.grid(False)
-    ax = plt.gca()
-    ax.tick_params(axis='both', direction='in')
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.set_ylim(bottom=0)  # Reward counts cannot be negative
-    ax.set_xlim(left=0, right=max_day - 0.5)  # Add padding to prevent data points from being cut off
-    ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
-    ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
-    ax.tick_params(axis='x', which='minor', direction='in')
-    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
-    
+    if reward_fig is not None:
+        plt.figure(reward_fig.number)
+        plt.title('Total Reward Count Over Time')
+        plt.xlabel('Training Day')
+        plt.ylabel('Number of Rewards')
+        plt.grid(False)
+        ax = plt.gca()
+        ax.tick_params(axis='both', direction='in')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.set_ylim(bottom=0)  # Reward counts cannot be negative
+        ax.set_xlim(left=0, right=max_day - 0.5)
+        ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
+        ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
+        ax.tick_params(axis='x', which='minor', direction='in')
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+
     # Configure false alarm plot
-    plt.figure(false_alarm_fig.number)
-    plt.title('False Alarms Over Time')
-    plt.xlabel('Training Day')
-    plt.ylabel('Number of False Alarms')
-    plt.grid(False)
-    ax = plt.gca()
-    ax.tick_params(axis='both', direction='in')
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.set_ylim(bottom=0)
-    ax.set_xlim(left=0, right=max_day - 0.5)
-    ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
-    ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
-    ax.tick_params(axis='x', which='minor', direction='in')
-    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
-    
+    if false_alarm_fig is not None:
+        plt.figure(false_alarm_fig.number)
+        plt.title('False Alarms Over Time')
+        plt.xlabel('Training Day')
+        plt.ylabel('Number of False Alarms')
+        plt.grid(False)
+        ax = plt.gca()
+        ax.tick_params(axis='both', direction='in')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.set_ylim(bottom=0)
+        ax.set_xlim(left=0, right=max_day - 0.5)
+        ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
+        ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
+        ax.tick_params(axis='x', which='minor', direction='in')
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+
     # Configure correct rejection plot
-    plt.figure(correct_rejection_fig.number)
-    plt.title('Correct Rejections Over Time')
-    plt.xlabel('Training Day')
-    plt.ylabel('Number of Correct Rejections')
-    plt.grid(False)
-    ax = plt.gca()
-    ax.tick_params(axis='both', direction='in')
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.set_ylim(bottom=0)
-    ax.set_xlim(left=0, right=max_day - 0.5)
-    ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
-    ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
-    ax.tick_params(axis='x', which='minor', direction='in')
-    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
-    
+    if correct_rejection_fig is not None:
+        plt.figure(correct_rejection_fig.number)
+        plt.title('Correct Rejections Over Time')
+        plt.xlabel('Training Day')
+        plt.ylabel('Number of Correct Rejections')
+        plt.grid(False)
+        ax = plt.gca()
+        ax.tick_params(axis='both', direction='in')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.set_ylim(bottom=0)
+        ax.set_xlim(left=0, right=max_day - 0.5)
+        ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
+        ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
+        ax.tick_params(axis='x', which='minor', direction='in')
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+
     # Configure specificity plot
-    plt.figure(specificity_fig.number)
-    plt.title('Specificity Over Time')
-    plt.xlabel('Training Day')
-    plt.ylabel('Specificity (Correct Rejections / Puff Opportunities)')
-    plt.grid(False)
-    ax = plt.gca()
-    ax.tick_params(axis='both', direction='in')
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.set_ylim(-0.05, 1.05)
-    ax.set_xlim(left=0, right=max_day - 0.5)
-    ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
-    ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
-    ax.tick_params(axis='x', which='minor', direction='in')
-    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+    if specificity_fig is not None:
+        plt.figure(specificity_fig.number)
+        plt.title('Specificity Over Time')
+        plt.xlabel('Training Day')
+        plt.ylabel('Specificity (Correct Rejections / Puff Opportunities)')
+        plt.grid(False)
+        ax = plt.gca()
+        ax.tick_params(axis='both', direction='in')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.set_ylim(-0.05, 1.05)
+        ax.set_xlim(left=0, right=max_day - 0.5)
+        ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
+        ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
+        ax.tick_params(axis='x', which='minor', direction='in')
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
 
     # Configure d-prime plot
-    plt.figure(dprime_fig.number)
-    plt.title("d' Over Time")
-    plt.xlabel('Training Day')
-    plt.ylabel("d' (Signal Detection)")
-    plt.axhline(y=0, color='gray', linestyle='--', linewidth=0.8, alpha=0.6)
-    plt.grid(False)
-    ax = plt.gca()
-    ax.tick_params(axis='both', direction='in')
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.set_xlim(left=0, right=max_day - 0.5)
-    ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
-    ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
-    ax.tick_params(axis='x', which='minor', direction='in')
-    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+    if dprime_fig is not None:
+        plt.figure(dprime_fig.number)
+        plt.title("d' Over Time")
+        plt.xlabel('Training Day')
+        plt.ylabel("d' (Signal Detection)")
+        plt.axhline(y=0, color='gray', linestyle='--', linewidth=0.8, alpha=0.6)
+        plt.grid(False)
+        ax = plt.gca()
+        ax.tick_params(axis='both', direction='in')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.set_xlim(left=0, right=max_day - 0.5)
+        ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
+        ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
+        ax.tick_params(axis='x', which='minor', direction='in')
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
 
     # Calculate average rewards/minute and SEM across mice
     max_days = max_sessions
@@ -994,289 +1078,294 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                                        0)
     
     # Plot average rewards/minute with SEM
-    plt.figure(avg_reward_fig.number)
-    day_numbers = np.arange(0, max_days)
-    plt.plot(day_numbers, mean_rewards_per_min, '-', color='black', linewidth=2, label='Mean')
-    plt.fill_between(day_numbers, mean_rewards_per_min - sem_rewards_per_min, mean_rewards_per_min + sem_rewards_per_min, 
-                     color='gray', alpha=0.3, label='SEM')
-    
-    # Configure average rewards plot
-    plt.title('Average Rewards Per Minute Across Mice')
-    plt.xlabel('Day')
-    plt.ylabel('Rewards per Minute (Mean ± SEM)')
-    plt.grid(False)
-    ax = plt.gca()
-    ax.tick_params(axis='both', direction='in')
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.set_ylim(bottom=0)
-    ax.set_xlim(left=0, right=max_days - 1)
-    ax.xaxis.set_major_locator(plt.MultipleLocator(5))
-    ax.xaxis.set_minor_locator(plt.MultipleLocator(1))
-    ax.tick_params(axis='x', which='minor', direction='in')
-    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
-    plt.legend()
+    if avg_reward_fig is not None:
+        plt.figure(avg_reward_fig.number)
+        day_numbers = np.arange(0, max_days)
+        plt.plot(day_numbers, mean_rewards_per_min, '-', color='black', linewidth=2, label='Mean')
+        plt.fill_between(day_numbers, mean_rewards_per_min - sem_rewards_per_min, mean_rewards_per_min + sem_rewards_per_min, 
+                         color='gray', alpha=0.3, label='SEM')
+        
+        # Configure average rewards plot
+        plt.title('Average Rewards Per Minute Across Mice')
+        plt.xlabel('Day')
+        plt.ylabel('Rewards per Minute (Mean ± SEM)')
+        plt.grid(False)
+        ax = plt.gca()
+        ax.tick_params(axis='both', direction='in')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.set_ylim(bottom=0)
+        ax.set_xlim(left=0, right=max_days - 1)
+        ax.xaxis.set_major_locator(plt.MultipleLocator(5))
+        ax.xaxis.set_minor_locator(plt.MultipleLocator(1))
+        ax.tick_params(axis='x', which='minor', direction='in')
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+        plt.legend()
     
     # Plot sex-specific average rewards/minute with SEM
-    plt.figure(sex_reward_fig.number)
-    day_numbers = np.arange(0, max_days)
-    
-    # Plot male data if available
-    if len(male_rewards_per_min) > 0:
-        # Check if we have any non-NaN values
-        valid_male_data = np.any(~np.isnan(male_rewards_per_min))
-        if valid_male_data:
-            with warnings.catch_warnings():
-                warnings.simplefilter('ignore', RuntimeWarning)
-                n_male = np.sum(~np.isnan(male_rewards_per_min), axis=0)
-                mean_male = np.where(n_male > 0, np.nanmean(male_rewards_per_min, axis=0), np.nan)
-                sem_male = np.where(n_male > 1,
-                                    np.nanstd(male_rewards_per_min, axis=0) / np.sqrt(n_male),
-                                    0)
-            plt.plot(day_numbers, mean_male, '-', color='green', linewidth=2, label=f'Male (n={len(male_rewards_per_min)})')
-            plt.fill_between(day_numbers, mean_male - sem_male, mean_male + sem_male,
-                             color='green', alpha=0.2)
+    if sex_reward_fig is not None:
+        plt.figure(sex_reward_fig.number)
+        day_numbers = np.arange(0, max_days)
+        
+        # Plot male data if available
+        if len(male_rewards_per_min) > 0:
+            # Check if we have any non-NaN values
+            valid_male_data = np.any(~np.isnan(male_rewards_per_min))
+            if valid_male_data:
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    n_male = np.sum(~np.isnan(male_rewards_per_min), axis=0)
+                    mean_male = np.where(n_male > 0, np.nanmean(male_rewards_per_min, axis=0), np.nan)
+                    sem_male = np.where(n_male > 1,
+                                        np.nanstd(male_rewards_per_min, axis=0) / np.sqrt(n_male),
+                                        0)
+                plt.plot(day_numbers, mean_male, '-', color='green', linewidth=2, label=f'Male (n={len(male_rewards_per_min)})')
+                plt.fill_between(day_numbers, mean_male - sem_male, mean_male + sem_male,
+                                 color='green', alpha=0.2)
 
-    # Plot female data if available
-    if len(female_rewards_per_min) > 0:
-        # Check if we have any non-NaN values
-        valid_female_data = np.any(~np.isnan(female_rewards_per_min))
-        if valid_female_data:
-            with warnings.catch_warnings():
-                warnings.simplefilter('ignore', RuntimeWarning)
-                n_female = np.sum(~np.isnan(female_rewards_per_min), axis=0)
-                mean_female = np.where(n_female > 0, np.nanmean(female_rewards_per_min, axis=0), np.nan)
-                sem_female = np.where(n_female > 1,
-                                      np.nanstd(female_rewards_per_min, axis=0) / np.sqrt(n_female),
-                                      0)
-            plt.plot(day_numbers, mean_female, '-', color='purple', linewidth=2, label=f'Female (n={len(female_rewards_per_min)})')
-            plt.fill_between(day_numbers, mean_female - sem_female, mean_female + sem_female,
-                             color='purple', alpha=0.2)
+        # Plot female data if available
+        if len(female_rewards_per_min) > 0:
+            # Check if we have any non-NaN values
+            valid_female_data = np.any(~np.isnan(female_rewards_per_min))
+            if valid_female_data:
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    n_female = np.sum(~np.isnan(female_rewards_per_min), axis=0)
+                    mean_female = np.where(n_female > 0, np.nanmean(female_rewards_per_min, axis=0), np.nan)
+                    sem_female = np.where(n_female > 1,
+                                          np.nanstd(female_rewards_per_min, axis=0) / np.sqrt(n_female),
+                                          0)
+                plt.plot(day_numbers, mean_female, '-', color='purple', linewidth=2, label=f'Female (n={len(female_rewards_per_min)})')
+                plt.fill_between(day_numbers, mean_female - sem_female, mean_female + sem_female,
+                                 color='purple', alpha=0.2)
 
-    # Configure sex-specific rewards plot
-    plt.title('Sex-Specific Average Rewards Per Minute')
-    plt.xlabel('Training Day')
-    plt.ylabel('Average Rewards per Minute')
-    plt.grid(False)
-    ax = plt.gca()
-    ax.tick_params(axis='both', direction='in')
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.set_ylim(bottom=0)
-    ax.set_xlim(left=0, right=max_days - 1)
-    ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
-    ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
-    ax.tick_params(axis='x', which='minor', direction='in')
-    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
-    plt.legend()
+        # Configure sex-specific rewards plot
+        plt.title('Sex-Specific Average Rewards Per Minute')
+        plt.xlabel('Training Day')
+        plt.ylabel('Average Rewards per Minute')
+        plt.grid(False)
+        ax = plt.gca()
+        ax.tick_params(axis='both', direction='in')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.set_ylim(bottom=0)
+        ax.set_xlim(left=0, right=max_days - 1)
+        ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
+        ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
+        ax.tick_params(axis='x', which='minor', direction='in')
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+        plt.legend()
 
     # Create a new figure for condition-based analysis
-    condition_reward_fig = plt.figure(figsize=(12, 6))
-    
-    # Group mice by starting condition (session-indexed arrays, no calendar gaps)
-    condition_groups = {}
-    for result in all_results:
-        condition = result['starting_condition']
-        if condition not in condition_groups:
-            condition_groups[condition] = []
-        df_r = result['df']
-        rpm_array = np.full(max_sessions, np.nan)
-        for session_idx, (_, row) in enumerate(df_r.iterrows()):
-            if pd.notna(row['session_length']) and row['session_length'] > 0 and pd.notna(row['hits']):
-                rpm_array[session_idx] = row['hits'] / row['session_length']
-        condition_groups[condition].append(rpm_array)
+    condition_reward_fig = plt.figure(figsize=(12, 6)) if 'condition_reward' in selected_plots else None
+    if condition_reward_fig is not None:
+        # Group mice by starting condition (session-indexed arrays, no calendar gaps)
+        condition_groups = {}
+        for result in all_results:
+            condition = result['starting_condition']
+            if condition not in condition_groups:
+                condition_groups[condition] = []
+            df_r = result['df']
+            rpm_array = np.full(max_sessions, np.nan)
+            for session_idx, (_, row) in enumerate(df_r.iterrows()):
+                if pd.notna(row['session_length']) and row['session_length'] > 0 and pd.notna(row['hits']):
+                    rpm_array[session_idx] = row['hits'] / row['session_length']
+            condition_groups[condition].append(rpm_array)
 
-    # Plot each condition's data
-    day_numbers = np.arange(0, max_sessions)
-    for condition, rewards_list in condition_groups.items():
-        color = condition_color_map[condition]
-        padded_rewards = np.array(rewards_list)
+        # Plot each condition's data
+        day_numbers = np.arange(0, max_sessions)
+        for condition, rewards_list in condition_groups.items():
+            color = condition_color_map[condition]
+            padded_rewards = np.array(rewards_list)
 
-        # Calculate mean and SEM (only over mice that have data on that day)
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore', RuntimeWarning)
-            n_mice = np.sum(~np.isnan(padded_rewards), axis=0)
-            mean_rewards = np.where(n_mice > 0, np.nanmean(padded_rewards, axis=0), np.nan)
-            sem_rewards = np.where(n_mice > 1,
-                                   np.nanstd(padded_rewards, axis=0) / np.sqrt(n_mice),
-                                   0)
+            # Calculate mean and SEM (only over mice that have data on that day)
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', RuntimeWarning)
+                n_mice = np.sum(~np.isnan(padded_rewards), axis=0)
+                mean_rewards = np.where(n_mice > 0, np.nanmean(padded_rewards, axis=0), np.nan)
+                sem_rewards = np.where(n_mice > 1,
+                                       np.nanstd(padded_rewards, axis=0) / np.sqrt(n_mice),
+                                       0)
 
-        # Plot the data
-        plt.plot(day_numbers, mean_rewards, '-', color=color, linewidth=2,
-                label=f'{condition} (n={len(rewards_list)})')
-        plt.fill_between(day_numbers, mean_rewards - sem_rewards, mean_rewards + sem_rewards,
-                        color=color, alpha=0.2)
-    
-    # Configure condition-based rewards plot
-    plt.title('Average Rewards Per Minute by Starting Condition')
-    plt.xlabel('Training Day')
-    plt.ylabel('Average Rewards per Minute')
-    plt.grid(False)
-    ax = plt.gca()
-    ax.tick_params(axis='both', direction='in')
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.set_ylim(bottom=0)
-    ax.set_xlim(left=0, right=max_days - 1)
-    ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
-    ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
-    ax.tick_params(axis='x', which='minor', direction='in')
-    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
-    plt.legend()
+            # Plot the data
+            plt.plot(day_numbers, mean_rewards, '-', color=color, linewidth=2,
+                    label=f'{condition} (n={len(rewards_list)})')
+            plt.fill_between(day_numbers, mean_rewards - sem_rewards, mean_rewards + sem_rewards,
+                            color=color, alpha=0.2)
+        
+        # Configure condition-based rewards plot
+        plt.title('Average Rewards Per Minute by Starting Condition')
+        plt.xlabel('Training Day')
+        plt.ylabel('Average Rewards per Minute')
+        plt.grid(False)
+        ax = plt.gca()
+        ax.tick_params(axis='both', direction='in')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.set_ylim(bottom=0)
+        ax.set_xlim(left=0, right=max_days - 1)
+        ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
+        ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
+        ax.tick_params(axis='x', which='minor', direction='in')
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+        plt.legend()
 
     # Create a new figure for condition-based speed analysis
-    condition_speed_fig = plt.figure(figsize=(12, 6))
-    
-    # Group mice by starting condition for speed (session-indexed arrays, no calendar gaps)
-    condition_speed_groups = {}
-    for result in all_results:
-        condition = result['starting_condition']
-        if condition not in condition_speed_groups:
-            condition_speed_groups[condition] = []
-        df_r = result['df']
-        speed_array = np.full(max_sessions, np.nan)
-        for session_idx, (_, row) in enumerate(df_r.iterrows()):
-            speed_array[session_idx] = row['average_speed']
-        condition_speed_groups[condition].append(speed_array)
+    condition_speed_fig = plt.figure(figsize=(12, 6)) if 'condition_speed' in selected_plots else None
+    if condition_speed_fig is not None:
+        # Group mice by starting condition for speed (session-indexed arrays, no calendar gaps)
+        condition_speed_groups = {}
+        for result in all_results:
+            condition = result['starting_condition']
+            if condition not in condition_speed_groups:
+                condition_speed_groups[condition] = []
+            df_r = result['df']
+            speed_array = np.full(max_sessions, np.nan)
+            for session_idx, (_, row) in enumerate(df_r.iterrows()):
+                speed_array[session_idx] = row['average_speed']
+            condition_speed_groups[condition].append(speed_array)
 
-    # Plot each condition's speed data
-    day_numbers = np.arange(0, max_sessions)
-    for condition, speed_list in condition_speed_groups.items():
-        color = condition_color_map[condition]
-        padded_speeds = np.array(speed_list)
+        # Plot each condition's speed data
+        day_numbers = np.arange(0, max_sessions)
+        for condition, speed_list in condition_speed_groups.items():
+            color = condition_color_map[condition]
+            padded_speeds = np.array(speed_list)
 
-        # Calculate mean and SEM (only over mice that have data on that day)
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore', RuntimeWarning)
-            n_mice = np.sum(~np.isnan(padded_speeds), axis=0)
-            mean_speeds = np.where(n_mice > 0, np.nanmean(padded_speeds, axis=0), np.nan)
-            sem_speeds = np.where(n_mice > 1,
-                                  np.nanstd(padded_speeds, axis=0) / np.sqrt(n_mice),
-                                  0)
+            # Calculate mean and SEM (only over mice that have data on that day)
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', RuntimeWarning)
+                n_mice = np.sum(~np.isnan(padded_speeds), axis=0)
+                mean_speeds = np.where(n_mice > 0, np.nanmean(padded_speeds, axis=0), np.nan)
+                sem_speeds = np.where(n_mice > 1,
+                                      np.nanstd(padded_speeds, axis=0) / np.sqrt(n_mice),
+                                      0)
 
-        # Plot the data
-        plt.plot(day_numbers, mean_speeds, '-', color=color, linewidth=2,
-                label=f'{condition} (n={len(speed_list)})')
-        plt.fill_between(day_numbers, mean_speeds - sem_speeds, mean_speeds + sem_speeds,
-                        color=color, alpha=0.2)
-    
-    # Configure condition-based speed plot
-    plt.title('Average Speed by Starting Condition')
-    plt.xlabel('Training Day')
-    plt.ylabel('Average Speed (cm/s)')
-    plt.grid(False)
-    ax = plt.gca()
-    ax.tick_params(axis='both', direction='in')
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.set_ylim(bottom=0)
-    ax.set_xlim(left=0, right=max_days - 1)
-    ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
-    ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
-    ax.tick_params(axis='x', which='minor', direction='in')
-    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
-    plt.legend()
+            # Plot the data
+            plt.plot(day_numbers, mean_speeds, '-', color=color, linewidth=2,
+                    label=f'{condition} (n={len(speed_list)})')
+            plt.fill_between(day_numbers, mean_speeds - sem_speeds, mean_speeds + sem_speeds,
+                            color=color, alpha=0.2)
+        
+        # Configure condition-based speed plot
+        plt.title('Average Speed by Starting Condition')
+        plt.xlabel('Training Day')
+        plt.ylabel('Average Speed (cm/s)')
+        plt.grid(False)
+        ax = plt.gca()
+        ax.tick_params(axis='both', direction='in')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.set_ylim(bottom=0)
+        ax.set_xlim(left=0, right=max_days - 1)
+        ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
+        ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
+        ax.tick_params(axis='x', which='minor', direction='in')
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+        plt.legend()
 
     # Create a new figure for condition-based lick count analysis
-    condition_lick_fig = plt.figure(figsize=(12, 6))
+    condition_lick_fig = plt.figure(figsize=(12, 6)) if 'condition_lick' in selected_plots else None
+    if condition_lick_fig is not None:
+        # Group mice by starting condition for lick count (session-indexed arrays, no calendar gaps)
+        condition_lick_groups = {}
+        for result in all_results:
+            condition = result['starting_condition']
+            if condition not in condition_lick_groups:
+                condition_lick_groups[condition] = []
+            df_r = result['df']
+            lick_array = np.full(max_sessions, np.nan)
+            for session_idx, (_, row) in enumerate(df_r.iterrows()):
+                lick_array[session_idx] = row['lick_count']
+            condition_lick_groups[condition].append(lick_array)
 
-    # Group mice by starting condition for lick count (session-indexed arrays, no calendar gaps)
-    condition_lick_groups = {}
-    for result in all_results:
-        condition = result['starting_condition']
-        if condition not in condition_lick_groups:
-            condition_lick_groups[condition] = []
-        df_r = result['df']
-        lick_array = np.full(max_sessions, np.nan)
-        for session_idx, (_, row) in enumerate(df_r.iterrows()):
-            lick_array[session_idx] = row['lick_count']
-        condition_lick_groups[condition].append(lick_array)
+        # Plot each condition's lick count data
+        day_numbers = np.arange(0, max_sessions)
+        for condition, lick_list in condition_lick_groups.items():
+            color = condition_color_map[condition]
+            padded_licks = np.array(lick_list)
 
-    # Plot each condition's lick count data
-    day_numbers = np.arange(0, max_sessions)
-    for condition, lick_list in condition_lick_groups.items():
-        color = condition_color_map[condition]
-        padded_licks = np.array(lick_list)
+            # Calculate mean and SEM (only over mice that have data on that day)
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', RuntimeWarning)
+                n_mice = np.sum(~np.isnan(padded_licks), axis=0)
+                mean_licks = np.where(n_mice > 0, np.nanmean(padded_licks, axis=0), np.nan)
+                sem_licks = np.where(n_mice > 1,
+                                     np.nanstd(padded_licks, axis=0) / np.sqrt(n_mice),
+                                     0)
 
-        # Calculate mean and SEM (only over mice that have data on that day)
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore', RuntimeWarning)
-            n_mice = np.sum(~np.isnan(padded_licks), axis=0)
-            mean_licks = np.where(n_mice > 0, np.nanmean(padded_licks, axis=0), np.nan)
-            sem_licks = np.where(n_mice > 1,
-                                 np.nanstd(padded_licks, axis=0) / np.sqrt(n_mice),
-                                 0)
+            # Plot the data
+            plt.plot(day_numbers, mean_licks, '-', color=color, linewidth=2,
+                    label=f'{condition} (n={len(lick_list)})')
+            plt.fill_between(day_numbers, mean_licks - sem_licks, mean_licks + sem_licks,
+                            color=color, alpha=0.2)
 
-        # Plot the data
-        plt.plot(day_numbers, mean_licks, '-', color=color, linewidth=2,
-                label=f'{condition} (n={len(lick_list)})')
-        plt.fill_between(day_numbers, mean_licks - sem_licks, mean_licks + sem_licks,
-                        color=color, alpha=0.2)
-
-    # Configure condition-based lick count plot
-    plt.title('Average Lick Count by Starting Condition')
-    plt.xlabel('Training Day')
-    plt.ylabel('Number of Licks (Mean \u00b1 SEM)')
-    plt.grid(False)
-    ax = plt.gca()
-    ax.tick_params(axis='both', direction='in')
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.set_ylim(bottom=0)
-    ax.set_xlim(left=0, right=max_days - 1)
-    ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
-    ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
-    ax.tick_params(axis='x', which='minor', direction='in')
-    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
-    plt.legend()
+        # Configure condition-based lick count plot
+        plt.title('Average Lick Count by Starting Condition')
+        plt.xlabel('Training Day')
+        plt.ylabel('Number of Licks (Mean \u00b1 SEM)')
+        plt.grid(False)
+        ax = plt.gca()
+        ax.tick_params(axis='both', direction='in')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.set_ylim(bottom=0)
+        ax.set_xlim(left=0, right=max_days - 1)
+        ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
+        ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
+        ax.tick_params(axis='x', which='minor', direction='in')
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+        plt.legend()
 
     # Create collapsed condition bar plot (one average rpm per mouse, collapsed across all days)
-    condition_bar_fig, ax_bar = plt.subplots(figsize=(8, 6))
+    condition_bar_fig = None
+    if 'condition_bar' in selected_plots:
+        condition_bar_fig, ax_bar = plt.subplots(figsize=(8, 6))
 
-    condition_mouse_rpms: dict[str, list] = {}
-    for result in all_results:
-        condition = result['starting_condition']
-        df_r = result['df']
-        session_rpms = []
-        for _, row in df_r.iterrows():
-            if pd.notna(row['session_length']) and row['session_length'] > 0 and pd.notna(row['hits']):
-                session_rpms.append(row['hits'] / row['session_length'])
-        if session_rpms:
-            if condition not in condition_mouse_rpms:
-                condition_mouse_rpms[condition] = []
-            condition_mouse_rpms[condition].append((result['mouse'], float(np.mean(session_rpms))))
+        condition_mouse_rpms: dict[str, list] = {}
+        for result in all_results:
+            condition = result['starting_condition']
+            df_r = result['df']
+            session_rpms = []
+            for _, row in df_r.iterrows():
+                if pd.notna(row['session_length']) and row['session_length'] > 0 and pd.notna(row['hits']):
+                    session_rpms.append(row['hits'] / row['session_length'])
+            if session_rpms:
+                if condition not in condition_mouse_rpms:
+                    condition_mouse_rpms[condition] = []
+                condition_mouse_rpms[condition].append((result['mouse'], float(np.mean(session_rpms))))
 
-    conditions_sorted_bar = sorted(condition_mouse_rpms.keys())
-    x_pos_bar = np.arange(len(conditions_sorted_bar))
+        conditions_sorted_bar = sorted(condition_mouse_rpms.keys())
+        x_pos_bar = np.arange(len(conditions_sorted_bar))
 
-    rng_bar = np.random.default_rng(seed=42)
-    for ci, condition in enumerate(conditions_sorted_bar):
-        entries = condition_mouse_rpms[condition]
-        mouse_rpms = [v for _, v in entries]
-        mean_rpm = float(np.mean(mouse_rpms))
-        sem_rpm  = float(np.std(mouse_rpms, ddof=1) / np.sqrt(len(mouse_rpms))) if len(mouse_rpms) > 1 else 0.0
-        color = condition_color_map[condition]
-        ax_bar.bar(ci, mean_rpm, width=0.5, color=color, alpha=0.8,
-                   yerr=sem_rpm, capsize=7, error_kw={'elinewidth': 1.5, 'capthick': 1.5})
-        jitter = (rng_bar.random(len(mouse_rpms)) - 0.5) * 0.22
-        for j, (mouse_name_bar, rpm_val) in enumerate(entries):
-            ax_bar.plot(ci + jitter[j], rpm_val, 'o',
-                        color='white', markeredgecolor=color,
-                        markeredgewidth=1.8, markersize=7, zorder=3)
+        rng_bar = np.random.default_rng(seed=42)
+        for ci, condition in enumerate(conditions_sorted_bar):
+            entries = condition_mouse_rpms[condition]
+            mouse_rpms = [v for _, v in entries]
+            mean_rpm = float(np.mean(mouse_rpms))
+            sem_rpm  = float(np.std(mouse_rpms, ddof=1) / np.sqrt(len(mouse_rpms))) if len(mouse_rpms) > 1 else 0.0
+            color = condition_color_map[condition]
+            ax_bar.bar(ci, mean_rpm, width=0.5, color=color, alpha=0.8,
+                       yerr=sem_rpm, capsize=7, error_kw={'elinewidth': 1.5, 'capthick': 1.5})
+            jitter = (rng_bar.random(len(mouse_rpms)) - 0.5) * 0.22
+            for j, (mouse_name_bar, rpm_val) in enumerate(entries):
+                ax_bar.plot(ci + jitter[j], rpm_val, 'o',
+                            color='white', markeredgecolor=color,
+                            markeredgewidth=1.8, markersize=7, zorder=3)
 
-    ax_bar.set_xticks(x_pos_bar)
-    ax_bar.set_xticklabels(conditions_sorted_bar)
-    ax_bar.set_title('Average Reward Rate by Starting Condition\n(collapsed across all sessions)')
-    ax_bar.set_xlabel('Starting Condition')
-    ax_bar.set_ylabel('Rewards per Minute (Mean \u00b1 SEM)')
-    ax_bar.set_ylim(bottom=0)
-    ax_bar.tick_params(axis='both', direction='in')
-    ax_bar.spines['top'].set_visible(False)
-    ax_bar.spines['right'].set_visible(False)
-    condition_bar_fig.tight_layout()
+        ax_bar.set_xticks(x_pos_bar)
+        ax_bar.set_xticklabels(conditions_sorted_bar)
+        ax_bar.set_title('Average Reward Rate by Starting Condition\n(collapsed across all sessions)')
+        ax_bar.set_xlabel('Starting Condition')
+        ax_bar.set_ylabel('Rewards per Minute (Mean \u00b1 SEM)')
+        ax_bar.set_ylim(bottom=0)
+        ax_bar.tick_params(axis='both', direction='in')
+        ax_bar.spines['top'].set_visible(False)
+        ax_bar.spines['right'].set_visible(False)
+        condition_bar_fig.tight_layout()
 
     # Create the level-based analysis plot
-    level_fig = analyze_levels(data_files, transitions_csv_path, animal_conditions=conditions)
+    level_fig = analyze_levels(data_files, transitions_csv_path, animal_conditions=conditions) \
+        if 'levels' in selected_plots else None
 
     # ── Missing data report ───────────────────────────────────────────────────
     all_session_dates = set(
@@ -1332,7 +1421,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         f.write(report_text + "\n")
     print(f"\nMissing data report saved to: {report_path}")
 
-    return speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, condition_speed_fig, condition_lick_fig, level_fig, all_results
+    return speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, condition_speed_fig, condition_lick_fig, condition_bar_fig, level_fig, all_results
 
 def main():
     # Create and hide the root window
@@ -1381,16 +1470,24 @@ def main():
     )
     
     if file_paths:
-        # Select transitions CSV (produced by level_sorter.py) for level analysis
-        transitions_csv_path = filedialog.askopenfilename(
-            title='Select transitions CSV (from level_sorter.py) — cancel to skip level plot',
-            filetypes=[('CSV files', '*.csv'), ('All files', '*.*')],
-            initialdir=os.path.dirname(file_paths[0]),
-        ) or None
-        if transitions_csv_path:
-            print(f"Transitions CSV: {os.path.basename(transitions_csv_path)}")
-        else:
-            print("No transitions CSV selected — level plot will be empty.")
+        # Ask user which plots to generate
+        selected_plots = _ask_plot_selection(root)
+        if not selected_plots:
+            print("No plots selected. Exiting...")
+            return
+
+        # Select transitions CSV only if the level plot was requested
+        transitions_csv_path = None
+        if 'levels' in selected_plots:
+            transitions_csv_path = filedialog.askopenfilename(
+                title='Select transitions CSV (from level_sorter.py) — cancel to skip level plot',
+                filetypes=[('CSV files', '*.csv'), ('All files', '*.*')],
+                initialdir=os.path.dirname(file_paths[0]),
+            ) or None
+            if transitions_csv_path:
+                print(f"Transitions CSV: {os.path.basename(transitions_csv_path)}")
+            else:
+                print("No transitions CSV selected — level plot will be empty.")
 
         # Extract markers and starting conditions from master CSV
         markers = []
@@ -1413,23 +1510,35 @@ def main():
                 continue
         
         # Analyze data and plot results
-        speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, condition_speed_fig, condition_lick_fig, level_fig, all_results = analyze_mouse_data(
+        speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, condition_speed_fig, condition_lick_fig, condition_bar_fig, level_fig, all_results = analyze_mouse_data(
             file_paths, markers, starting_conditions,
             transitions_csv_path=transitions_csv_path,
+            selected_plots=selected_plots,
         )
 
-        # Configure all figures
-        for fig in [speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, condition_speed_fig, condition_lick_fig, level_fig]:
+        # All generated figures (None entries are skipped)
+        all_figs = [f for f in [
+            speed_fig, sensitivity_fig, lick_fig, reward_fig,
+            false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig,
+            avg_reward_fig, sex_reward_fig,
+            condition_reward_fig, condition_speed_fig, condition_lick_fig,
+            condition_bar_fig, level_fig,
+        ] if f is not None]
+
+        # Configure all figures (add legend only when labeled artists exist, then tight layout)
+        for fig in all_figs:
             plt.figure(fig.number)
-            if len(file_paths) > 10:
-                plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-                plt.subplots_adjust(right=0.85)
-            else:
-                plt.legend()
+            handles, labels = plt.gca().get_legend_handles_labels()
+            if labels:
+                if len(file_paths) > 10:
+                    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+                    plt.subplots_adjust(right=0.85)
+                else:
+                    plt.legend()
             plt.tight_layout()
 
         # Display all plots
-        for fig in [speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, condition_speed_fig, condition_lick_fig]:
+        for fig in all_figs:
             fig.show()
         plt.show()
 
@@ -1441,26 +1550,29 @@ def main():
             plt.rcParams['font.sans-serif'] = ['Arial']
             plt.rcParams['svg.fonttype'] = 'none'
 
-            # Plot configurations to save
+            # Plot configurations to save (skip None figures)
             plot_configs = [
-                (speed_fig, 'speed', 'Speed plot'),
-                (sensitivity_fig, 'sensitivity', 'Sensitivity plot'),
-                (lick_fig, 'lick_count', 'Lick count plot'),
-                (reward_fig, 'reward_count', 'Reward count plot'),
-                (false_alarm_fig, 'false_alarms', 'False alarms plot'),
-                (correct_rejection_fig, 'correct_rejections', 'Correct rejections plot'),
-                (specificity_fig, 'specificity', 'Specificity plot'),
-                (dprime_fig, 'dprime', "d' plot"),
-                (avg_reward_fig, 'avg_reward', 'Average rewards plot'),
-                (sex_reward_fig, 'sex_reward', 'Sex-specific average rewards plot'),
-                (condition_reward_fig, 'condition_reward', 'Condition-based average rewards plot'),
-                (condition_speed_fig, 'condition_speed', 'Condition-based average speed plot'),
-                (condition_lick_fig, 'condition_lick', 'Condition-based average lick count plot'),
-                (level_fig, 'level_reward', 'Level-based average rewards plot')
+                (speed_fig,             'speed',               'Speed plot'),
+                (sensitivity_fig,       'sensitivity',         'Sensitivity plot'),
+                (lick_fig,              'lick_count',          'Lick count plot'),
+                (reward_fig,            'reward_count',        'Reward count plot'),
+                (false_alarm_fig,       'false_alarms',        'False alarms plot'),
+                (correct_rejection_fig, 'correct_rejections',  'Correct rejections plot'),
+                (specificity_fig,       'specificity',         'Specificity plot'),
+                (dprime_fig,            'dprime',              "d' plot"),
+                (avg_reward_fig,        'avg_reward',          'Average rewards plot'),
+                (sex_reward_fig,        'sex_reward',          'Sex-specific average rewards plot'),
+                (condition_reward_fig,  'condition_reward',    'Condition-based average rewards plot'),
+                (condition_speed_fig,   'condition_speed',     'Condition-based average speed plot'),
+                (condition_lick_fig,    'condition_lick',      'Condition-based average lick count plot'),
+                (condition_bar_fig,     'condition_bar',       'Condition collapsed bar chart'),
+                (level_fig,             'level_reward',        'Level-based average rewards plot'),
             ]
 
             # Save all plots
             for fig, name, title in plot_configs:
+                if fig is None:
+                    continue
                 save_path = filedialog.asksaveasfilename(
                     defaultextension=".svg",
                     filetypes=[("SVG files", "*.svg"), ("All files", "*.*")],
