@@ -202,43 +202,135 @@ def test_matching_logic(trial_log_path):
         print("\nNo valid zones found!")
         print("="*80 + "\n")
 
-def analyze_levels(data_files):
-    """Analyze rewards/min for each level across all mice."""
-    level_data = {}  # Dictionary to store rewards/min for each level
-    
+def analyze_levels(data_files, transitions_csv_path):
+    """Analyze rewards/min for each level across all mice.
+
+    Uses a transitions CSV (produced by level_sorter.py) to slice each session's
+    trial_log into per-level time windows.  Multi-session level visits (where a
+    mouse ends a session mid-level and continues the next day) are aggregated
+    before computing rpm: total rewards and total active time are summed across
+    ALL sessions for a given (animal, level) pair, producing ONE rpm value per
+    animal per level.  This prevents time gaps between sessions from penalising
+    the rate calculation and ensures partial sessions at either end of a level
+    are fully included.
+
+    Boundary rules per session slice:
+        start_ts = previous level's transition_ts in this session, or 0
+        end_ts   = this level's transition_ts (completed) or capacitive
+                   elapsed_time.max() (incomplete last level of session)
+    """
+    # (animal_id, level) -> {'rewards': int, 'duration_min': float}
+    animal_level_accum: dict[tuple, dict] = {}
+
+    # Load transitions CSV -------------------------------------------------------
+    if not transitions_csv_path:
+        print("  [WARN] No transitions CSV provided — level plot will be empty.")
+        return plt.figure(figsize=(15, 8))
+    try:
+        transitions_df = pd.read_csv(transitions_csv_path)
+        transitions_df['date'] = pd.to_datetime(transitions_df['date'])
+    except Exception as e:
+        print(f"  [ERROR] Cannot read transitions CSV: {e}")
+        return plt.figure(figsize=(15, 8))
+
+    # Build lookup (animal_id, date_normalised) -> {trial_log, capacitive} ------
+    session_lookup = {}
     for data_file in data_files:
-        # Read the data file
-        df = pd.read_csv(data_file)
-        
-        # Group by level and calculate rewards/min for each group
-        for level in df['level'].unique():
-            if pd.isna(level):  # Skip NaN level entries (partial sessions)
+        animal_id = os.path.basename(data_file).split('_')[0]
+        try:
+            df = pd.read_csv(data_file)
+        except Exception:
+            continue
+        if 'date' in df.columns:
+            df['date'] = pd.to_datetime(df['date'])
+        for _, row in df.iterrows():
+            date_key = pd.Timestamp(row['date']).normalize()
+            session_lookup[(animal_id, date_key)] = {
+                'trial_log':  row.get('trial_log'),
+                'capacitive': row.get('capacitive'),
+            }
+
+    # Accumulate rewards and time per (animal, level) across all sessions ---------
+    for animal_id, animal_group in transitions_df.groupby('animal_id'):
+        for session_num, session_group in animal_group.groupby('session_num'):
+            session_group = session_group.reset_index(drop=True)
+            date_key = pd.Timestamp(session_group.iloc[0]['date']).normalize()
+
+            sess_info = session_lookup.get((animal_id, date_key))
+            if sess_info is None:
                 continue
-            if level not in level_data:
-                level_data[level] = []
-                
-            level_group = df[df['level'] == level]
-            for _, row in level_group.iterrows():
-                # Skip rows where required files are missing
-                if pd.isna(row.get('trial_log')) or pd.isna(row.get('capacitive')):
-                    continue
+            trial_log_path  = sess_info.get('trial_log')
+            capacitive_path = sess_info.get('capacitive')
+
+            if not isinstance(trial_log_path, str) or pd.isna(trial_log_path):
+                continue
+            try:
+                tl = pd.read_csv(trial_log_path)
+            except Exception as e:
+                print(f"  [WARN] {animal_id} session {session_num}: cannot read trial_log — {e}")
+                continue
+            if 'reward_event' not in tl.columns or 'texture_change_time' not in tl.columns:
+                continue
+
+            # Session end time — needed for the last incomplete level visit
+            session_end_time = None
+            if isinstance(capacitive_path, str) and not pd.isna(capacitive_path):
                 try:
-                    # Read trial log data
-                    trial_log = pd.read_csv(row['trial_log'])
-                    # Count rewards (non-null reward events)
-                    # Check if hits_event column exists (older data may not have it)
-                    if 'hits_event' in trial_log.columns:
-                        hits = len(trial_log['reward_event'].dropna()) + len(trial_log['hits_event'].dropna())
-                    else:
-                        hits = len(trial_log['reward_event'].dropna())  # Use only reward_event for older data
-                    # Calculate session length in minutes
-                    capacitive_data = pd.read_csv(row['capacitive'])
-                    session_length = capacitive_data['elapsed_time'].max() / 60.0
-                    # Calculate rewards per minute
-                    rewards_per_min = hits / session_length if session_length > 0 else 0
-                    level_data[level].append(rewards_per_min)
-                except Exception as e:
-                    print(f"  [WARN] Level '{level}': could not read file — {str(e)}")
+                    cap = pd.read_csv(capacitive_path)
+                    if 'elapsed_time' in cap.columns:
+                        session_end_time = float(cap['elapsed_time'].max())
+                except Exception:
+                    pass
+            if session_end_time is None:
+                tc_vals = tl['texture_change_time'].dropna()
+                session_end_time = float(tc_vals.max()) if len(tc_vals) else None
+
+            levels   = session_group['level'].tolist()
+            trans_ts = session_group['transition_ts'].tolist()
+
+            # start_ts for each level = end_ts of the previous level (or 0)
+            start_times = [0.0]
+            for ts in trans_ts[:-1]:
+                start_times.append(float(ts) if pd.notna(ts) else float('inf'))
+
+            # end_ts for each level = its own transition_ts, or session end time
+            end_times = []
+            for ts in trans_ts:
+                if pd.notna(ts):
+                    end_times.append(float(ts))
+                elif session_end_time is not None:
+                    end_times.append(session_end_time)
+                else:
+                    end_times.append(None)
+
+            reward_events = tl['reward_event'].dropna().to_numpy(dtype=float)
+            hits_events   = (tl['hits_event'].dropna().to_numpy(dtype=float)
+                             if 'hits_event' in tl.columns else np.array([]))
+
+            for i, level in enumerate(levels):
+                start_t = start_times[i]
+                end_t   = end_times[i]
+                if end_t is None or start_t >= end_t:
+                    continue
+                duration_min = (end_t - start_t) / 60.0
+                if duration_min <= 0:
+                    continue
+                count = int(np.sum((reward_events >= start_t) & (reward_events < end_t)))
+                count += int(np.sum((hits_events   >= start_t) & (hits_events   < end_t)))
+
+                key = (animal_id, level)
+                if key not in animal_level_accum:
+                    animal_level_accum[key] = {'rewards': 0, 'duration_min': 0.0}
+                animal_level_accum[key]['rewards']      += count
+                animal_level_accum[key]['duration_min'] += duration_min
+
+    # Collapse accumulators: one rpm per (animal, level) -------------------------
+    # level_data[level] = [rpm_animal1, rpm_animal2, ...]
+    level_data: dict[str, list[float]] = {}
+    for (animal_id, level), accum in animal_level_accum.items():
+        if accum['duration_min'] > 0:
+            rpm = accum['rewards'] / accum['duration_min']
+            level_data.setdefault(level, []).append(rpm)
     
     # Calculate statistics for each level
     level_stats = {}
@@ -292,7 +384,7 @@ def analyze_levels(data_files):
     plt.tight_layout()
     return level_fig
 
-def analyze_mouse_data(data_files, markers, starting_conditions, save_lick_plots=False, output_dir=None):
+def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv_path=None, save_lick_plots=False, output_dir=None):
     # Create dictionaries to map mouse names to markers and starting conditions
     markers = {os.path.basename(file).split("_")[0]: marker for file, marker in zip(data_files, markers)}
     conditions = {os.path.basename(file).split("_")[0]: condition for file, condition in zip(data_files, starting_conditions)}
@@ -1101,7 +1193,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, save_lick_plots
     plt.legend()
 
     # Create the level-based analysis plot
-    level_fig = analyze_levels(data_files)
+    level_fig = analyze_levels(data_files, transitions_csv_path)
 
     # ── Missing data report ───────────────────────────────────────────────────
     all_session_dates = set(
@@ -1206,6 +1298,17 @@ def main():
     )
     
     if file_paths:
+        # Select transitions CSV (produced by level_sorter.py) for level analysis
+        transitions_csv_path = filedialog.askopenfilename(
+            title='Select transitions CSV (from level_sorter.py) — cancel to skip level plot',
+            filetypes=[('CSV files', '*.csv'), ('All files', '*.*')],
+            initialdir=os.path.dirname(file_paths[0]),
+        ) or None
+        if transitions_csv_path:
+            print(f"Transitions CSV: {os.path.basename(transitions_csv_path)}")
+        else:
+            print("No transitions CSV selected — level plot will be empty.")
+
         # Extract markers and starting conditions from master CSV
         markers = []
         starting_conditions = []
@@ -1228,7 +1331,8 @@ def main():
         
         # Analyze data and plot results
         speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, condition_reward_fig, condition_speed_fig, condition_lick_fig, level_fig, all_results = analyze_mouse_data(
-            file_paths, markers, starting_conditions
+            file_paths, markers, starting_conditions,
+            transitions_csv_path=transitions_csv_path,
         )
 
         # Configure all figures
