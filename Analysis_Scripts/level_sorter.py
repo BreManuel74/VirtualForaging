@@ -27,6 +27,82 @@ PROGRESS_DIR     = os.path.join(MOUSEPORTAL_DIR, 'Progress_Reports')
 
 
 # ---------------------------------------------------------------------------
+# CAH cohort level → reward threshold mapping
+# level_1.json : 10 rewards required to advance
+# level_2.json … level_50.json : 15 rewards required to advance
+# ---------------------------------------------------------------------------
+CAH_LEVEL_THRESHOLD_MATCHER: dict[str, int] = {
+    'level_1.json':  10,
+    'level_2.json':  15,
+    'level_3.json':  15,
+    'level_4.json':  15,
+    'level_5.json':  15,
+    'level_6.json':  15,
+    'level_7.json':  15,
+    'level_8.json':  15,
+    'level_9.json':  15,
+    'level_10.json': 15,
+    'level_11.json': 15,
+    'level_12.json': 15,
+    'level_13.json': 15,
+    'level_14.json': 15,
+    'level_15.json': 15,
+    'level_16.json': 15,
+    'level_17.json': 15,
+    'level_18.json': 15,
+    'level_19.json': 15,
+    'level_20.json': 15,
+    'level_21.json': 15,
+    'level_22.json': 15,
+    'level_23.json': 15,
+    'level_24.json': 15,
+    'level_25.json': 15,
+    'level_26.json': 15,
+    'level_27.json': 15,
+    'level_28.json': 15,
+    'level_29.json': 15,
+    'level_30.json': 15,
+    'level_31.json': 15,
+    'level_32.json': 15,
+    'level_33.json': 15,
+    'level_34.json': 15,
+    'level_35.json': 15,
+    'level_36.json': 15,
+    'level_37.json': 15,
+    'level_38.json': 15,
+    'level_39.json': 15,
+    'level_40.json': 15,
+    'level_41.json': 15,
+    'level_42.json': 15,
+    'level_43.json': 15,
+    'level_44.json': 15,
+    'level_45.json': 15,
+    'level_46.json': 15,
+    'level_47.json': 15,
+    'level_48.json': 15,
+    'level_49.json': 15,
+    'level_50.json': 15,
+}
+
+
+def get_reward_threshold(level_str: str, animal_id: str) -> int | None:
+    """
+    Return the reward threshold for a given level and animal.
+
+    Currently only the CAH cohort has a defined threshold map.  Returns None
+    for any other cohort, or when the level string is not recognised.
+
+    Parameters
+    ----------
+    level_str  : e.g. 'level_6.json'
+    animal_id  : e.g. 'CAH1' or 'VF11'
+    """
+    if isinstance(animal_id, str) and animal_id.upper().startswith('CAH'):
+        return CAH_LEVEL_THRESHOLD_MATCHER.get(level_str)
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 def _animal_id_from_path(filepath: str) -> str:
@@ -116,21 +192,88 @@ def build_combined(data: dict[str, pd.DataFrame],
             row_dict['animal_id']   = animal_id
             row_dict['session_num'] = session_idx
             row_dict['log_entries'] = log_entries
+            row_dict['reward_threshold'] = get_reward_threshold(
+                row.get('level'), animal_id
+            )
             rows.append(row_dict)
 
     combined = pd.DataFrame(rows).reset_index(drop=True)
     return combined
 
 
+def build_flat_log(combined: pd.DataFrame) -> pd.DataFrame:
+    """
+    Expand the nested log_entries in `combined` into a flat DataFrame with one
+    row per log entry.  Session context columns are repeated on every row so
+    that both the session and its individual log events can be filtered and
+    grouped in a single table.
+
+    Session context columns carried over from `combined`:
+        animal_id, session_num, date (session date), level (session start level),
+        reward_threshold, timestamp
+
+    Log columns from *_log.csv:
+        Date, Time, Level, Batch ID
+
+    Derived columns added here:
+        is_session_end  – True when the Level entry contains '(Session End'
+        end_rewards     – integer reward count parsed from Session End entries,
+                          NaN for non-session-end rows
+        log_level       – clean level name (e.g. 'level_6.json') stripped of
+                          any '(Session End …)' suffix
+    """
+    SESSION_CONTEXT = ['animal_id', 'session_num', 'date', 'level',
+                       'reward_threshold', 'timestamp']
+
+    flat_rows = []
+    for _, session_row in combined.iterrows():
+        log_df = session_row.get('log_entries')
+        if log_df is None or not isinstance(log_df, pd.DataFrame) or log_df.empty:
+            continue
+
+        # Build the context dict for this session
+        ctx = {col: session_row[col] for col in SESSION_CONTEXT if col in session_row.index}
+
+        for _, log_row in log_df.iterrows():
+            level_str = str(log_row.get('Level', ''))
+            is_end = '(Session End' in level_str
+
+            # Parse reward count from e.g. "level_6.json (Session End - 8 rewards)"
+            end_rewards = float('nan')
+            if is_end:
+                import re as _re
+                m = _re.search(r'Session End\s*-\s*(\d+)\s*reward', level_str, _re.IGNORECASE)
+                if m:
+                    end_rewards = int(m.group(1))
+
+            # Clean level name (strip suffix)
+            log_level = level_str.split('(')[0].strip()
+
+            row = {**ctx, **log_row.to_dict(),
+                   'is_session_end': is_end,
+                   'end_rewards':    end_rewards,
+                   'log_level':      log_level}
+            flat_rows.append(row)
+
+    flat_log = pd.DataFrame(flat_rows).reset_index(drop=True)
+    return flat_log
+
+
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
-def load_data() -> tuple[dict[str, pd.DataFrame], dict[str, pd.DataFrame | None], pd.DataFrame]:
+def load_data() -> tuple[
+    dict[str, pd.DataFrame],
+    dict[str, pd.DataFrame | None],
+    pd.DataFrame,
+    pd.DataFrame,
+]:
     """
     Open tkinter dialogs, load data + logs, print a summary, and return:
         data     – { animal_id: sessions_df }
         logs     – { animal_id: log_df | None }
-        combined – long DataFrame with one row per session across all animals
+        combined – one row per session; log_entries column holds matching log rows
+        flat_log – one row per log entry, with session context columns joined in
     """
     root = tk.Tk()
     root.withdraw()
@@ -152,16 +295,17 @@ def load_data() -> tuple[dict[str, pd.DataFrame], dict[str, pd.DataFrame | None]
     logs = load_log_files(list(data.keys()))
 
     combined = build_combined(data, logs)
+    flat_log  = build_flat_log(combined)
 
     n_matched = sum(1 for v in logs.values() if v is not None)
     print(f'\nSummary: {len(data)} animals | {n_matched}/{len(logs)} logs matched '
-          f'| {len(combined)} total sessions')
+          f'| {len(combined)} sessions | {len(flat_log)} log entries')
 
-    return data, logs, combined
+    return data, logs, combined, flat_log
 
 
 def main():
-    data, logs, combined = load_data()
+    data, logs, combined, flat_log = load_data()
     if combined.empty:
         return
 
@@ -169,6 +313,14 @@ def main():
     display_cols = [c for c in combined.columns if c != 'log_entries']
     print('\nCombined session table (first 20 rows):')
     print(combined[display_cols].head(20).to_string(index=False))
+
+    # Print a preview of the flat log table
+    print('\nFlat log table (first 20 rows):')
+    flat_preview_cols = ['animal_id', 'session_num', 'date', 'level',
+                         'reward_threshold', 'Date', 'Time',
+                         'log_level', 'is_session_end', 'end_rewards']
+    flat_preview_cols = [c for c in flat_preview_cols if c in flat_log.columns]
+    print(flat_log[flat_preview_cols].head(20).to_string(index=False))
 
 
 if __name__ == '__main__':
