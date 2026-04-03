@@ -69,6 +69,46 @@ def cache_kde_value(capacitive_filepath, kde_value):
         # If caching fails, just continue without caching
         print(f"Warning: Cache write failed for {capacitive_filepath}: {e}")
 
+def compute_session_distance(treadmill_df):
+    """Compute total distance traversed in a session from raw treadmill data.
+
+    Finds the first non-zero value in the 'distance' column, subtracts it from
+    all rows to normalise the cumulative odometer to zero at the start of
+    motion, then returns both the full normalised series and the total distance
+    (final normalised value) for the session.
+
+    Parameters
+    ----------
+    treadmill_df : pd.DataFrame
+        Raw treadmill CSV loaded as a DataFrame (must contain a 'distance' column).
+
+    Returns
+    -------
+    normalised : pd.Series
+        Per-row cumulative distance from the first non-zero sample (same index
+        as treadmill_df).  All rows before the first non-zero value are NaN.
+    total_distance : float
+        Distance traversed from first non-zero sample to end of session (cm).
+        NaN if no non-zero distance is found.
+    """
+    dist = pd.to_numeric(treadmill_df['distance'], errors='coerce')
+    nonzero_mask = dist != 0
+    if not nonzero_mask.any():
+        return pd.Series(np.nan, index=treadmill_df.index), float('nan')
+
+    first_nonzero_val = dist[nonzero_mask].iloc[0]
+    first_nonzero_idx = nonzero_mask.idxmax()           # label of first True
+
+    normalised = dist.copy()
+    # Rows before first non-zero are meaningless pre-motion artefacts; set NaN
+    normalised.loc[:first_nonzero_idx] = np.nan
+    normalised = normalised - first_nonzero_val          # shift so first point = 0
+    normalised.loc[first_nonzero_idx] = 0.0              # ensure exactly 0
+
+    total_distance = float(normalised.dropna().iloc[-1]) if len(normalised.dropna()) > 0 else float('nan')
+    return normalised, total_distance
+
+
 def generate_colors(n):
     """Generate n distinct colors"""
     colors = []
@@ -207,6 +247,8 @@ _ALL_PLOT_KEYS = {
     'speed', 'sensitivity', 'lick_count', 'reward_count',
     'false_alarms', 'correct_rejections', 'specificity', 'dprime',
     'avg_reward', 'sex_reward',
+    'distance', 'sex_distance', 'condition_distance',
+    'condition_distance_bar', 'total_distance_bar',
     'condition_reward', 'condition_speed', 'condition_lick', 'condition_bar', 'condition_speed_bar',
     'levels', 'level_speed', 'level_speed_condition',
     'avg_lick_rate', 'sex_lick_rate', 'condition_lick_rate', 'condition_lick_bar',
@@ -224,6 +266,11 @@ _PLOT_LABELS = [
     ('dprime',              "Individual: d' over time"),
     ('avg_reward',          'Aggregate: Average reward rate across all mice'),
     ('sex_reward',          'Aggregate: Sex-specific average reward rate'),
+    ('distance',            'Individual: Total distance per session (m)'),
+    ('sex_distance',        'Aggregate: Sex-specific average distance per session (m)'),
+    ('condition_distance',  'Condition: Distance per session by starting condition (m)'),
+    ('condition_distance_bar', 'Condition: Average distance per session — collapsed bar chart (m)'),
+    ('total_distance_bar',    'Condition: Total distance per mouse — collapsed bar chart (m)'),
     ('avg_lick_rate',       'Aggregate: Average lick rate across all mice'),
     ('sex_lick_rate',       'Aggregate: Sex-specific average lick rate'),
     ('condition_reward',    'Condition: Reward rate over time (line)'),
@@ -242,22 +289,75 @@ _PLOT_LABELS = [
 
 
 def _ask_plot_selection(root):
-    """Show a checkbox dialog and return the frozenset of selected plot keys."""
+    """Show a scrollable checkbox dialog and return the frozenset of selected plot keys."""
     dialog = tk.Toplevel(root)
     dialog.title('Select Plots to Generate')
-    dialog.resizable(False, False)
+    dialog.resizable(True, True)
     dialog.grab_set()
 
+    # ── Header (outside the scroll area) ─────────────────────────────────────
     tk.Label(dialog, text='Select which plots to generate:',
              font=('Arial', 11, 'bold')).pack(anchor='w', padx=14, pady=(12, 4))
 
+    # ── Scrollable canvas + inner frame ──────────────────────────────────────
+    container = tk.Frame(dialog)
+    container.pack(fill='both', expand=True, padx=14, pady=4)
+
+    canvas = tk.Canvas(container, borderwidth=0, highlightthickness=0)
+    scrollbar = tk.Scrollbar(container, orient='vertical', command=canvas.yview)
+    canvas.configure(yscrollcommand=scrollbar.set)
+
+    scrollbar.pack(side='right', fill='y')
+    canvas.pack(side='left', fill='both', expand=True)
+
+    inner = tk.Frame(canvas)
+    inner_id = canvas.create_window((0, 0), window=inner, anchor='nw')
+
+    def _on_inner_configure(event):
+        canvas.configure(scrollregion=canvas.bbox('all'))
+
+    def _on_canvas_configure(event):
+        canvas.itemconfig(inner_id, width=event.width)
+
+    inner.bind('<Configure>', _on_inner_configure)
+    canvas.bind('<Configure>', _on_canvas_configure)
+
+    # Mouse-wheel scrolling (cross-platform)
+    def _on_mousewheel(event):
+        if event.num == 4:          # Linux scroll up
+            canvas.yview_scroll(-1, 'units')
+        elif event.num == 5:        # Linux scroll down
+            canvas.yview_scroll(1, 'units')
+        else:                       # Windows / macOS
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), 'units')
+
+    canvas.bind('<MouseWheel>', _on_mousewheel)
+    canvas.bind('<Button-4>',   _on_mousewheel)
+    canvas.bind('<Button-5>',   _on_mousewheel)
+    inner.bind('<MouseWheel>',  _on_mousewheel)
+    inner.bind('<Button-4>',    _on_mousewheel)
+    inner.bind('<Button-5>',    _on_mousewheel)
+
+    # ── Checkboxes ────────────────────────────────────────────────────────────
     vars_ = {}
     for key, label in _PLOT_LABELS:
         var = tk.BooleanVar(value=True)
         vars_[key] = var
-        tk.Checkbutton(dialog, text=label, variable=var, anchor='w').pack(
-            fill='x', padx=22, pady=1)
+        cb = tk.Checkbutton(inner, text=label, variable=var, anchor='w')
+        cb.pack(fill='x', padx=8, pady=1)
+        cb.bind('<MouseWheel>', _on_mousewheel)
+        cb.bind('<Button-4>',   _on_mousewheel)
+        cb.bind('<Button-5>',   _on_mousewheel)
 
+    # Cap the dialog height to 80 % of the screen
+    dialog.update_idletasks()
+    screen_h = dialog.winfo_screenheight()
+    max_h    = int(screen_h * 0.80)
+    natural_h = inner.winfo_reqheight() + 120   # header + buttons
+    dialog_h  = min(natural_h, max_h)
+    dialog.geometry(f'520x{dialog_h}')
+
+    # ── Buttons (outside the scroll area) ────────────────────────────────────
     btn_frame = tk.Frame(dialog)
     btn_frame.pack(fill='x', padx=14, pady=(8, 12))
 
@@ -743,7 +843,8 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         print(f"\nSaving lick detection plots to: {lick_plots_dir}")
     
     # Create color mapping based on starting conditions
-    unique_conditions = list(set(starting_conditions))
+    # Sort so that the condition→color assignment is deterministic across runs
+    unique_conditions = sorted(set(starting_conditions))
     condition_colors = generate_colors(len(unique_conditions))
     condition_color_map = {condition: color for condition, color in zip(unique_conditions, condition_colors)}
     
@@ -759,6 +860,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     correct_rejection_fig = plt.figure(figsize=(12, 6)) if 'correct_rejections' in selected_plots else None
     specificity_fig       = plt.figure(figsize=(12, 6)) if 'specificity'        in selected_plots else None
     dprime_fig            = plt.figure(figsize=(12, 6)) if 'dprime'             in selected_plots else None
+    distance_fig          = plt.figure(figsize=(12, 6)) if 'distance'           in selected_plots else None
     colors = generate_colors(len(data_files))  # Generate colors based on number of mice
     
     all_results = []
@@ -772,6 +874,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         # Initialize lists to store results
         dates = []
         speeds = []
+        total_distances = []  # List for total session distances (cm)
         hits = []  # List for reward events
         misses_list = []  # List for misses (texture changes minus hits)
         sensitivities = []  # List for sensitivity values
@@ -822,8 +925,10 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                 # ── Treadmill-derived metrics ─────────────────────────────
                 if treadmill_data is not None:
                     avg_speed = treadmill_data['speed'].mean() / 10.0
+                    _, total_distance = compute_session_distance(treadmill_data)
                 else:
                     avg_speed = float('nan')
+                    total_distance = float('nan')
 
                 # ── Capacitive-derived metrics ────────────────────────────
                 if capacitive_data is not None:
@@ -993,6 +1098,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
 
                 dates.append(date)
                 speeds.append(avg_speed)
+                total_distances.append(total_distance)
                 hits.append(reward_count)
                 misses_list.append(misses)
                 sensitivities.append(sensitivity)
@@ -1011,6 +1117,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         results_df = pd.DataFrame({
             'date': dates,
             'average_speed': speeds,
+            'total_distance': total_distances,
             'hits': hits,
             'misses': misses_list,
             'sensitivity': sensitivities,
@@ -1039,6 +1146,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             'mouse': mouse_name,
             'dates': dates,
             'speeds': speeds,
+            'total_distances': total_distances,
             'hits': hits,
             'false_alarms': false_alarms_list,
             'correct_rejections': correct_rejections_list,
@@ -1104,6 +1212,13 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         if dprime_fig is not None:
             plt.figure(dprime_fig.number)
             plt.plot(day_numbers, df_r['dprime'],
+                f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
+
+        if distance_fig is not None:
+            plt.figure(distance_fig.number)
+            # convert mm → m
+            dist_m = df_r['total_distance'] / 1000.0
+            plt.plot(day_numbers, dist_m,
                 f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
 
     # Tick spacing for individual mouse plots
@@ -1262,6 +1377,24 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.tick_params(axis='both', direction='in')
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
+        ax.set_xlim(left=0, right=max_day - 0.5)
+        ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
+        ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
+        ax.tick_params(axis='x', which='minor', direction='in')
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+
+    # Configure distance plot
+    if distance_fig is not None:
+        plt.figure(distance_fig.number)
+        plt.title('Total Distance Per Session')
+        plt.xlabel('Training Day')
+        plt.ylabel('Distance (m)')
+        plt.grid(False)
+        ax = plt.gca()
+        ax.tick_params(axis='both', direction='in')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.set_ylim(bottom=0)
         ax.set_xlim(left=0, right=max_day - 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
@@ -1489,6 +1622,111 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         plt.title('Sex-Specific Average Lick Rate')
         plt.xlabel('Training Day')
         plt.ylabel('Licks per Minute (Mean \u00b1 SEM)')
+        plt.grid(False)
+        ax = plt.gca()
+        ax.tick_params(axis='both', direction='in')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.set_ylim(bottom=0)
+        ax.set_xlim(left=0, right=max_days - 1)
+        ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
+        ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
+        ax.tick_params(axis='x', which='minor', direction='in')
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+        plt.legend()
+
+    # Build session-indexed per-mouse distance arrays (mm → m)
+    all_distances_m = np.full((len(data_files), max_sessions), np.nan)
+    male_distances_m   = []
+    female_distances_m = []
+
+    for i, result in enumerate(all_results):
+        df_r = result['df']
+        dist_row = np.full(max_sessions, np.nan)
+        for session_idx, (_, row) in enumerate(df_r.iterrows()):
+            if pd.notna(row['total_distance']):
+                dist_row[session_idx] = row['total_distance'] / 1000.0  # mm → m
+        all_distances_m[i] = dist_row
+        mouse_name = result['mouse']
+        if markers[mouse_name] == 's':
+            male_distances_m.append(dist_row)
+        else:
+            female_distances_m.append(dist_row)
+
+    if male_distances_m:
+        male_distances_m = np.array(male_distances_m)
+    if female_distances_m:
+        female_distances_m = np.array(female_distances_m)
+
+    # Sex-specific distance plot
+    sex_distance_fig = plt.figure(figsize=(12, 6)) if 'sex_distance' in selected_plots else None
+    if sex_distance_fig is not None:
+        plt.figure(sex_distance_fig.number)
+        day_numbers = np.arange(0, max_days)
+        if len(male_distances_m) > 0 and np.any(~np.isnan(male_distances_m)):
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', RuntimeWarning)
+                n_m = np.sum(~np.isnan(male_distances_m), axis=0)
+                mean_m = np.where(n_m > 0, np.nanmean(male_distances_m, axis=0), np.nan)
+                sem_m  = np.where(n_m > 1, np.nanstd(male_distances_m, axis=0) / np.sqrt(n_m), 0)
+            plt.plot(day_numbers, mean_m, '-', color='green', linewidth=2,
+                     label=f'Male (n={len(male_distances_m)})')
+            plt.fill_between(day_numbers, mean_m - sem_m, mean_m + sem_m, color='green', alpha=0.2)
+        if len(female_distances_m) > 0 and np.any(~np.isnan(female_distances_m)):
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', RuntimeWarning)
+                n_f = np.sum(~np.isnan(female_distances_m), axis=0)
+                mean_f = np.where(n_f > 0, np.nanmean(female_distances_m, axis=0), np.nan)
+                sem_f  = np.where(n_f > 1, np.nanstd(female_distances_m, axis=0) / np.sqrt(n_f), 0)
+            plt.plot(day_numbers, mean_f, '-', color='purple', linewidth=2,
+                     label=f'Female (n={len(female_distances_m)})')
+            plt.fill_between(day_numbers, mean_f - sem_f, mean_f + sem_f, color='purple', alpha=0.2)
+        plt.title('Sex-Specific Average Distance Per Session')
+        plt.xlabel('Training Day')
+        plt.ylabel('Distance (m, Mean \u00b1 SEM)')
+        plt.grid(False)
+        ax = plt.gca()
+        ax.tick_params(axis='both', direction='in')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.set_ylim(bottom=0)
+        ax.set_xlim(left=0, right=max_days - 1)
+        ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
+        ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
+        ax.tick_params(axis='x', which='minor', direction='in')
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+        plt.legend()
+
+    # Condition-based distance plot
+    condition_distance_fig = plt.figure(figsize=(12, 6)) if 'condition_distance' in selected_plots else None
+    if condition_distance_fig is not None:
+        condition_dist_groups = {}
+        for result in all_results:
+            condition = result['starting_condition']
+            if condition not in condition_dist_groups:
+                condition_dist_groups[condition] = []
+            df_r = result['df']
+            dist_array = np.full(max_sessions, np.nan)
+            for session_idx, (_, row) in enumerate(df_r.iterrows()):
+                if pd.notna(row['total_distance']):
+                    dist_array[session_idx] = row['total_distance'] / 1000.0  # mm → m
+            condition_dist_groups[condition].append(dist_array)
+
+        day_numbers = np.arange(0, max_sessions)
+        for condition, dist_list in condition_dist_groups.items():
+            color = condition_color_map[condition]
+            padded = np.array(dist_list)
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', RuntimeWarning)
+                n_mice = np.sum(~np.isnan(padded), axis=0)
+                mean_d = np.where(n_mice > 0, np.nanmean(padded, axis=0), np.nan)
+                sem_d  = np.where(n_mice > 1, np.nanstd(padded, axis=0) / np.sqrt(n_mice), 0)
+            plt.plot(day_numbers, mean_d, '-', color=color, linewidth=2,
+                     label=f'{condition} (n={len(dist_list)})')
+            plt.fill_between(day_numbers, mean_d - sem_d, mean_d + sem_d, color=color, alpha=0.2)
+        plt.title('Average Distance Per Session by Starting Condition')
+        plt.xlabel('Training Day')
+        plt.ylabel('Distance (m, Mean \u00b1 SEM)')
         plt.grid(False)
         ax = plt.gca()
         ax.tick_params(axis='both', direction='in')
@@ -1847,6 +2085,96 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax_lbar.spines['right'].set_visible(False)
         condition_lick_bar_fig.tight_layout()
 
+    # Create collapsed condition bar plot for average distance per session (mm → m)
+    condition_distance_bar_fig = None
+    if 'condition_distance_bar' in selected_plots:
+        condition_distance_bar_fig, ax_dbar = plt.subplots(figsize=(8, 6))
+
+        condition_mouse_dist_avg: dict[str, list] = {}
+        for result in all_results:
+            condition = result['starting_condition']
+            df_r = result['df']
+            session_dists = pd.to_numeric(df_r['total_distance'], errors='coerce').dropna().tolist()
+            if session_dists:
+                if condition not in condition_mouse_dist_avg:
+                    condition_mouse_dist_avg[condition] = []
+                condition_mouse_dist_avg[condition].append(
+                    (result['mouse'], float(np.mean(session_dists)) / 1000.0))  # mm → m
+
+        conditions_sorted_dbar = sorted(condition_mouse_dist_avg.keys())
+        x_pos_dbar = np.arange(len(conditions_sorted_dbar))
+
+        rng_dbar = np.random.default_rng(seed=42)
+        for ci, condition in enumerate(conditions_sorted_dbar):
+            entries = condition_mouse_dist_avg[condition]
+            mouse_dists = [v for _, v in entries]
+            mean_d = float(np.mean(mouse_dists))
+            sem_d  = float(np.std(mouse_dists, ddof=1) / np.sqrt(len(mouse_dists))) if len(mouse_dists) > 1 else 0.0
+            color = condition_color_map[condition]
+            ax_dbar.bar(ci, mean_d, width=0.5, color=color, alpha=0.8,
+                        yerr=sem_d, capsize=7, error_kw={'elinewidth': 1.5, 'capthick': 1.5})
+            jitter = (rng_dbar.random(len(mouse_dists)) - 0.5) * 0.22
+            for j, (_, dist_val) in enumerate(entries):
+                ax_dbar.plot(ci + jitter[j], dist_val, 'o',
+                             color='white', markeredgecolor=color,
+                             markeredgewidth=1.8, markersize=7, zorder=3)
+
+        ax_dbar.set_xticks(x_pos_dbar)
+        ax_dbar.set_xticklabels(conditions_sorted_dbar)
+        ax_dbar.set_title('Average Distance Per Session by Starting Condition\n(collapsed across all sessions)')
+        ax_dbar.set_xlabel('Starting Condition')
+        ax_dbar.set_ylabel('Average Distance per Session (m, Mean \u00b1 SEM)')
+        ax_dbar.set_ylim(bottom=0)
+        ax_dbar.tick_params(axis='both', direction='in')
+        ax_dbar.spines['top'].set_visible(False)
+        ax_dbar.spines['right'].set_visible(False)
+        condition_distance_bar_fig.tight_layout()
+
+    # Create collapsed condition bar plot for total distance (sum across all sessions, mm → m)
+    total_distance_bar_fig = None
+    if 'total_distance_bar' in selected_plots:
+        total_distance_bar_fig, ax_tbar = plt.subplots(figsize=(8, 6))
+
+        condition_mouse_dist_total: dict[str, list] = {}
+        for result in all_results:
+            condition = result['starting_condition']
+            df_r = result['df']
+            session_dists = pd.to_numeric(df_r['total_distance'], errors='coerce').dropna().tolist()
+            if session_dists:
+                if condition not in condition_mouse_dist_total:
+                    condition_mouse_dist_total[condition] = []
+                condition_mouse_dist_total[condition].append(
+                    (result['mouse'], float(np.sum(session_dists)) / 1000.0))  # mm → m
+
+        conditions_sorted_tbar = sorted(condition_mouse_dist_total.keys())
+        x_pos_tbar = np.arange(len(conditions_sorted_tbar))
+
+        rng_tbar = np.random.default_rng(seed=42)
+        for ci, condition in enumerate(conditions_sorted_tbar):
+            entries = condition_mouse_dist_total[condition]
+            mouse_totals = [v for _, v in entries]
+            mean_t = float(np.mean(mouse_totals))
+            sem_t  = float(np.std(mouse_totals, ddof=1) / np.sqrt(len(mouse_totals))) if len(mouse_totals) > 1 else 0.0
+            color = condition_color_map[condition]
+            ax_tbar.bar(ci, mean_t, width=0.5, color=color, alpha=0.8,
+                        yerr=sem_t, capsize=7, error_kw={'elinewidth': 1.5, 'capthick': 1.5})
+            jitter = (rng_tbar.random(len(mouse_totals)) - 0.5) * 0.22
+            for j, (_, total_val) in enumerate(entries):
+                ax_tbar.plot(ci + jitter[j], total_val, 'o',
+                             color='white', markeredgecolor=color,
+                             markeredgewidth=1.8, markersize=7, zorder=3)
+
+        ax_tbar.set_xticks(x_pos_tbar)
+        ax_tbar.set_xticklabels(conditions_sorted_tbar)
+        ax_tbar.set_title('Total Distance Traveled per Mouse by Starting Condition\n(summed across all sessions)')
+        ax_tbar.set_xlabel('Starting Condition')
+        ax_tbar.set_ylabel('Total Distance (m, Mean \u00b1 SEM)')
+        ax_tbar.set_ylim(bottom=0)
+        ax_tbar.tick_params(axis='both', direction='in')
+        ax_tbar.spines['top'].set_visible(False)
+        ax_tbar.spines['right'].set_visible(False)
+        total_distance_bar_fig.tight_layout()
+
     # Create the level-based analysis plots
     level_reward_fig = level_speed_collapsed_fig = level_speed_condition_fig = None
     level_lick_collapsed_fig = level_lick_condition_fig = None
@@ -1912,7 +2240,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         f.write(report_text + "\n")
     print(f"\nMissing data report saved to: {report_path}")
 
-    return speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_lick_fig, condition_lick_rate_fig, condition_bar_fig, condition_speed_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, all_results
+    return speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, distance_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_lick_fig, condition_lick_rate_fig, condition_bar_fig, condition_speed_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, all_results
 
 def main():
     # Create and hide the root window
@@ -2002,7 +2330,7 @@ def main():
                 continue
         
         # Analyze data and plot results
-        speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_lick_fig, condition_lick_rate_fig, condition_bar_fig, condition_speed_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, all_results = analyze_mouse_data(
+        speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, distance_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_lick_fig, condition_lick_rate_fig, condition_bar_fig, condition_speed_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, all_results = analyze_mouse_data(
             file_paths, markers, starting_conditions,
             transitions_csv_path=transitions_csv_path,
             selected_plots=selected_plots,
@@ -2013,6 +2341,8 @@ def main():
             speed_fig, sensitivity_fig, lick_fig, reward_fig,
             false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig,
             avg_reward_fig, sex_reward_fig,
+            distance_fig, sex_distance_fig, condition_distance_fig,
+            condition_distance_bar_fig, total_distance_bar_fig,
             avg_lick_rate_fig, sex_lick_rate_fig,
             condition_reward_fig, condition_speed_fig, condition_lick_fig, condition_lick_rate_fig,
             condition_bar_fig, condition_speed_bar_fig, condition_lick_bar_fig,
@@ -2054,6 +2384,11 @@ def main():
             (dprime_fig,            'dprime',              "d' plot"),
             (avg_reward_fig,        'avg_reward',          'Average rewards plot'),
             (sex_reward_fig,        'sex_reward',          'Sex-specific average rewards plot'),
+            (distance_fig,          'distance',            'Distance per session plot'),
+            (sex_distance_fig,      'sex_distance',        'Sex-specific distance per session plot'),
+            (condition_distance_fig,'condition_distance',  'Condition-based distance per session plot'),
+            (condition_distance_bar_fig, 'condition_distance_bar', 'Condition distance collapsed bar chart'),
+            (total_distance_bar_fig,     'total_distance_bar',     'Total distance per mouse collapsed bar chart'),
             (avg_lick_rate_fig,     'avg_lick_rate',       'Average lick rate plot'),
             (sex_lick_rate_fig,     'sex_lick_rate',       'Sex-specific lick rate plot'),
             (condition_reward_fig,  'condition_reward',    'Condition-based average rewards plot'),
