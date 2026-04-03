@@ -253,6 +253,7 @@ _ALL_PLOT_KEYS = {
     'levels', 'level_speed', 'level_speed_condition',
     'avg_lick_rate', 'sex_lick_rate', 'condition_lick_rate', 'condition_lick_bar',
     'level_lick', 'level_lick_condition',
+    'level_dist', 'level_dist_condition', 'level_dist_condition_excl_last',
 }
 
 _PLOT_LABELS = [
@@ -285,6 +286,9 @@ _PLOT_LABELS = [
     ('level_speed_condition', 'Level: Average speed by level — by condition (requires transitions CSV)'),
     ('level_lick',            'Level: Average lick rate by level — collapsed (requires transitions CSV)'),
     ('level_lick_condition',  'Level: Average lick rate by level — by condition (requires transitions CSV)'),
+    ('level_dist',            'Level: Distance traveled by level — collapsed (requires transitions CSV)'),
+    ('level_dist_condition',  'Level: Distance traveled by level — by condition (requires transitions CSV)'),
+    ('level_dist_condition_excl_last', 'Level: Distance traveled by level — by condition, last level excluded (requires transitions CSV)'),
 ]
 
 
@@ -403,17 +407,19 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
     """
     # (animal_id, level) -> {'rewards': int, 'duration_min': float, 'condition': str}
     animal_level_accum: dict[tuple, dict] = {}
+    # animal_id -> last level seen (updated each session; final value = potentially incomplete level)
+    animal_last_level: dict[str, str] = {}
 
     # Load transitions CSV -------------------------------------------------------
     if not transitions_csv_path:
         print("  [WARN] No transitions CSV provided — level plot will be empty.")
-        return plt.figure(figsize=(15, 8)), None, None, None, None
+        return plt.figure(figsize=(15, 8)), None, None, None, None, None, None, None
     try:
         transitions_df = pd.read_csv(transitions_csv_path)
         transitions_df['date'] = pd.to_datetime(transitions_df['date'])
     except Exception as e:
         print(f"  [ERROR] Cannot read transitions CSV: {e}")
-        return plt.figure(figsize=(15, 8)), None, None, None, None
+        return plt.figure(figsize=(15, 8)), None, None, None, None, None, None, None
 
     # Build lookup (animal_id, date_normalised) -> {trial_log, capacitive} ------
     session_lookup = {}
@@ -488,7 +494,10 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
                 try:
                     tm = pd.read_csv(treadmill_path)
                     if 'global_time' in tm.columns and 'speed' in tm.columns:
-                        treadmill_df = tm[['global_time', 'speed']].dropna()
+                        load_cols = ['global_time', 'speed']
+                        if 'distance' in tm.columns:
+                            load_cols.append('distance')
+                        treadmill_df = tm[load_cols].dropna(subset=['global_time', 'speed'])
                 except Exception:
                     pass
 
@@ -531,7 +540,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
                     animal_level_accum[key] = {'rewards': 0, 'duration_min': 0.0,
                                                'condition': condition,
                                                'speed_sum': 0.0, 'speed_count': 0,
-                                               'lick_count': 0}
+                                               'lick_count': 0, 'dist_sum': 0.0}
                 animal_level_accum[key]['rewards']      += count
                 animal_level_accum[key]['duration_min'] += duration_min
                 if treadmill_df is not None and len(treadmill_df) > 0:
@@ -542,6 +551,18 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
                 if len(lick_event_times) > 0:
                     lick_mask = (lick_event_times >= start_t) & (lick_event_times < end_t)
                     animal_level_accum[key]['lick_count'] += int(np.sum(lick_mask))
+                if treadmill_df is not None and 'distance' in treadmill_df.columns:
+                    dist_col = pd.to_numeric(treadmill_df['distance'], errors='coerce')
+                    dist_window = dist_col[
+                        (treadmill_df['global_time'] >= start_t) &
+                        (treadmill_df['global_time'] < end_t)
+                    ].dropna()
+                    if len(dist_window) >= 2:
+                        animal_level_accum[key]['dist_sum'] += float(
+                            dist_window.iloc[-1] - dist_window.iloc[0])
+            # Record the last level of this session; final session's value = the incomplete level
+            if levels:
+                animal_last_level[animal_id] = levels[-1]
 
     # Collapse accumulators: one rpm, mean speed, and mean lick rate per (animal, level)
     # condition_level_data[condition][level] = [rpm_animal1, rpm_animal2, ...]
@@ -550,6 +571,8 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
     collapsed_level_speed: dict[str, list[float]] = {}
     condition_level_lick: dict[str, dict[str, list[float]]] = {}
     collapsed_level_lick: dict[str, list[float]] = {}
+    condition_level_dist: dict[str, dict[str, list[float]]] = {}
+    collapsed_level_dist: dict[str, list[float]] = {}
     for (animal_id, level), accum in animal_level_accum.items():
         condition = accum['condition']
         if accum['duration_min'] > 0:
@@ -563,6 +586,20 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
             lpm = accum['lick_count'] / accum['duration_min']
             condition_level_lick.setdefault(condition, {}).setdefault(level, []).append(lpm)
             collapsed_level_lick.setdefault(level, []).append(lpm)
+        if accum.get('dist_sum', 0.0) > 0:
+            dist_m = accum['dist_sum'] / 1000.0  # mm → m
+            condition_level_dist.setdefault(condition, {}).setdefault(level, []).append(dist_m)
+            collapsed_level_dist.setdefault(level, []).append(dist_m)
+
+    # Per-condition distance excluding each mouse's last (potentially incomplete) level
+    condition_level_dist_excl_last: dict[str, dict[str, list[float]]] = {}
+    for (animal_id, level), accum in animal_level_accum.items():
+        if level == animal_last_level.get(animal_id):
+            continue  # skip last level — final session may be incomplete
+        if accum.get('dist_sum', 0.0) > 0:
+            condition = accum['condition']
+            dist_m = accum['dist_sum'] / 1000.0  # mm → m
+            condition_level_dist_excl_last.setdefault(condition, {}).setdefault(level, []).append(dist_m)
 
     # Sort levels ----------------------------------------------------------------
     def sort_key(x):
@@ -827,7 +864,154 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
         ax_lkc.legend(title='Starting Condition')
         level_lick_condition_fig.tight_layout()
 
-    return level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig
+    # ── Collapsed distance by level (all mice) ───────────────────────────────
+    level_dist_collapsed_fig = None
+    if 'level_dist' in selected_plots and collapsed_level_dist:
+        all_levels_dc = sorted(collapsed_level_dist.keys(), key=sort_key)
+        level_dist_collapsed_fig, ax_dc = plt.subplots(
+            figsize=(max(15, len(all_levels_dc) * 0.8), 8))
+        x_dc = np.arange(len(all_levels_dc))
+        dc_means, dc_sems, dc_ns = [], [], []
+        for lv in all_levels_dc:
+            vals = collapsed_level_dist[lv]
+            dc_means.append(float(np.mean(vals)))
+            dc_sems.append(float(np.std(vals) / np.sqrt(len(vals))))
+            dc_ns.append(len(vals))
+        ax_dc.bar(x_dc, dc_means, yerr=dc_sems, capsize=4, color='steelblue',
+                  error_kw={'elinewidth': 1.2})
+        for xi, (m, n_val) in enumerate(zip(dc_means, dc_ns)):
+            if n_val > 0 and not np.isnan(m):
+                ax_dc.text(xi, m + (dc_sems[xi] if not np.isnan(dc_sems[xi]) else 0),
+                           f'n={n_val}', ha='center', va='bottom', fontsize=7)
+        ax_dc.set_xticks(x_dc)
+        ax_dc.set_xticklabels(
+            [lv.replace('level_', 'L').replace('.json', '') for lv in all_levels_dc],
+            rotation=45, ha='right',
+        )
+        ax_dc.set_title('Distance Traveled by Level \u2014 All Mice')
+        ax_dc.set_xlabel('Level')
+        ax_dc.set_ylabel('Distance (m, Mean \u00b1 SEM)')
+        ax_dc.set_ylim(bottom=0)
+        ax_dc.tick_params(axis='both', direction='in')
+        ax_dc.spines['top'].set_visible(False)
+        ax_dc.spines['right'].set_visible(False)
+        level_dist_collapsed_fig.tight_layout()
+
+    # ── Distance by level split by condition ─────────────────────────────────
+    level_dist_condition_fig = None
+    if 'level_dist_condition' in selected_plots and condition_level_dist:
+        all_levels_dcc = sorted(
+            {lv for cd in condition_level_dist.values() for lv in cd},
+            key=sort_key,
+        )
+        conds_dcc = sorted(condition_level_dist.keys())
+        n_conds_dcc = len(conds_dcc)
+        level_dist_condition_fig, ax_dcc = plt.subplots(
+            figsize=(max(15, len(all_levels_dcc) * 0.8), 8))
+        bw_dcc = 0.8 / max(n_conds_dcc, 1)
+        x_dcc = np.arange(len(all_levels_dcc))
+        for ci, cond in enumerate(conds_dcc):
+            cdata = condition_level_dist[cond]
+            means_dcc, sems_dcc, ns_dcc = [], [], []
+            for lv in all_levels_dcc:
+                vals = cdata.get(lv, [])
+                if vals:
+                    means_dcc.append(float(np.mean(vals)))
+                    sems_dcc.append(float(np.std(vals) / np.sqrt(len(vals))))
+                    ns_dcc.append(len(vals))
+                else:
+                    means_dcc.append(np.nan)
+                    sems_dcc.append(np.nan)
+                    ns_dcc.append(0)
+            offset_dcc = (ci - (n_conds_dcc - 1) / 2) * bw_dcc
+            ax_dcc.bar(
+                x_dcc + offset_dcc, means_dcc,
+                width=bw_dcc, yerr=sems_dcc, capsize=4,
+                color=cond_color_map.get(cond, 'gray'),
+                label=cond,
+                error_kw={'elinewidth': 1.2},
+            )
+            for xi, (m, n_val) in enumerate(zip(means_dcc, ns_dcc)):
+                if n_val > 0 and not np.isnan(m):
+                    ax_dcc.text(
+                        x_dcc[xi] + offset_dcc,
+                        m + (sems_dcc[xi] if not np.isnan(sems_dcc[xi]) else 0),
+                        f'n={n_val}', ha='center', va='bottom', fontsize=7,
+                        color=cond_color_map.get(cond, 'gray'),
+                    )
+        ax_dcc.set_xticks(x_dcc)
+        ax_dcc.set_xticklabels(
+            [lv.replace('level_', 'L').replace('.json', '') for lv in all_levels_dcc],
+            rotation=45, ha='right',
+        )
+        ax_dcc.set_title('Distance Traveled by Level \u2014 by Starting Condition')
+        ax_dcc.set_xlabel('Level')
+        ax_dcc.set_ylabel('Distance (m, Mean \u00b1 SEM)')
+        ax_dcc.set_ylim(bottom=0)
+        ax_dcc.tick_params(axis='both', direction='in')
+        ax_dcc.spines['top'].set_visible(False)
+        ax_dcc.spines['right'].set_visible(False)
+        ax_dcc.legend(title='Starting Condition')
+        level_dist_condition_fig.tight_layout()
+
+    # ── Distance by level split by condition (each mouse's last level excluded) ─
+    level_dist_condition_excl_last_fig = None
+    if 'level_dist_condition_excl_last' in selected_plots and condition_level_dist_excl_last:
+        all_levels_dcx = sorted(
+            {lv for cd in condition_level_dist_excl_last.values() for lv in cd},
+            key=sort_key,
+        )
+        conds_dcx = sorted(condition_level_dist_excl_last.keys())
+        n_conds_dcx = len(conds_dcx)
+        level_dist_condition_excl_last_fig, ax_dcx = plt.subplots(
+            figsize=(max(15, len(all_levels_dcx) * 0.8), 8))
+        bw_dcx = 0.8 / max(n_conds_dcx, 1)
+        x_dcx = np.arange(len(all_levels_dcx))
+        for ci, cond in enumerate(conds_dcx):
+            cdata = condition_level_dist_excl_last[cond]
+            means_dcx, sems_dcx, ns_dcx = [], [], []
+            for lv in all_levels_dcx:
+                vals = cdata.get(lv, [])
+                if vals:
+                    means_dcx.append(float(np.mean(vals)))
+                    sems_dcx.append(float(np.std(vals) / np.sqrt(len(vals))))
+                    ns_dcx.append(len(vals))
+                else:
+                    means_dcx.append(np.nan)
+                    sems_dcx.append(np.nan)
+                    ns_dcx.append(0)
+            offset_dcx = (ci - (n_conds_dcx - 1) / 2) * bw_dcx
+            ax_dcx.bar(
+                x_dcx + offset_dcx, means_dcx,
+                width=bw_dcx, yerr=sems_dcx, capsize=4,
+                color=cond_color_map.get(cond, 'gray'),
+                label=cond,
+                error_kw={'elinewidth': 1.2},
+            )
+            for xi, (m, n_val) in enumerate(zip(means_dcx, ns_dcx)):
+                if n_val > 0 and not np.isnan(m):
+                    ax_dcx.text(
+                        x_dcx[xi] + offset_dcx,
+                        m + (sems_dcx[xi] if not np.isnan(sems_dcx[xi]) else 0),
+                        f'n={n_val}', ha='center', va='bottom', fontsize=7,
+                        color=cond_color_map.get(cond, 'gray'),
+                    )
+        ax_dcx.set_xticks(x_dcx)
+        ax_dcx.set_xticklabels(
+            [lv.replace('level_', 'L').replace('.json', '') for lv in all_levels_dcx],
+            rotation=45, ha='right',
+        )
+        ax_dcx.set_title('Distance Traveled by Level \u2014 by Starting Condition (last level excluded)')
+        ax_dcx.set_xlabel('Level')
+        ax_dcx.set_ylabel('Distance (m, Mean \u00b1 SEM)')
+        ax_dcx.set_ylim(bottom=0)
+        ax_dcx.tick_params(axis='both', direction='in')
+        ax_dcx.spines['top'].set_visible(False)
+        ax_dcx.spines['right'].set_visible(False)
+        ax_dcx.legend(title='Starting Condition')
+        level_dist_condition_excl_last_fig.tight_layout()
+
+    return level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig
 
 def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv_path=None, selected_plots=None, save_lick_plots=False, output_dir=None):
     # Create dictionaries to map mouse names to markers and starting conditions
@@ -2178,10 +2362,15 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     # Create the level-based analysis plots
     level_reward_fig = level_speed_collapsed_fig = level_speed_condition_fig = None
     level_lick_collapsed_fig = level_lick_condition_fig = None
+    level_dist_collapsed_fig = level_dist_condition_fig = level_dist_condition_excl_last_fig = None
     if any(k in selected_plots for k in ('levels', 'level_speed', 'level_speed_condition',
-                                          'level_lick', 'level_lick_condition')):
+                                          'level_lick', 'level_lick_condition',
+                                          'level_dist', 'level_dist_condition',
+                                          'level_dist_condition_excl_last')):
         level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, \
-        level_lick_collapsed_fig, level_lick_condition_fig = analyze_levels(
+        level_lick_collapsed_fig, level_lick_condition_fig, \
+        level_dist_collapsed_fig, level_dist_condition_fig, \
+        level_dist_condition_excl_last_fig = analyze_levels(
             data_files, transitions_csv_path, animal_conditions=conditions,
             selected_plots=selected_plots,
         )
@@ -2240,7 +2429,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         f.write(report_text + "\n")
     print(f"\nMissing data report saved to: {report_path}")
 
-    return speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, distance_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_lick_fig, condition_lick_rate_fig, condition_bar_fig, condition_speed_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, all_results
+    return speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, distance_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_lick_fig, condition_lick_rate_fig, condition_bar_fig, condition_speed_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, all_results
 
 def main():
     # Create and hide the root window
@@ -2298,7 +2487,9 @@ def main():
         # Select transitions CSV only if a level plot was requested
         transitions_csv_path = None
         if any(k in selected_plots for k in ('levels', 'level_speed', 'level_speed_condition',
-                                              'level_lick', 'level_lick_condition')):
+                                              'level_lick', 'level_lick_condition',
+                                              'level_dist', 'level_dist_condition',
+                                              'level_dist_condition_excl_last')):
             transitions_csv_path = filedialog.askopenfilename(
                 title='Select transitions CSV (from level_sorter.py) — cancel to skip level plot',
                 filetypes=[('CSV files', '*.csv'), ('All files', '*.*')],
@@ -2330,7 +2521,7 @@ def main():
                 continue
         
         # Analyze data and plot results
-        speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, distance_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_lick_fig, condition_lick_rate_fig, condition_bar_fig, condition_speed_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, all_results = analyze_mouse_data(
+        speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, distance_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_lick_fig, condition_lick_rate_fig, condition_bar_fig, condition_speed_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, all_results = analyze_mouse_data(
             file_paths, markers, starting_conditions,
             transitions_csv_path=transitions_csv_path,
             selected_plots=selected_plots,
@@ -2348,6 +2539,8 @@ def main():
             condition_bar_fig, condition_speed_bar_fig, condition_lick_bar_fig,
             level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig,
             level_lick_collapsed_fig, level_lick_condition_fig,
+            level_dist_collapsed_fig, level_dist_condition_fig,
+            level_dist_condition_excl_last_fig,
         ] if f is not None]
 
         # Configure all figures (add legend only when labeled artists exist, then tight layout)
@@ -2403,6 +2596,9 @@ def main():
             (level_speed_condition_fig,     'level_speed_condition', 'Level-based average speed — by condition'),
             (level_lick_collapsed_fig,      'level_lick',            'Level-based average lick rate — collapsed'),
             (level_lick_condition_fig,      'level_lick_condition',  'Level-based average lick rate — by condition'),
+            (level_dist_collapsed_fig,      'level_dist',            'Level-based distance — collapsed'),
+            (level_dist_condition_fig,      'level_dist_condition',  'Level-based distance — by condition'),
+            (level_dist_condition_excl_last_fig, 'level_dist_condition_excl_last', 'Level-based distance — by condition, last level excluded'),
         ]
 
         for fig, name, title in plot_configs:
