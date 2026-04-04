@@ -572,6 +572,12 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
                         if 'distance' in tm.columns:
                             load_cols.append('distance')
                         treadmill_df = tm[load_cols].dropna(subset=['global_time', 'speed'])
+                        # Apply Butterworth low-pass (0.25 Hz, order 3) to full session speed
+                        if len(treadmill_df) >= 15:
+                            _fs_lvl = 1.0 / treadmill_df['global_time'].diff().median()
+                            _b_lvl, _a_lvl = butter(3, 0.25 / (_fs_lvl / 2.0), btype='low')
+                            treadmill_df = treadmill_df.copy()
+                            treadmill_df['speed'] = filtfilt(_b_lvl, _a_lvl, treadmill_df['speed'].values)
                 except Exception:
                     pass
 
@@ -1500,12 +1506,10 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                 # ── Treadmill-derived metrics ─────────────────────────────
                 if treadmill_data is not None:
                     _speed_raw = treadmill_data['speed']
-                    # Step 1: moving median (window=5) to remove spike noise
-                    _speed_med = _speed_raw.rolling(window=5, center=True, min_periods=1).median()
-                    # Step 2: Butterworth low-pass (5 Hz, order 3) to smooth
+                    # Butterworth low-pass (0.25 Hz, order 3) applied to raw speed
                     _fs = 1.0 / treadmill_data['global_time'].diff().median()
-                    _b, _a = butter(3, 5.0 / (_fs / 2.0), btype='low')
-                    _speed_filt = filtfilt(_b, _a, _speed_med)
+                    _b, _a = butter(3, 0.25 / (_fs / 2.0), btype='low')
+                    _speed_filt = filtfilt(_b, _a, _speed_raw)
                     avg_speed = float(np.mean(_speed_filt)) / 10.0
                     _, total_distance = compute_session_distance(treadmill_data)
                     # Bout detection on filtered speed (mm/s → cm/s)
