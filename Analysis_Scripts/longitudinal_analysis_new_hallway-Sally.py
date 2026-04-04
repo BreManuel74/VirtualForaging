@@ -487,13 +487,13 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
     # Load transitions CSV -------------------------------------------------------
     if not transitions_csv_path:
         print("  [WARN] No transitions CSV provided — level plot will be empty.")
-        return plt.figure(figsize=(15, 8)), None, None, None, None, None, None, None
+        return plt.figure(figsize=(15, 8)), None, None, None, None, None, None, None, None, None, None, None, None, None, None
     try:
         transitions_df = pd.read_csv(transitions_csv_path)
         transitions_df['date'] = pd.to_datetime(transitions_df['date'])
     except Exception as e:
         print(f"  [ERROR] Cannot read transitions CSV: {e}")
-        return plt.figure(figsize=(15, 8)), None, None, None, None, None, None, None
+        return plt.figure(figsize=(15, 8)), None, None, None, None, None, None, None, None, None, None, None, None, None, None
 
     # Build lookup (animal_id, date_normalised) -> {trial_log, capacitive} ------
     session_lookup = {}
@@ -1401,7 +1401,262 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
         ax_badc.legend(title='Starting Condition')
         level_bout_avg_dist_condition_fig.tight_layout()
 
-    return level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig
+    # ── Package level data for the descriptive stats report ──────────────────
+    _level_stats = {
+        'condition_level_reward_rate':   condition_level_data,
+        'condition_level_speed':         condition_level_speed,
+        'condition_level_lick':          condition_level_lick,
+        'condition_level_dist':          condition_level_dist,
+        'condition_level_bout':          condition_level_bout,
+        'condition_level_bout_avg_spd':  condition_level_bout_avg_spd,
+        'condition_level_bout_avg_dist': condition_level_bout_avg_dist_lvl,
+    } if condition_level_data else None
+
+    return level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, _level_stats
+
+
+# ── Descriptive statistics report ────────────────────────────────────────────
+
+def generate_descriptive_stats_report(all_results, level_stats_data=None, output_dir=None):
+    """Generate a descriptive statistics Excel workbook (.xlsx) with one sheet
+    per metric sliced across training sessions (time) and, if level data are
+    available, per level.  Metrics are grouped by starting condition; statistics
+    reported per group are: mean, SEM, SD, N, min, max, median.
+
+    Parameters
+    ----------
+    all_results : list[dict]
+        Session-level result list produced by analyze_mouse_data.
+    level_stats_data : dict | None
+        Dict produced by analyze_levels containing condition_level_* dicts.
+        Pass None to skip level sheets.
+    output_dir : str | None
+        Directory to save the report.  Defaults to current working directory.
+    """
+    try:
+        import openpyxl
+        from openpyxl.styles import Font, PatternFill, Alignment
+        from openpyxl.utils import get_column_letter
+        from scipy.stats import t as t_dist
+    except ImportError:
+        print("[WARN] openpyxl not found — descriptive stats report skipped. "
+              "Install it with:  pip install openpyxl")
+        return
+
+    STAT_COLS = ['mean', 'sem', 'sd', 'n', 'min', 'max', 'median', 'ci95_lo', 'ci95_hi']
+    HEADER_FONT   = Font(bold=True, color='FFFFFF')
+    HEADER_FILL_A = PatternFill(start_color='1F497D', end_color='1F497D', fill_type='solid')
+    ROW_FILLS = [
+        PatternFill(start_color='DCE6F1', end_color='DCE6F1', fill_type='solid'),
+        PatternFill(start_color='E2EFDA', end_color='E2EFDA', fill_type='solid'),
+    ]
+
+    # ── Helpers ──────────────────────────────────────────────────────────────
+
+    def _clean(v):
+        if v is None:
+            return False
+        if isinstance(v, float) and np.isnan(v):
+            return False
+        return True
+
+    def _desc_stats(vals):
+        a = np.array([v for v in vals if _clean(v)], dtype=float)
+        if len(a) == 0:
+            return dict(mean=np.nan, sem=np.nan, sd=np.nan, n=0,
+                        min=np.nan, max=np.nan, median=np.nan,
+                        ci95_lo=np.nan, ci95_hi=np.nan)
+        _mean = float(np.mean(a))
+        _sd   = float(np.std(a, ddof=1)) if len(a) > 1 else np.nan
+        _sem  = float(_sd / np.sqrt(len(a))) if len(a) > 1 else np.nan
+        if len(a) > 1:
+            _t = t_dist.ppf(0.975, df=len(a) - 1)
+            _ci_lo = _mean - _t * _sem
+            _ci_hi = _mean + _t * _sem
+        else:
+            _ci_lo = _ci_hi = np.nan
+        return dict(
+            mean=_mean,
+            sem=_sem,
+            sd=_sd,
+            n=int(len(a)),
+            min=float(np.min(a)),
+            max=float(np.max(a)),
+            median=float(np.median(a)),
+            ci95_lo=_ci_lo,
+            ci95_hi=_ci_hi,
+        )
+
+    def _sort_level(lv):
+        if lv.startswith('level_'):
+            try:
+                return (0, int(lv.split('_')[1].split('.')[0]))
+            except (ValueError, IndexError):
+                pass
+        return (1, lv)
+
+    def _write_sheet(writer, sheet_name, index_label, rows):
+        """Write a stats sheet to the Excel workbook.
+
+        rows : list[dict]
+            Each dict has {index_label: display_value, cond_name: [float_list], ...}.
+        """
+        all_conds = sorted({k for row in rows for k in row if k != index_label})
+        col_names = [index_label]
+        for cond in all_conds:
+            for stat in STAT_COLS:
+                col_names.append(f'{cond}_{stat}')
+
+        records = []
+        for row in rows:
+            rec = {index_label: row[index_label]}
+            for cond in all_conds:
+                st = _desc_stats(row.get(cond, []))
+                for stat in STAT_COLS:
+                    rec[f'{cond}_{stat}'] = st[stat]
+            records.append(rec)
+
+        df_sheet = pd.DataFrame(records, columns=col_names)
+        df_sheet.to_excel(writer, sheet_name=sheet_name, index=False)
+
+        ws = writer.sheets[sheet_name]
+        ws.freeze_panes = 'B2'
+
+        # Style header
+        for cell in ws[1]:
+            cell.font  = HEADER_FONT
+            cell.fill  = HEADER_FILL_A
+            cell.alignment = Alignment(horizontal='center', wrap_text=True)
+
+        # Alternating condition shading
+        for ci, cond in enumerate(all_conds):
+            fill = ROW_FILLS[ci % len(ROW_FILLS)]
+            col_start = 2 + ci * len(STAT_COLS)
+            col_end   = col_start + len(STAT_COLS) - 1
+            for row_idx in range(2, len(records) + 2):
+                for col_idx in range(col_start, col_end + 1):
+                    ws.cell(row=row_idx, column=col_idx).fill = fill
+
+        # Auto-fit column widths (capped 10–25)
+        for col_cells in ws.columns:
+            max_len = max(
+                (len(str(c.value)) if c.value is not None else 0) for c in col_cells
+            )
+            ws.column_dimensions[
+                get_column_letter(col_cells[0].column)
+            ].width = max(10, min(max_len + 2, 25))
+
+    # ── Time-based rows ───────────────────────────────────────────────────────
+
+    conditions_sorted = sorted({r['starting_condition'] for r in all_results})
+    max_sessions = max(len(r['df']) for r in all_results)
+
+    def _extract(df_r, sess_idx, col):
+        if sess_idx >= len(df_r):
+            return np.nan
+        v = df_r.iat[sess_idx, df_r.columns.get_loc(col)]
+        return float(v) if pd.notna(v) else np.nan
+
+    def _session_rows(col_or_fn):
+        """Build rows for a time-based sheet.
+        col_or_fn: column name (str) or callable(df_r, sess_idx) -> float.
+        """
+        rows = []
+        for sess_idx in range(max_sessions):
+            row = {'Session': sess_idx + 1}
+            for cond in conditions_sorted:
+                vals = []
+                for r in all_results:
+                    if r['starting_condition'] != cond:
+                        continue
+                    df_r = r['df'].reset_index(drop=True)
+                    if callable(col_or_fn):
+                        v = col_or_fn(df_r, sess_idx)
+                    else:
+                        v = _extract(df_r, sess_idx, col_or_fn)
+                    if _clean(v):
+                        vals.append(float(v))
+                row[cond] = vals
+            rows.append(row)
+        return rows
+
+    def _reward_rate(df_r, i):
+        h = _extract(df_r, i, 'hits')
+        s = _extract(df_r, i, 'session_length')
+        return h / s if _clean(h) and _clean(s) and s > 0 else np.nan
+
+    def _lick_rate(df_r, i):
+        lc = _extract(df_r, i, 'lick_count')
+        s  = _extract(df_r, i, 'session_length')
+        return lc / s if _clean(lc) and _clean(s) and s > 0 else np.nan
+
+    def _dist_m(df_r, i):
+        v = _extract(df_r, i, 'total_distance')
+        return v / 1000.0 if _clean(v) else np.nan
+
+    def _bout_dist_m(df_r, i):
+        v = _extract(df_r, i, 'avg_dist_per_bout')
+        return v / 1000.0 if _clean(v) else np.nan
+
+    time_sheets = [
+        ('Time - Speed',          _session_rows('average_speed')),
+        ('Time - Reward Count',   _session_rows('hits')),
+        ('Time - Reward Rate',    _session_rows(_reward_rate)),
+        ('Time - Lick Rate',      _session_rows(_lick_rate)),
+        ('Time - Distance (m)',   _session_rows(_dist_m)),
+        ('Time - Bout Count',     _session_rows('bout_count')),
+        ('Time - Bout Avg Speed', _session_rows('avg_speed_per_bout')),
+        ('Time - Bout Avg Dist',  _session_rows(_bout_dist_m)),
+    ]
+
+    # ── Level-based rows ──────────────────────────────────────────────────────
+
+    level_sheets = []
+    if level_stats_data is not None:
+
+        def _level_rows(cond_level_dict):
+            if not cond_level_dict:
+                return []
+            lvls = sorted(
+                {lv for cd in cond_level_dict.values() for lv in cd},
+                key=_sort_level,
+            )
+            rows = []
+            for lv in lvls:
+                row = {'Level': lv.replace('level_', 'L').replace('.json', '')}
+                for cond in sorted(cond_level_dict.keys()):
+                    row[cond] = cond_level_dict[cond].get(lv, [])
+                rows.append(row)
+            return rows
+
+        level_sheets = [
+            ('Level - Reward Rate',    _level_rows(level_stats_data['condition_level_reward_rate'])),
+            ('Level - Speed',          _level_rows(level_stats_data['condition_level_speed'])),
+            ('Level - Lick Rate',      _level_rows(level_stats_data['condition_level_lick'])),
+            ('Level - Distance (m)',   _level_rows(level_stats_data['condition_level_dist'])),
+            ('Level - Bout Count',     _level_rows(level_stats_data['condition_level_bout'])),
+            ('Level - Bout Avg Speed', _level_rows(level_stats_data['condition_level_bout_avg_spd'])),
+            ('Level - Bout Avg Dist',  _level_rows(level_stats_data['condition_level_bout_avg_dist'])),
+        ]
+
+    # ── Write workbook ────────────────────────────────────────────────────────
+
+    if output_dir is None:
+        output_dir = os.getcwd()
+    os.makedirs(output_dir, exist_ok=True)
+    timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S')
+    out_path = os.path.join(output_dir, f'descriptive_stats_{timestamp_str}.xlsx')
+
+    with pd.ExcelWriter(out_path, engine='openpyxl') as writer:
+        for sheet_name, rows in time_sheets:
+            if rows:
+                _write_sheet(writer, sheet_name, 'Session', rows)
+        for sheet_name, rows in level_sheets:
+            if rows:
+                _write_sheet(writer, sheet_name, 'Level', rows)
+
+    print(f"\nDescriptive stats report saved to:\n  {out_path}")
+
 
 def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv_path=None, selected_plots=None, save_lick_plots=False, output_dir=None):
     # Create dictionaries to map mouse names to markers and starting conditions
@@ -3182,20 +3437,22 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     level_bout_collapsed_fig = level_bout_condition_fig = None
     level_bout_avg_speed_collapsed_fig = level_bout_avg_speed_condition_fig = None
     level_bout_avg_dist_collapsed_fig = level_bout_avg_dist_condition_fig = None
-    if any(k in selected_plots for k in ('levels', 'level_speed', 'level_speed_condition',
-                                          'level_lick', 'level_lick_condition',
-                                          'level_dist', 'level_dist_condition',
-                                          'level_dist_condition_excl_last',
-                                          'level_bout', 'level_bout_condition',
-                                          'level_bout_avg_speed', 'level_bout_avg_speed_condition',
-                                          'level_bout_avg_dist', 'level_bout_avg_dist_condition')):
+    _level_stats_data = None
+    if transitions_csv_path or any(k in selected_plots for k in ('levels', 'level_speed', 'level_speed_condition',
+                                                                   'level_lick', 'level_lick_condition',
+                                                                   'level_dist', 'level_dist_condition',
+                                                                   'level_dist_condition_excl_last',
+                                                                   'level_bout', 'level_bout_condition',
+                                                                   'level_bout_avg_speed', 'level_bout_avg_speed_condition',
+                                                                   'level_bout_avg_dist', 'level_bout_avg_dist_condition')):
         level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, \
         level_lick_collapsed_fig, level_lick_condition_fig, \
         level_dist_collapsed_fig, level_dist_condition_fig, \
         level_dist_condition_excl_last_fig, \
         level_bout_collapsed_fig, level_bout_condition_fig, \
         level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, \
-        level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig = analyze_levels(
+        level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, \
+        _level_stats_data = analyze_levels(
             data_files, transitions_csv_path, animal_conditions=conditions,
             selected_plots=selected_plots,
         )
@@ -3254,7 +3511,39 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         f.write(report_text + "\n")
     print(f"\nMissing data report saved to: {report_path}")
 
-    return speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, distance_fig, bout_count_fig, avg_bout_count_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_bar_fig, condition_speed_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, all_results
+    return speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, distance_fig, bout_count_fig, avg_bout_count_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_bar_fig, condition_speed_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, all_results, _level_stats_data
+
+def _ask_mode(root):
+    """Ask whether to generate plots or run the descriptive stats report.
+    Returns 'plots', 'stats', or None if the dialog is dismissed."""
+    result = [None]
+    dialog = tk.Toplevel(root)
+    dialog.title('Select Mode')
+    dialog.resizable(False, False)
+    dialog.grab_set()
+
+    tk.Label(dialog, text='What would you like to do?',
+             font=('Arial', 11, 'bold')).pack(padx=20, pady=(16, 8))
+
+    def _choose(mode):
+        result[0] = mode
+        dialog.destroy()
+
+    btn_frame = tk.Frame(dialog)
+    btn_frame.pack(padx=20, pady=(4, 16))
+    tk.Button(btn_frame, text='Generate Plots', width=20,
+              command=lambda: _choose('plots')).pack(side='left', padx=6)
+    tk.Button(btn_frame, text='Descriptive Stats Report', width=24,
+              command=lambda: _choose('stats')).pack(side='left', padx=6)
+
+    dialog.update_idletasks()
+    dialog.geometry(
+        f"+{root.winfo_screenwidth() // 2 - dialog.winfo_reqwidth() // 2}"
+        f"+{root.winfo_screenheight() // 2 - dialog.winfo_reqheight() // 2}"
+    )
+    root.wait_window(dialog)
+    return result[0]
+
 
 def main():
     # Create and hide the root window
@@ -3302,165 +3591,192 @@ def main():
         initialdir=os.getcwd()  # Start in current directory
     )
     
-    if file_paths:
-        # Ask user which plots to generate
-        selected_plots = _ask_plot_selection(root)
-        if not selected_plots:
-            print("No plots selected. Exiting...")
-            return
+    if not file_paths:
+        print("No file selected. Exiting...")
+        return
 
-        # Select transitions CSV only if a level plot was requested
-        transitions_csv_path = None
-        if any(k in selected_plots for k in ('levels', 'level_speed', 'level_speed_condition',
-                                              'level_lick', 'level_lick_condition',
-                                              'level_dist', 'level_dist_condition',
-                                              'level_dist_condition_excl_last',
-                                              'level_bout', 'level_bout_condition',
-                                              'level_bout_avg_speed', 'level_bout_avg_speed_condition',
-                                              'level_bout_avg_dist', 'level_bout_avg_dist_condition')):
-            transitions_csv_path = filedialog.askopenfilename(
-                title='Select transitions CSV (from level_sorter.py) — cancel to skip level plot',
-                filetypes=[('CSV files', '*.csv'), ('All files', '*.*')],
-                initialdir=os.path.dirname(file_paths[0]),
-            ) or None
-            if transitions_csv_path:
-                print(f"Transitions CSV: {os.path.basename(transitions_csv_path)}")
-            else:
-                print("No transitions CSV selected — level plot will be empty.")
+    # ── Mode selection ────────────────────────────────────────────────────────
+    mode = _ask_mode(root)
+    if mode is None:
+        print("No mode selected. Exiting...")
+        return
 
-        # Extract markers and starting conditions from master CSV
-        markers = []
-        starting_conditions = []
-        for file_path in file_paths:
-            mouse_name = os.path.basename(file_path).split("_")[0]
-            
-            if mouse_name in animal_info:
-                # Convert sex to marker type (male -> 's' for square, female -> 'o' for circle)
-                sex = animal_info[mouse_name]['sex']
-                marker = 's' if sex == 'male' else 'o'
-                markers.append(marker)
-                
-                # Get starting condition
-                starting_conditions.append(animal_info[mouse_name]['starting_condition'])
-                
-                print(f"{mouse_name}: sex={sex}, marker={marker}, condition={animal_info[mouse_name]['starting_condition']}")
-            else:
-                print(f"Warning: {mouse_name} not found in master CSV file. Skipping...")
-                continue
-        
-        # Analyze data and plot results
-        speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, distance_fig, bout_count_fig, avg_bout_count_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_bar_fig, condition_speed_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, all_results = analyze_mouse_data(
+    # ── Extract markers and starting conditions (shared by both modes) ────────
+    markers = []
+    starting_conditions = []
+    for file_path in file_paths:
+        mouse_name = os.path.basename(file_path).split("_")[0]
+        if mouse_name in animal_info:
+            sex = animal_info[mouse_name]['sex']
+            marker = 's' if sex == 'male' else 'o'
+            markers.append(marker)
+            starting_conditions.append(animal_info[mouse_name]['starting_condition'])
+            print(f"{mouse_name}: sex={sex}, marker={marker}, condition={animal_info[mouse_name]['starting_condition']}")
+        else:
+            print(f"Warning: {mouse_name} not found in master CSV file. Skipping...")
+            continue
+
+    # ── STATS mode ────────────────────────────────────────────────────────────
+    if mode == 'stats':
+        transitions_csv_path = filedialog.askopenfilename(
+            title='Select transitions CSV for level stats — cancel to skip level sheets',
+            filetypes=[('CSV files', '*.csv'), ('All files', '*.*')],
+            initialdir=os.path.dirname(file_paths[0]),
+        ) or None
+        if transitions_csv_path:
+            print(f"Transitions CSV: {os.path.basename(transitions_csv_path)}")
+        else:
+            print("No transitions CSV selected — level sheets will be omitted.")
+
+        output_dir = filedialog.askdirectory(
+            title='Select output folder for the stats report',
+            initialdir=os.path.dirname(file_paths[0]),
+        ) or None
+
+        *_, all_results, _level_stats_data = analyze_mouse_data(
             file_paths, markers, starting_conditions,
             transitions_csv_path=transitions_csv_path,
-            selected_plots=selected_plots,
+            selected_plots=frozenset(),
         )
+        generate_descriptive_stats_report(all_results, _level_stats_data, output_dir=output_dir)
+        return
 
-        # All generated figures (None entries are skipped)
-        all_figs = [f for f in [
-            speed_fig, sensitivity_fig, lick_fig, reward_fig,
-            false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig,
-            avg_reward_fig, sex_reward_fig,
-            distance_fig, bout_count_fig, avg_bout_count_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig,
-            condition_distance_bar_fig, total_distance_bar_fig,
-            avg_lick_rate_fig, sex_lick_rate_fig,
-            condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig,
-            condition_bar_fig, condition_speed_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig,
-            level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig,
-            level_lick_collapsed_fig, level_lick_condition_fig,
-            level_dist_collapsed_fig, level_dist_condition_fig,
-            level_dist_condition_excl_last_fig,
-            level_bout_collapsed_fig, level_bout_condition_fig,
-            level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig,
-            level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig,
-        ] if f is not None]
+    # ── PLOTS mode ────────────────────────────────────────────────────────────
+    selected_plots = _ask_plot_selection(root)
+    if not selected_plots:
+        print("No plots selected. Exiting...")
+        return
 
-        # Configure all figures (add legend only when labeled artists exist, then tight layout)
-        for fig in all_figs:
-            plt.figure(fig.number)
-            handles, labels = plt.gca().get_legend_handles_labels()
-            if labels:
-                if len(file_paths) > 10:
-                    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-                    plt.subplots_adjust(right=0.85)
-                else:
-                    plt.legend()
-            plt.tight_layout()
+    # Select transitions CSV only if a level plot was requested
+    transitions_csv_path = None
+    if any(k in selected_plots for k in ('levels', 'level_speed', 'level_speed_condition',
+                                          'level_lick', 'level_lick_condition',
+                                          'level_dist', 'level_dist_condition',
+                                          'level_dist_condition_excl_last',
+                                          'level_bout', 'level_bout_condition',
+                                          'level_bout_avg_speed', 'level_bout_avg_speed_condition',
+                                          'level_bout_avg_dist', 'level_bout_avg_dist_condition')):
+        transitions_csv_path = filedialog.askopenfilename(
+            title='Select transitions CSV (from level_sorter.py) — cancel to skip level plot',
+            filetypes=[('CSV files', '*.csv'), ('All files', '*.*')],
+            initialdir=os.path.dirname(file_paths[0]),
+        ) or None
+        if transitions_csv_path:
+            print(f"Transitions CSV: {os.path.basename(transitions_csv_path)}")
+        else:
+            print("No transitions CSV selected — level plot will be empty.")
 
-        # Display all plots
-        for fig in all_figs:
-            fig.show()
-        plt.show()
+    # Analyze data and plot results
+    speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, distance_fig, bout_count_fig, avg_bout_count_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_bar_fig, condition_speed_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, all_results, _level_stats_data = analyze_mouse_data(
+        file_paths, markers, starting_conditions,
+        transitions_csv_path=transitions_csv_path,
+        selected_plots=selected_plots,
+    )
 
-        # Save all selected plots automatically
-        plt.rcParams['font.family'] = 'sans-serif'
-        plt.rcParams['font.sans-serif'] = ['Arial']
-        plt.rcParams['svg.fonttype'] = 'none'
+    # All generated figures (None entries are skipped)
+    all_figs = [f for f in [
+        speed_fig, sensitivity_fig, lick_fig, reward_fig,
+        false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig,
+        avg_reward_fig, sex_reward_fig,
+        distance_fig, bout_count_fig, avg_bout_count_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig,
+        condition_distance_bar_fig, total_distance_bar_fig,
+        avg_lick_rate_fig, sex_lick_rate_fig,
+        condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig,
+        condition_bar_fig, condition_speed_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig,
+        level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig,
+        level_lick_collapsed_fig, level_lick_condition_fig,
+        level_dist_collapsed_fig, level_dist_condition_fig,
+        level_dist_condition_excl_last_fig,
+        level_bout_collapsed_fig, level_bout_condition_fig,
+        level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig,
+        level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig,
+    ] if f is not None]
 
-        # Plot configurations to save (skip None figures)
-        plot_configs = [
-            (speed_fig,             'speed',               'Speed plot'),
-            (sensitivity_fig,       'sensitivity',         'Sensitivity plot'),
-            (lick_fig,              'lick_count',          'Lick count plot'),
-            (reward_fig,            'reward_count',        'Reward count plot'),
-            (false_alarm_fig,       'false_alarms',        'False alarms plot'),
-            (correct_rejection_fig, 'correct_rejections',  'Correct rejections plot'),
-            (specificity_fig,       'specificity',         'Specificity plot'),
-            (dprime_fig,            'dprime',              "d' plot"),
-            (avg_reward_fig,        'avg_reward',          'Average rewards plot'),
-            (sex_reward_fig,        'sex_reward',          'Sex-specific average rewards plot'),
-            (distance_fig,          'distance',            'Distance per session plot'),
-            (bout_count_fig,         'bout_count',          'Locomotion bout count plot'),
-            (avg_bout_count_fig,     'avg_bout_count',      'Average bout count across all mice plot'),
-            (bout_avg_speed_fig,     'bout_avg_speed',      'Average speed per locomotion bout plot'),
-            (bout_avg_dist_fig,      'bout_avg_dist',       'Average distance per locomotion bout plot'),
-            (sex_distance_fig,      'sex_distance',        'Sex-specific distance per session plot'),
-            (condition_distance_fig,'condition_distance',  'Condition-based distance per session plot'),
-            (condition_distance_bar_fig, 'condition_distance_bar', 'Condition distance collapsed bar chart'),
-            (total_distance_bar_fig,     'total_distance_bar',     'Total distance per mouse collapsed bar chart'),
-            (avg_lick_rate_fig,     'avg_lick_rate',       'Average lick rate plot'),
-            (sex_lick_rate_fig,     'sex_lick_rate',       'Sex-specific lick rate plot'),
-            (condition_reward_fig,  'condition_reward',    'Condition-based average rewards plot'),
-            (condition_speed_fig,   'condition_speed',     'Condition-based average speed plot'),
-            (condition_bout_count_fig, 'condition_bout_count', 'Condition-based bout count plot'),
-            (condition_bout_avg_speed_fig, 'condition_bout_avg_speed', 'Condition-based avg speed per bout plot'),
-            (condition_bout_avg_dist_fig,  'condition_bout_avg_dist',  'Condition-based avg distance per bout plot'),
-            (condition_lick_fig,    'condition_lick',      'Condition-based average lick count plot'),
-            (condition_lick_rate_fig, 'condition_lick_rate', 'Condition-based lick rate plot'),
-            (condition_bar_fig,      'condition_bar',       'Condition collapsed bar chart'),
-            (condition_speed_bar_fig,'condition_speed_bar', 'Condition speed collapsed bar chart'),
-            (condition_bout_count_bar_fig, 'condition_bout_count_bar', 'Condition bout count collapsed bar chart'),
-            (condition_bout_avg_speed_bar_fig, 'condition_bout_avg_speed_bar', 'Condition avg speed per bout bar chart'),
-            (condition_bout_avg_dist_bar_fig,  'condition_bout_avg_dist_bar',  'Condition avg distance per bout bar chart'),
-            (condition_lick_bar_fig, 'condition_lick_bar',  'Condition lick rate collapsed bar chart'),
-            (level_reward_fig,              'level_reward',          'Level-based average rewards plot'),
-            (level_speed_collapsed_fig,     'level_speed',           'Level-based average speed — collapsed'),
-            (level_speed_condition_fig,     'level_speed_condition', 'Level-based average speed — by condition'),
-            (level_lick_collapsed_fig,      'level_lick',            'Level-based average lick rate — collapsed'),
-            (level_lick_condition_fig,      'level_lick_condition',  'Level-based average lick rate — by condition'),
-            (level_dist_collapsed_fig,      'level_dist',            'Level-based distance — collapsed'),
-            (level_dist_condition_fig,      'level_dist_condition',  'Level-based distance — by condition'),
-            (level_dist_condition_excl_last_fig, 'level_dist_condition_excl_last', 'Level-based distance — by condition, last level excluded'),
-            (level_bout_collapsed_fig,   'level_bout',           'Level-based bout count — collapsed'),
-            (level_bout_condition_fig,   'level_bout_condition', 'Level-based bout count — by condition'),
-            (level_bout_avg_speed_collapsed_fig,  'level_bout_avg_speed',           'Level-based avg speed per bout — collapsed'),
-            (level_bout_avg_speed_condition_fig,  'level_bout_avg_speed_condition', 'Level-based avg speed per bout — by condition'),
-            (level_bout_avg_dist_collapsed_fig,   'level_bout_avg_dist',            'Level-based avg distance per bout — collapsed'),
-            (level_bout_avg_dist_condition_fig,   'level_bout_avg_dist_condition',  'Level-based avg distance per bout — by condition'),
-        ]
+    # Configure all figures (add legend only when labeled artists exist, then tight layout)
+    for fig in all_figs:
+        plt.figure(fig.number)
+        handles, labels = plt.gca().get_legend_handles_labels()
+        if labels:
+            if len(file_paths) > 10:
+                plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+                plt.subplots_adjust(right=0.85)
+            else:
+                plt.legend()
+        plt.tight_layout()
 
-        for fig, name, title in plot_configs:
-            if fig is None:
-                continue
-            save_path = filedialog.asksaveasfilename(
-                defaultextension=".svg",
-                filetypes=[("SVG files", "*.svg"), ("All files", "*.*")],
-                title=f"Save {title} as",
-                initialfile=f"mouse_{name}_comparison_{len(file_paths)}mice.svg"
-            )
-            if save_path:
-                fig.savefig(save_path, bbox_inches='tight', format='svg')
-                print(f"{title} saved to: {save_path}")
-    else:
-        print("No file selected. Exiting...")
+    # Display all plots
+    for fig in all_figs:
+        fig.show()
+    plt.show()
+
+    # Save all selected plots automatically
+    plt.rcParams['font.family'] = 'sans-serif'
+    plt.rcParams['font.sans-serif'] = ['Arial']
+    plt.rcParams['svg.fonttype'] = 'none'
+
+    # Plot configurations to save (skip None figures)
+    plot_configs = [
+        (speed_fig,             'speed',               'Speed plot'),
+        (sensitivity_fig,       'sensitivity',         'Sensitivity plot'),
+        (lick_fig,              'lick_count',          'Lick count plot'),
+        (reward_fig,            'reward_count',        'Reward count plot'),
+        (false_alarm_fig,       'false_alarms',        'False alarms plot'),
+        (correct_rejection_fig, 'correct_rejections',  'Correct rejections plot'),
+        (specificity_fig,       'specificity',         'Specificity plot'),
+        (dprime_fig,            'dprime',              "d' plot"),
+        (avg_reward_fig,        'avg_reward',          'Average rewards plot'),
+        (sex_reward_fig,        'sex_reward',          'Sex-specific average rewards plot'),
+        (distance_fig,          'distance',            'Distance per session plot'),
+        (bout_count_fig,         'bout_count',          'Locomotion bout count plot'),
+        (avg_bout_count_fig,     'avg_bout_count',      'Average bout count across all mice plot'),
+        (bout_avg_speed_fig,     'bout_avg_speed',      'Average speed per locomotion bout plot'),
+        (bout_avg_dist_fig,      'bout_avg_dist',       'Average distance per locomotion bout plot'),
+        (sex_distance_fig,      'sex_distance',        'Sex-specific distance per session plot'),
+        (condition_distance_fig,'condition_distance',  'Condition-based distance per session plot'),
+        (condition_distance_bar_fig, 'condition_distance_bar', 'Condition distance collapsed bar chart'),
+        (total_distance_bar_fig,     'total_distance_bar',     'Total distance per mouse collapsed bar chart'),
+        (avg_lick_rate_fig,     'avg_lick_rate',       'Average lick rate plot'),
+        (sex_lick_rate_fig,     'sex_lick_rate',       'Sex-specific lick rate plot'),
+        (condition_reward_fig,  'condition_reward',    'Condition-based average rewards plot'),
+        (condition_speed_fig,   'condition_speed',     'Condition-based average speed plot'),
+        (condition_bout_count_fig, 'condition_bout_count', 'Condition-based bout count plot'),
+        (condition_bout_avg_speed_fig, 'condition_bout_avg_speed', 'Condition-based avg speed per bout plot'),
+        (condition_bout_avg_dist_fig,  'condition_bout_avg_dist',  'Condition-based avg distance per bout plot'),
+        (condition_lick_fig,    'condition_lick',      'Condition-based average lick count plot'),
+        (condition_lick_rate_fig, 'condition_lick_rate', 'Condition-based lick rate plot'),
+        (condition_bar_fig,      'condition_bar',       'Condition collapsed bar chart'),
+        (condition_speed_bar_fig,'condition_speed_bar', 'Condition speed collapsed bar chart'),
+        (condition_bout_count_bar_fig, 'condition_bout_count_bar', 'Condition bout count collapsed bar chart'),
+        (condition_bout_avg_speed_bar_fig, 'condition_bout_avg_speed_bar', 'Condition avg speed per bout bar chart'),
+        (condition_bout_avg_dist_bar_fig,  'condition_bout_avg_dist_bar',  'Condition avg distance per bout bar chart'),
+        (condition_lick_bar_fig, 'condition_lick_bar',  'Condition lick rate collapsed bar chart'),
+        (level_reward_fig,              'level_reward',          'Level-based average rewards plot'),
+        (level_speed_collapsed_fig,     'level_speed',           'Level-based average speed — collapsed'),
+        (level_speed_condition_fig,     'level_speed_condition', 'Level-based average speed — by condition'),
+        (level_lick_collapsed_fig,      'level_lick',            'Level-based average lick rate — collapsed'),
+        (level_lick_condition_fig,      'level_lick_condition',  'Level-based average lick rate — by condition'),
+        (level_dist_collapsed_fig,      'level_dist',            'Level-based distance — collapsed'),
+        (level_dist_condition_fig,      'level_dist_condition',  'Level-based distance — by condition'),
+        (level_dist_condition_excl_last_fig, 'level_dist_condition_excl_last', 'Level-based distance — by condition, last level excluded'),
+        (level_bout_collapsed_fig,   'level_bout',           'Level-based bout count — collapsed'),
+        (level_bout_condition_fig,   'level_bout_condition', 'Level-based bout count — by condition'),
+        (level_bout_avg_speed_collapsed_fig,  'level_bout_avg_speed',           'Level-based avg speed per bout — collapsed'),
+        (level_bout_avg_speed_condition_fig,  'level_bout_avg_speed_condition', 'Level-based avg speed per bout — by condition'),
+        (level_bout_avg_dist_collapsed_fig,   'level_bout_avg_dist',            'Level-based avg distance per bout — collapsed'),
+        (level_bout_avg_dist_condition_fig,   'level_bout_avg_dist_condition',  'Level-based avg distance per bout — by condition'),
+    ]
+
+    for fig, name, title in plot_configs:
+        if fig is None:
+            continue
+        save_path = filedialog.asksaveasfilename(
+            defaultextension=".svg",
+            filetypes=[("SVG files", "*.svg"), ("All files", "*.*")],
+            title=f"Save {title} as",
+            initialfile=f"mouse_{name}_comparison_{len(file_paths)}mice.svg"
+        )
+        if save_path:
+            fig.savefig(save_path, bbox_inches='tight', format='svg')
+            print(f"{title} saved to: {save_path}")
 if __name__ == "__main__":
     main()
