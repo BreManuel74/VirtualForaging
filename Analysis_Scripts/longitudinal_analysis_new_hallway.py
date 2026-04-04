@@ -28,6 +28,7 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, script_dir)
 import lick_detection_algorithm as lda
 from scipy.stats import norm
+from scipy.signal import butter, filtfilt
 
 # Cache directory for KDE values
 KDE_CACHE_DIR = os.path.join(script_dir, '.kde_cache')
@@ -380,7 +381,14 @@ def analyze_mouse_data(data_files, markers, starting_conditions, save_lick_plots
 
                 # ── Treadmill-derived metrics ─────────────────────────────
                 if treadmill_data is not None:
-                    avg_speed = treadmill_data['speed'].mean() / 10.0
+                    _speed_raw = treadmill_data['speed']
+                    # Step 1: moving median (window=5) to remove spike noise
+                    _speed_med = _speed_raw.rolling(window=5, center=True, min_periods=1).median()
+                    # Step 2: Butterworth low-pass (5 Hz, order 3) to smooth
+                    _fs = 1.0 / treadmill_data['global_time'].diff().median()
+                    _b, _a = butter(3, 5.0 / (_fs / 2.0), btype='low')
+                    _speed_filt = filtfilt(_b, _a, _speed_med)
+                    avg_speed = float(np.mean(_speed_filt)) / 10.0
                 else:
                     avg_speed = float('nan')
 
