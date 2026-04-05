@@ -22,6 +22,7 @@ import sys
 import pickle
 import hashlib
 import warnings
+import math
 
 # Add Analysis_Scripts to path to import lick detection algorithm
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -440,6 +441,7 @@ _ALL_PLOT_KEYS = {
     'level_bout_avg_dist',  'level_bout_avg_dist_condition',
     'epoch_reward_speed', 'epoch_reward_cap',
     'epoch_reward_speed_sess', 'epoch_reward_cap_sess',
+    'epoch_reward_speed_early_late', 'epoch_reward_cap_early_late',
 }
 
 _PLOT_LABELS = [
@@ -495,6 +497,8 @@ _PLOT_LABELS = [
     ('epoch_reward_cap',        'Epoch: Capacitive value — event-averaged, aligned to reward zone entry (per-mouse + condition)'),
     ('epoch_reward_speed_sess', 'Epoch: Treadmill speed — session-averaged, aligned to reward zone entry (per-mouse + condition)'),
     ('epoch_reward_cap_sess',   'Epoch: Capacitive value — session-averaged, aligned to reward zone entry (per-mouse + condition)'),
+    ('epoch_reward_speed_early_late', 'Epoch: Treadmill speed — early vs late sessions, aligned to reward zone entry (per-mouse + condition)'),
+    ('epoch_reward_cap_early_late',   'Epoch: Capacitive value — early vs late sessions, aligned to reward zone entry (per-mouse + condition)'),
 ]
 
 
@@ -1940,6 +1944,160 @@ def _plot_epoch_panels(all_results, signal_key, ylabel, title_prefix,
     return fig_per_mouse, fig_cond
 
 
+def _plot_epoch_early_late_panels(all_results, signal_key, ylabel, title_prefix,
+                                   condition_color_map, window_s=EPOCH_WINDOW_S):
+    """Early vs late session epoch panels — each half in its own independent figure.
+
+    Uses a 2-level hierarchy: individual session mean traces (thin background)
+    → group mean ± SEM (bold foreground).  The early/late boundary is the same
+    global split point for every mouse so that a mouse with missing sessions is
+    always split at the same session index as its complete cohort-mates.
+
+    Returns
+    -------
+    fig_pm_early, fig_pm_late, fig_cond_early, fig_cond_late
+    """
+    canonical_time = EPOCH_CANONICAL_TIME
+    indices_key    = signal_key.replace('_means', '_indices')
+    n_mice         = len(all_results)
+
+    # ── global split point ────────────────────────────────────────────────────
+    _all_idx = [result.get(indices_key) for result in all_results
+                if result.get(indices_key) is not None and len(result.get(indices_key)) > 0]
+    if _all_idx:
+        global_n    = int(max(idx.max() for idx in _all_idx)) + 1
+        global_half = global_n // 2
+    else:
+        global_n    = 0
+        global_half = 0
+
+    def _make_half_figs(half_tag):
+        """Build per-mouse and condition figures for one half (early or late)."""
+        is_early   = (half_tag == 'early')
+        half_label = (f'Early Sessions (1\u2013{global_half})'
+                      if is_early else
+                      f'Late Sessions ({global_half + 1}\u2013{global_n})')
+
+        # ── per-mouse figure (ceil(n_mice/2) rows × 2 cols) ──────────────────
+        n_cols = 2
+        n_rows = math.ceil(n_mice / n_cols)
+        fig_pm, axs = plt.subplots(n_rows, n_cols,
+                                   figsize=(12, 4 * n_rows),
+                                   sharex=True, sharey=True,
+                                   squeeze=False)
+        # hide any unused axes in the last row
+        for _empty in range(n_mice, n_rows * n_cols):
+            axs[_empty // n_cols, _empty % n_cols].set_visible(False)
+
+        for i, result in enumerate(all_results):
+            matrix     = result.get(signal_key)
+            indices    = result.get(indices_key)
+            mouse_name = result['mouse']
+            condition  = result['starting_condition']
+            color      = condition_color_map.get(condition, 'steelblue')
+            ax         = axs[i // n_cols, i % n_cols]
+
+            ax.axvline(0, color='red', linestyle='--', linewidth=1.2)
+            ax.set_xlim(-window_s, window_s)
+            ax.set_ylabel(ylabel, fontsize=9)
+            ax.set_title(f'{mouse_name} — {half_label}', fontsize=10)
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+            # x-label on bottom row only
+            if i // n_cols == n_rows - 1:
+                ax.set_xlabel('Time from reward zone entry (s)', fontsize=9)
+
+            if matrix is not None and indices is not None and len(indices) > 0:
+                mask = (indices < global_half) if is_early else (indices >= global_half)
+                sub  = matrix[mask]
+
+                if sub.shape[0] == 0:
+                    ax.text(0.5, 0.5, 'No data', ha='center', va='center',
+                            transform=ax.transAxes, fontsize=9)
+                else:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        for row_trace in sub:
+                            ax.plot(canonical_time, row_trace, color=color,
+                                    linewidth=0.6, alpha=0.25)
+                        mean_trace = np.nanmean(sub, axis=0)
+                        n_valid    = np.sum(~np.isnan(sub), axis=0)
+                        sem_trace  = np.where(n_valid > 1,
+                                              np.nanstd(sub, axis=0, ddof=1) / np.sqrt(n_valid),
+                                              0.0)
+                    ax.plot(canonical_time, mean_trace, color=color, linewidth=1.8,
+                            label=f'n={sub.shape[0]} sessions')
+                    ax.fill_between(canonical_time,
+                                    mean_trace - sem_trace,
+                                    mean_trace + sem_trace,
+                                    color=color, alpha=0.25)
+            else:
+                ax.text(0.5, 0.5, 'No data', ha='center', va='center',
+                        transform=ax.transAxes, fontsize=9)
+
+            ax.legend(fontsize=8, loc='upper right')
+
+        _ymax = max((ax.get_ylim()[1] for ax in axs.flatten()), default=1.0)
+        axs[0, 0].set_ylim(0, _ymax * 1.05)
+        fig_pm.suptitle(f'{title_prefix} — {half_label} (Per Mouse)', fontsize=13)
+        fig_pm.tight_layout()
+
+        # ── condition figure ──────────────────────────────────────────────────
+        fig_cond, ax_cond = plt.subplots(figsize=(10, 5))
+
+        cond_data: dict = {}
+        for result in all_results:
+            matrix    = result.get(signal_key)
+            indices   = result.get(indices_key)
+            condition = result['starting_condition']
+            if matrix is None or indices is None or len(indices) == 0:
+                continue
+            mask = (indices < global_half) if is_early else (indices >= global_half)
+            sub  = matrix[mask]
+            if sub.shape[0] == 0:
+                continue
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', RuntimeWarning)
+                cond_data.setdefault(condition, []).append(np.nanmean(sub, axis=0))
+
+        for condition in sorted(cond_data.keys()):
+            color       = condition_color_map.get(condition, 'steelblue')
+            mouse_means = np.array(cond_data[condition])
+            n_m         = mouse_means.shape[0]
+            for mm in mouse_means:
+                ax_cond.plot(canonical_time, mm, color=color,
+                             linewidth=0.6, alpha=0.3)
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', RuntimeWarning)
+                cond_mean = np.nanmean(mouse_means, axis=0)
+                cond_sem  = (np.nanstd(mouse_means, axis=0, ddof=1) / np.sqrt(n_m)
+                             if n_m > 1 else np.zeros_like(cond_mean))
+            ax_cond.plot(canonical_time, cond_mean, color=color, linewidth=2.2,
+                         label=f'{condition} (n={n_m} mice)')
+            ax_cond.fill_between(canonical_time,
+                                 cond_mean - cond_sem,
+                                 cond_mean + cond_sem,
+                                 color=color, alpha=0.15)
+
+        ax_cond.axvline(0, color='red', linestyle='--', linewidth=1.5, label='Zone entry (t=0)')
+        ax_cond.set_xlabel('Time from reward zone entry (s)')
+        ax_cond.set_ylabel(ylabel)
+        ax_cond.set_title(f'{title_prefix} — {half_label} (By Condition)')
+        ax_cond.set_xlim(-window_s, window_s)
+        _ymax_cond = ax_cond.get_ylim()[1]
+        ax_cond.set_ylim(0, _ymax_cond * 1.05)
+        ax_cond.legend()
+        ax_cond.spines['top'].set_visible(False)
+        ax_cond.spines['right'].set_visible(False)
+        fig_cond.tight_layout()
+
+        return fig_pm, fig_cond
+
+    fig_pm_early, fig_cond_early = _make_half_figs('early')
+    fig_pm_late,  fig_cond_late  = _make_half_figs('late')
+    return fig_pm_early, fig_pm_late, fig_cond_early, fig_cond_late
+
+
 def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv_path=None, selected_plots=None, save_lick_plots=False, output_dir=None):
     # Create dictionaries to map mouse names to markers and starting conditions
     markers = {os.path.basename(file).split("_")[0]: marker for file, marker in zip(data_files, markers)}
@@ -2005,11 +2163,13 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         session_file_errors = {}  # {date_str: [list of missing file labels]}
         speed_epoch_windows_all       = []  # list of 2-D arrays (n_events × EPOCH_N_SAMPLES) per session
         cap_epoch_windows_all         = []  # same for capacitive
-        speed_epoch_session_means_all = []  # list of 1-D arrays — one per-session mean trace
-        cap_epoch_session_means_all   = []  # same for capacitive
+        speed_epoch_session_means_all   = []  # list of 1-D arrays — one per-session mean trace
+        cap_epoch_session_means_all     = []  # same for capacitive
+        speed_epoch_session_indices_all = []  # 0-based session position in df for each speed mean
+        cap_epoch_session_indices_all   = []  # same for capacitive
 
         # Process each date's data
-        for timestamp, row in df.iterrows():
+        for _sess_idx, (timestamp, row) in enumerate(df.iterrows()):
             date_str = datetime.fromtimestamp(int(timestamp)).strftime('%Y-%m-%d')
             missing_files = []
             try:
@@ -2283,8 +2443,18 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                                         warnings.simplefilter('ignore', RuntimeWarning)
                                         speed_epoch_session_means_all.append(
                                             np.nanmean(_sp_mat, axis=0))
+                                    speed_epoch_session_indices_all.append(_sess_idx)
                             if capacitive_data is not None:
                                 _cp_time, _cp_val = uniformly_sample_capacitive(capacitive_data)
+                                # Z-score the capacitive signal for this session so that
+                                # sessions with different baselines / dynamic ranges are
+                                # comparable when epochs are averaged across sessions or mice.
+                                _cp_mu  = np.nanmean(_cp_val)
+                                _cp_sig = np.nanstd(_cp_val, ddof=1)
+                                if _cp_sig > 0:
+                                    _cp_val = (_cp_val - _cp_mu) / _cp_sig
+                                else:
+                                    _cp_val = _cp_val - _cp_mu  # zero-mean, can't scale
                                 _cp_mat = _build_epoch_matrix(_cp_time, _cp_val, _zone_times)
                                 if _cp_mat is not None:
                                     cap_epoch_windows_all.append(_cp_mat)
@@ -2292,6 +2462,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                                         warnings.simplefilter('ignore', RuntimeWarning)
                                         cap_epoch_session_means_all.append(
                                             np.nanmean(_cp_mat, axis=0))
+                                    cap_epoch_session_indices_all.append(_sess_idx)
                     except Exception as _epoch_err:
                         print(f"  [WARN] {date_str}: epoch extraction failed — {_epoch_err}")
 
@@ -2335,10 +2506,14 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                                      if speed_epoch_windows_all       else None)
         cap_epoch_matrix          = (np.vstack(cap_epoch_windows_all)
                                      if cap_epoch_windows_all         else None)
-        speed_epoch_session_means = (np.vstack(speed_epoch_session_means_all)
-                                     if speed_epoch_session_means_all else None)
-        cap_epoch_session_means   = (np.vstack(cap_epoch_session_means_all)
-                                     if cap_epoch_session_means_all   else None)
+        speed_epoch_session_means   = (np.vstack(speed_epoch_session_means_all)
+                                       if speed_epoch_session_means_all else None)
+        cap_epoch_session_means     = (np.vstack(cap_epoch_session_means_all)
+                                       if cap_epoch_session_means_all   else None)
+        speed_epoch_session_indices = (np.array(speed_epoch_session_indices_all, dtype=int)
+                                       if speed_epoch_session_indices_all else None)
+        cap_epoch_session_indices   = (np.array(cap_epoch_session_indices_all, dtype=int)
+                                       if cap_epoch_session_indices_all   else None)
 
         # Store results for this mouse
         all_results.append({
@@ -2359,8 +2534,10 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             'session_file_errors': session_file_errors,
             'speed_epoch_matrix':        speed_epoch_matrix,
             'cap_epoch_matrix':          cap_epoch_matrix,
-            'speed_epoch_session_means': speed_epoch_session_means,
-            'cap_epoch_session_means':   cap_epoch_session_means,
+            'speed_epoch_session_means':   speed_epoch_session_means,
+            'cap_epoch_session_means':     cap_epoch_session_means,
+            'speed_epoch_session_indices': speed_epoch_session_indices,
+            'cap_epoch_session_indices':   cap_epoch_session_indices,
         })
 
     # ── Date-aligned per-mouse plots ─────────────────────────────────────────
@@ -3758,12 +3935,17 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         total_distance_bar_fig.tight_layout()
 
     # ── Behavioral epoch plots ────────────────────────────────────────────────
-    epoch_speed_per_mouse_fig      = epoch_speed_cond_fig      = None
-    epoch_cap_per_mouse_fig        = epoch_cap_cond_fig        = None
-    epoch_speed_sess_per_mouse_fig = epoch_speed_sess_cond_fig = None
-    epoch_cap_sess_per_mouse_fig   = epoch_cap_sess_cond_fig   = None
+    epoch_speed_per_mouse_fig            = epoch_speed_cond_fig            = None
+    epoch_cap_per_mouse_fig              = epoch_cap_cond_fig              = None
+    epoch_speed_sess_per_mouse_fig       = epoch_speed_sess_cond_fig       = None
+    epoch_cap_sess_per_mouse_fig         = epoch_cap_sess_cond_fig         = None
+    epoch_speed_early_per_mouse_fig = epoch_speed_late_per_mouse_fig = None
+    epoch_speed_early_cond_fig      = epoch_speed_late_cond_fig      = None
+    epoch_cap_early_per_mouse_fig   = epoch_cap_late_per_mouse_fig   = None
+    epoch_cap_early_cond_fig        = epoch_cap_late_cond_fig        = None
     _epoch_keys = {'epoch_reward_speed', 'epoch_reward_cap',
-                   'epoch_reward_speed_sess', 'epoch_reward_cap_sess'}
+                   'epoch_reward_speed_sess', 'epoch_reward_cap_sess',
+                   'epoch_reward_speed_early_late', 'epoch_reward_cap_early_late'}
     if _epoch_keys & set(selected_plots):
         _any_speed = any(r.get('speed_epoch_matrix') is not None for r in all_results)
         _any_cap   = any(r.get('cap_epoch_matrix')   is not None for r in all_results)
@@ -3780,7 +3962,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         if 'epoch_reward_cap' in selected_plots and _any_cap:
             epoch_cap_per_mouse_fig, epoch_cap_cond_fig = _plot_epoch_panels(
                 all_results, 'cap_epoch_matrix',
-                ylabel='Capacitive Value (a.u.)',
+                ylabel='Capacitive Value (z-score)',
                 title_prefix='Capacitive Value Aligned to Reward Zone Entry',
                 condition_color_map=condition_color_map,
                 hierarchy='event',
@@ -3798,11 +3980,31 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         if 'epoch_reward_cap_sess' in selected_plots and _any_cap:
             epoch_cap_sess_per_mouse_fig, epoch_cap_sess_cond_fig = _plot_epoch_panels(
                 all_results, 'cap_epoch_session_means',
-                ylabel='Capacitive Value (a.u.)',
+                ylabel='Capacitive Value (z-score)',
                 title_prefix='Capacitive Value Aligned to Reward Zone Entry',
                 condition_color_map=condition_color_map,
                 hierarchy='session',
             )
+
+        if 'epoch_reward_speed_early_late' in selected_plots and _any_speed:
+            (epoch_speed_early_per_mouse_fig, epoch_speed_late_per_mouse_fig,
+             epoch_speed_early_cond_fig,      epoch_speed_late_cond_fig) = \
+                _plot_epoch_early_late_panels(
+                    all_results, 'speed_epoch_session_means',
+                    ylabel='Treadmill Speed (cm/s)',
+                    title_prefix='Speed Aligned to Reward Zone Entry',
+                    condition_color_map=condition_color_map,
+                )
+
+        if 'epoch_reward_cap_early_late' in selected_plots and _any_cap:
+            (epoch_cap_early_per_mouse_fig, epoch_cap_late_per_mouse_fig,
+             epoch_cap_early_cond_fig,      epoch_cap_late_cond_fig) = \
+                _plot_epoch_early_late_panels(
+                    all_results, 'cap_epoch_session_means',
+                    ylabel='Capacitive Value (z-score)',
+                    title_prefix='Capacitive Value Aligned to Reward Zone Entry',
+                    condition_color_map=condition_color_map,
+                )
 
     # Create the level-based analysis plots
     level_reward_fig = level_speed_collapsed_fig = level_speed_condition_fig = None
@@ -3885,7 +4087,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         f.write(report_text + "\n")
     print(f"\nMissing data report saved to: {report_path}")
 
-    return speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, distance_fig, bout_count_fig, avg_bout_count_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_bar_fig, condition_speed_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, epoch_speed_per_mouse_fig, epoch_speed_cond_fig, epoch_cap_per_mouse_fig, epoch_cap_cond_fig, epoch_speed_sess_per_mouse_fig, epoch_speed_sess_cond_fig, epoch_cap_sess_per_mouse_fig, epoch_cap_sess_cond_fig, all_results, _level_stats_data
+    return speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, distance_fig, bout_count_fig, avg_bout_count_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_bar_fig, condition_speed_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, epoch_speed_per_mouse_fig, epoch_speed_cond_fig, epoch_cap_per_mouse_fig, epoch_cap_cond_fig, epoch_speed_sess_per_mouse_fig, epoch_speed_sess_cond_fig, epoch_cap_sess_per_mouse_fig, epoch_cap_sess_cond_fig, epoch_speed_early_per_mouse_fig, epoch_speed_late_per_mouse_fig, epoch_speed_early_cond_fig, epoch_speed_late_cond_fig, epoch_cap_early_per_mouse_fig, epoch_cap_late_per_mouse_fig, epoch_cap_early_cond_fig, epoch_cap_late_cond_fig, all_results, _level_stats_data
 
 def _ask_mode(root):
     """Ask whether to generate plots or run the descriptive stats report.
@@ -4041,7 +4243,7 @@ def main():
             print("No transitions CSV selected — level plot will be empty.")
 
     # Analyze data and plot results
-    speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, distance_fig, bout_count_fig, avg_bout_count_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_bar_fig, condition_speed_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, epoch_speed_per_mouse_fig, epoch_speed_cond_fig, epoch_cap_per_mouse_fig, epoch_cap_cond_fig, epoch_speed_sess_per_mouse_fig, epoch_speed_sess_cond_fig, epoch_cap_sess_per_mouse_fig, epoch_cap_sess_cond_fig, all_results, _level_stats_data = analyze_mouse_data(
+    speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, distance_fig, bout_count_fig, avg_bout_count_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_bar_fig, condition_speed_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, epoch_speed_per_mouse_fig, epoch_speed_cond_fig, epoch_cap_per_mouse_fig, epoch_cap_cond_fig, epoch_speed_sess_per_mouse_fig, epoch_speed_sess_cond_fig, epoch_cap_sess_per_mouse_fig, epoch_cap_sess_cond_fig, epoch_speed_early_per_mouse_fig, epoch_speed_late_per_mouse_fig, epoch_speed_early_cond_fig, epoch_speed_late_cond_fig, epoch_cap_early_per_mouse_fig, epoch_cap_late_per_mouse_fig, epoch_cap_early_cond_fig, epoch_cap_late_cond_fig, all_results, _level_stats_data = analyze_mouse_data(
         file_paths, markers, starting_conditions,
         transitions_csv_path=transitions_csv_path,
         selected_plots=selected_plots,
@@ -4068,6 +4270,10 @@ def main():
         epoch_cap_per_mouse_fig, epoch_cap_cond_fig,
         epoch_speed_sess_per_mouse_fig, epoch_speed_sess_cond_fig,
         epoch_cap_sess_per_mouse_fig, epoch_cap_sess_cond_fig,
+        epoch_speed_early_per_mouse_fig, epoch_speed_late_per_mouse_fig,
+        epoch_speed_early_cond_fig, epoch_speed_late_cond_fig,
+        epoch_cap_early_per_mouse_fig, epoch_cap_late_per_mouse_fig,
+        epoch_cap_early_cond_fig, epoch_cap_late_cond_fig,
     ] if f is not None]
 
     # Configure all figures (add legend only when labeled artists exist, then tight layout)
@@ -4150,6 +4356,14 @@ def main():
         (epoch_speed_sess_cond_fig,      'epoch_reward_speed_sess_condition',      'Speed epoch (session) — by condition'),
         (epoch_cap_sess_per_mouse_fig,   'epoch_reward_cap_sess_per_mouse',        'Capacitive epoch (session) — per mouse'),
         (epoch_cap_sess_cond_fig,        'epoch_reward_cap_sess_condition',        'Capacitive epoch (session) — by condition'),
+        (epoch_speed_early_per_mouse_fig, 'epoch_reward_speed_early_per_mouse',     'Speed epoch (early sessions) — per mouse'),
+        (epoch_speed_early_cond_fig,      'epoch_reward_speed_early_condition',     'Speed epoch (early sessions) — by condition'),
+        (epoch_speed_late_per_mouse_fig,  'epoch_reward_speed_late_per_mouse',      'Speed epoch (late sessions) — per mouse'),
+        (epoch_speed_late_cond_fig,       'epoch_reward_speed_late_condition',      'Speed epoch (late sessions) — by condition'),
+        (epoch_cap_early_per_mouse_fig,   'epoch_reward_cap_early_per_mouse',       'Capacitive epoch (early sessions) — per mouse'),
+        (epoch_cap_early_cond_fig,        'epoch_reward_cap_early_condition',       'Capacitive epoch (early sessions) — by condition'),
+        (epoch_cap_late_per_mouse_fig,    'epoch_reward_cap_late_per_mouse',        'Capacitive epoch (late sessions) — per mouse'),
+        (epoch_cap_late_cond_fig,         'epoch_reward_cap_late_condition',        'Capacitive epoch (late sessions) — by condition'),
     ]
 
     for fig, name, title in plot_configs:
