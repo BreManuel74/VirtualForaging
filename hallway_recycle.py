@@ -94,7 +94,7 @@ class DataGenerator:
             return np.round(data)
         
 @dataclass
-class CapacitiveData:
+class CapacitiveData:   
     """
     Represents a single capacitive sensor reading.
     """
@@ -916,15 +916,16 @@ class RewardOrPuff(FSM):
         """
         Enter the Puff state.
         """
+        # Combine 1 and puff_duration into a single integer
+        signal = int(f"1{self.puff_duration}")
+        self.base.serial_output.send_signal(signal)
+
         self.puff_history = np.append(self.puff_history, round(global_stopwatch.get_elapsed_time(), 2))
         puff_times = np.full(len(self.trial_df), np.nan)
         puff_times[:len(self.puff_history)] = self.puff_history
         self.trial_df['puff_event'] = puff_times
         self.trial_df.to_csv(self.trial_csv_path, index=False)
 
-        # Combine 1 and puff_duration into a single integer
-        signal = int(f"1{self.puff_duration}")
-        self.base.serial_output.send_signal(signal)
         self.base.doMethodLaterStopwatch(self.puff_to_neutral_time, self._transitionToNeutral, 'return-to-neutral')
 
     def exitPuff(self):
@@ -937,6 +938,10 @@ class RewardOrPuff(FSM):
         """
         Enter the Reward state.
         """
+        signal = int(f"2{self.reward_duration}")
+        #print(signal)
+        self.base.serial_output.send_signal(signal)
+
         self.reward_history = np.append(self.reward_history, round(global_stopwatch.get_elapsed_time(), 2))
         reward_times = np.full(len(self.trial_df), np.nan)
         reward_times[:len(self.reward_history)] = self.reward_history
@@ -947,9 +952,6 @@ class RewardOrPuff(FSM):
         if hasattr(self.base, 'tcp_client') and self.base.tcp_client:
             self.base.tcp_client.send_data("REWARD:")
 
-        signal = int(f"2{self.reward_duration}")
-        #print(signal)
-        self.base.serial_output.send_signal(signal)
         self.base.doMethodLaterStopwatch(1.0, self._transitionToNeutral, 'return-to-neutral')
 
     def exitReward(self):
@@ -1212,12 +1214,17 @@ class TCPStreamClient(DirectObject.DirectObject):
         """Dynamically change the game level."""
         try:
             print(f"Changing level to: {level_file}")
-            
+
+            # Use the absolute levels folder path resolved at startup.
+            # Falling back to env var (resolved to absolute) if the attribute isn't set.
+            levels_folder = getattr(self.base, 'levels_folder', None) or \
+                os.path.abspath(os.environ.get("LEVELS_FOLDER", "Levels"))
+
             # Construct full path to level file
-            level_path = os.path.join("Levels", level_file)
-            
+            level_path = os.path.join(levels_folder, level_file)
+
             if not os.path.exists(level_path):
-                print(f"Level file not found: {level_path}")
+                print(f"Level file not found: {level_path} (levels_folder={levels_folder})", flush=True)
                 return
             
             # Load new configuration
@@ -1284,6 +1291,8 @@ class TCPStreamClient(DirectObject.DirectObject):
                 self.base.time_spent_at_zero_speed = self.base.cfg.get("time_spent_at_zero_speed", self.base.time_spent_at_zero_speed)
             if hasattr(self.base, 'puff_duration'):
                 self.base.puff_duration = self.base.cfg.get("puff_duration", self.base.puff_duration)
+            if hasattr(self.base, 'puff_zero_speed_time'):
+                self.base.puff_zero_speed_time = self.base.cfg.get("puff_zero_speed_time", self.base.puff_zero_speed_time)
             if hasattr(self.base, 'reward_duration'):
                 self.base.reward_duration = self.base.cfg.get("reward_duration", self.base.reward_duration)
 
@@ -1460,6 +1469,10 @@ class MousePortal(ShowBase):
         # Load configuration from JSON
         with open(config_file, 'r') as f:
             self.cfg: Dict[str, Any] = load_config(config_file)
+
+        # Resolve the levels folder to an absolute path now, while CWD is guaranteed correct.
+        # This is used by TCPStreamClient._change_level for all subsequent level changes.
+        self.levels_folder = os.path.abspath(os.environ.get("LEVELS_FOLDER", "Levels"))
 
         # Initialize the RewardCalculator
         self.reward_calculator = RewardCalculator(self, self.cfg)

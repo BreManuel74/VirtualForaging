@@ -442,13 +442,14 @@ class RewardOrPuff(FSM):
         """
         Enter the Puff state.
         """
+        # Combine 1 and puff_duration into a single integer
+        signal = int(f"1{self.puff_duration}")
+        self.base.serial_output.send_signal(signal)
+
         self.puff_history = np.append(self.puff_history, round(global_stopwatch.get_elapsed_time(), 2))
         # Log puff event via trial logger
         self.trial_logger.log_puff_event(round(global_stopwatch.get_elapsed_time(), 2))
 
-        # Combine 1 and puff_duration into a single integer
-        signal = int(f"1{self.puff_duration}")
-        self.base.serial_output.send_signal(signal)
         #print("puff!")
         self.base.doMethodLaterStopwatch(self.puff_to_neutral_time, self._transitionToNeutral, 'return-to-neutral')
 
@@ -462,6 +463,10 @@ class RewardOrPuff(FSM):
         """
         Enter the Reward state.
         """
+        signal = int(f"2{self.reward_duration}")
+        #print(signal)
+        self.base.serial_output.send_signal(signal)
+        
         self.reward_history = np.append(self.reward_history, round(global_stopwatch.get_elapsed_time(), 2))
         # Log reward event via trial logger
         self.trial_logger.log_reward_event(round(global_stopwatch.get_elapsed_time(), 2))
@@ -470,9 +475,6 @@ class RewardOrPuff(FSM):
         if hasattr(self.base, 'tcp_client') and self.base.tcp_client:
             self.base.tcp_client.send_data("REWARD:")
 
-        signal = int(f"2{self.reward_duration}")
-        #print(signal)
-        self.base.serial_output.send_signal(signal)
         self.base.doMethodLaterStopwatch(1.0, self._transitionToNeutral, 'return-to-neutral')
 
     def exitReward(self):

@@ -962,6 +962,7 @@ class TCPStreamClient(DirectObject.DirectObject):
             corridor.left_wall_texture = self.base.cfg.get("left_wall_texture", corridor.left_wall_texture)
             corridor.right_wall_texture = self.base.cfg.get("right_wall_texture", corridor.right_wall_texture)
             corridor.floor_texture = self.base.cfg.get("floor_texture", corridor.floor_texture)
+            print(f"Updated floor texture to: {corridor.floor_texture}")
             corridor.ceiling_texture = self.base.cfg.get("ceiling_texture", corridor.ceiling_texture)
             
             # Update probe/neutral stimuli textures

@@ -50,7 +50,7 @@ class TCPDataServer:
         self.reward_callback = None
         self._reward_lock = threading.Lock()
         # Add socket timeout
-        self._socket_timeout = 1.0
+        self._socket_timeout = 0.05
         # Cache for reward thresholds to avoid repeated file I/O
         self._threshold_cache = {}
 
@@ -905,6 +905,9 @@ class KaufmanGUI:
         if self.tcp_server:
             prev_level = self.tcp_server.get_previous_level()
             if prev_level:
+                # Reset reward count FIRST before any UI updates to prevent race conditions
+                self.tcp_server.reset_reward_count()
+
                 # Update UI first for instant feedback
                 self.current_level.set(prev_level)
                 self.reward_count.set("0")
@@ -1252,6 +1255,10 @@ class KaufmanGUI:
                 self.log_to_console(f"Error setting initial reward threshold: {e}")
                 raise
             
+            # Set LEVELS_FOLDER as a global environment variable so the game subprocess
+            # can always read it from os.environ (e.g., in _change_level)
+            os.environ["LEVELS_FOLDER"] = levels_folder
+
             # Set up environment variables
             env = os.environ.copy()
             env["LEVEL_CONFIG_PATH"] = level_file_path

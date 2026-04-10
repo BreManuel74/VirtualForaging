@@ -848,15 +848,16 @@ class RewardOrPuff(FSM):
         """
         Enter the Puff state.
         """
+        # Combine 1 and puff_duration into a single integer
+        signal = int(f"1{self.puff_duration}")
+        self.base.serial_output.send_signal(signal)
+
         self.puff_history = np.append(self.puff_history, round(global_stopwatch.get_elapsed_time(), 2))
         puff_times = np.full(len(self.trial_df), np.nan)
         puff_times[:len(self.puff_history)] = self.puff_history
         self.trial_df['puff_event'] = puff_times
         self.trial_df.to_csv(self.trial_csv_path, index=False)
 
-        # Combine 1 and puff_duration into a single integer
-        signal = int(f"1{self.puff_duration}")
-        self.base.serial_output.send_signal(signal)
         self.base.doMethodLaterStopwatch(self.puff_to_neutral_time, self._transitionToNeutral, 'return-to-neutral')
 
     def exitPuff(self):
@@ -868,7 +869,12 @@ class RewardOrPuff(FSM):
     def enterReward(self):
         """
         Enter the Reward state.
+        
         """
+        signal = int(f"2{self.reward_duration}")
+        #print(signal)
+        self.base.serial_output.send_signal(signal)
+
         self.reward_history = np.append(self.reward_history, round(global_stopwatch.get_elapsed_time(), 2))
         reward_times = np.full(len(self.trial_df), np.nan)
         reward_times[:len(self.reward_history)] = self.reward_history
@@ -879,9 +885,6 @@ class RewardOrPuff(FSM):
         if hasattr(self.base, 'tcp_client') and self.base.tcp_client:
             self.base.tcp_client.send_data("REWARD:")
 
-        signal = int(f"2{self.reward_duration}")
-        #print(signal)
-        self.base.serial_output.send_signal(signal)
         self.base.doMethodLaterStopwatch(1.0, self._transitionToNeutral, 'return-to-neutral')
 
     def exitReward(self):
