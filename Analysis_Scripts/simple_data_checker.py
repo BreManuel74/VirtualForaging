@@ -8,8 +8,16 @@ plt.rcParams['svg.fonttype'] = 'none'  # keep text as real font glyphs in SVG
 import ast
 from scipy.signal import butter, filtfilt
 
-# File paths (update these if your files are in a different location)
+# ── File paths — update as needed ─────────────────────────────────────────────
 treadmill_path = r"D:\CAH_motivationSC_cohort\CAH7\Session_4\beh\1769801410treadmill.csv"
+
+# Three capacitive files to compare (update paths)
+capacitive_paths = [
+    r"D:\CAH_motivationSC_cohort\CAH4\Session_5\beh\1770061057capacitive.csv",
+    r"D:\CAH_motivationSC_cohort\CAH11\Session_5\beh\1770065258capacitive.csv",  # replace with file 2
+    r"D:\CAH_motivationSC_cohort\CAH2\Session_5\beh\1770057698capacitive.csv",  # replace with file 3
+]
+capacitive_labels = ['File 1', 'File 2', 'File 3']
 
 # Read the CSV files into pandas DataFrames
 treadmill_df = pd.read_csv(treadmill_path, comment='/', engine='python')
@@ -130,4 +138,63 @@ ax_bout.spines['right'].set_visible(False)
 ax_bout.legend()
 fig_bouts.tight_layout()
 fig_bouts.savefig('locomotion_bouts.svg', format='svg')
+plt.show()
+
+# ── Capacitive signal: z-score normalization comparison ──────────────────────
+# Load each file, compute z-score, and overlay on shared axes.
+# Z-score: subtract session mean, divide by session std.  Accounts for both
+# baseline offset and gain differences between sessions/animals.
+
+cap_colors = ['royalblue', 'tomato', 'goldenrod']
+
+fig_cap, axes_cap = plt.subplots(3, 1, figsize=(14, 9), sharex=False)
+fig_cap.suptitle('Capacitive Signal — Z-Score Normalized', fontsize=13)
+
+fig_cap_overlay, ax_overlay = plt.subplots(figsize=(14, 4))
+ax_overlay.set_title('Capacitive Signal — Z-Score Normalized (Overlay)', fontsize=13)
+ax_overlay.set_xlabel('Elapsed Time (s)')
+ax_overlay.set_ylabel('Z-score')
+ax_overlay.spines['top'].set_visible(False)
+ax_overlay.spines['right'].set_visible(False)
+
+for i, (path, label, color) in enumerate(
+        zip(capacitive_paths, capacitive_labels, cap_colors)):
+    df = pd.read_csv(path, comment='/', engine='python')
+    time_col = 'elapsed_time' if 'elapsed_time' in df.columns else df.columns[0]
+    val_col  = 'capacitive_value' if 'capacitive_value' in df.columns else df.columns[1]
+
+    t   = pd.to_numeric(df[time_col],  errors='coerce').values
+    raw = pd.to_numeric(df[val_col],   errors='coerce').values
+
+    # Drop NaN rows
+    valid   = ~(np.isnan(t) | np.isnan(raw))
+    t, raw  = t[valid], raw[valid]
+
+    # Z-score: (x - mean) / std
+    mu, sigma = raw.mean(), raw.std(ddof=1)
+    z = (raw - mu) / sigma if sigma > 0 else np.zeros_like(raw)
+
+    print(f"{label}: mean={mu:.4f}, std={sigma:.4f}, n={len(raw)} samples")
+
+    # Individual subplot
+    ax = axes_cap[i]
+    ax.plot(t, z, color=color, linewidth=0.7, label=label)
+    ax.axhline(0, color='gray', linestyle='--', linewidth=0.6)
+    ax.set_ylabel('Z-score')
+    ax.set_title(f'{label}  (raw mean={mu:.2f}, std={sigma:.2f})')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.legend(fontsize=8, loc='upper right')
+    if i == 2:
+        ax.set_xlabel('Elapsed Time (s)')
+
+    # Overlay
+    ax_overlay.plot(t, z, color=color, linewidth=0.7, alpha=0.8, label=label)
+
+ax_overlay.axhline(0, color='gray', linestyle='--', linewidth=0.6)
+ax_overlay.legend()
+fig_cap.tight_layout()
+fig_cap_overlay.tight_layout()
+fig_cap.savefig('capacitive_zscore_individual.svg', format='svg')
+fig_cap_overlay.savefig('capacitive_zscore_overlay.svg', format='svg')
 plt.show()
