@@ -63,21 +63,33 @@ def load_data_files(folder_path):
 
 def extract_reward_events(trial_log_df):
     """
-    Extract reward event times
-    
+    Extract reward event times.
+
+    Both reward_event (active zone delivery) and hits_event (inactive zone correct stop)
+    are treated as synonymous hits and included. Re-entries do not produce reward or
+    hits events so no additional filtering is needed here.
+
     Returns:
         List of reward times sorted chronologically
     """
     reward_times = []
-    
+
+    # Active zone reward deliveries
     for trial_idx in range(len(trial_log_df)):
         reward_time = pd.to_numeric(trial_log_df.loc[trial_idx, 'reward_event'], errors='coerce')
         if pd.notna(reward_time) and reward_time > 0:
             reward_times.append(reward_time)
-    
+
+    # Inactive zone correct stops (also count as hits)
+    if 'hits_event' in trial_log_df.columns:
+        for trial_idx in range(len(trial_log_df)):
+            hits_time = pd.to_numeric(trial_log_df.loc[trial_idx, 'hits_event'], errors='coerce')
+            if pd.notna(hits_time) and hits_time > 0:
+                reward_times.append(hits_time)
+
     # Sort by time
     reward_times.sort()
-    
+
     return reward_times
 
 

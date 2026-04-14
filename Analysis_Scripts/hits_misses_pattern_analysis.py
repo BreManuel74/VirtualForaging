@@ -92,43 +92,76 @@ def load_data_files(folder_path):
 
 
 def extract_reward_zone_entries(trial_log_df):
-    """Extract all reward zone entry times from texture history"""
+    """Extract all reward zone entry times, excluding re-entries.
+
+    Supports both new hallway format (stay_texture_change_time) and
+    old format (texture_history / texture_change_time).
+    """
+    # Collect re-entry times to exclude
+    re_entry_times = set()
+    if 'zone_re_entry_time' in trial_log_df.columns:
+        for trial_idx in range(len(trial_log_df)):
+            for t in safe_literal_eval(trial_log_df.loc[trial_idx, 'zone_re_entry_time']):
+                t_num = pd.to_numeric(t, errors='coerce')
+                if pd.notna(t_num) and t_num > 0:
+                    re_entry_times.add(float(t_num))
+
     all_reward_zones = []
-    
-    for trial_idx in range(len(trial_log_df)):
-        texture_hist = safe_literal_eval(trial_log_df.loc[trial_idx, 'texture_history'])
-        texture_times = safe_literal_eval(trial_log_df.loc[trial_idx, 'texture_change_time'])
-        
-        if not texture_hist or not texture_times:
-            continue
-        
-        for i, texture in enumerate(texture_hist):
-            if texture == "assets/reward_mean100.jpg" and i < len(texture_times):
-                zone_entry_time = texture_times[i]
-                if pd.notna(zone_entry_time) and zone_entry_time > 0:
-                    all_reward_zones.append((trial_idx, zone_entry_time))
-    
+
+    # New hallway format
+    if 'stay_texture_change_time' in trial_log_df.columns:
+        for trial_idx in range(len(trial_log_df)):
+            times = safe_literal_eval(trial_log_df.loc[trial_idx, 'stay_texture_change_time'])
+            for zone_entry_time in times:
+                t_num = pd.to_numeric(zone_entry_time, errors='coerce')
+                if pd.notna(t_num) and t_num > 0 and float(t_num) not in re_entry_times:
+                    all_reward_zones.append((trial_idx, float(t_num)))
+    # Old hallway format
+    elif 'texture_history' in trial_log_df.columns and 'texture_change_time' in trial_log_df.columns:
+        for trial_idx in range(len(trial_log_df)):
+            texture_hist = safe_literal_eval(trial_log_df.loc[trial_idx, 'texture_history'])
+            texture_times = safe_literal_eval(trial_log_df.loc[trial_idx, 'texture_change_time'])
+            for i, texture in enumerate(texture_hist):
+                if texture == "assets/reward_mean100.jpg" and i < len(texture_times):
+                    t_num = pd.to_numeric(texture_times[i], errors='coerce')
+                    if pd.notna(t_num) and t_num > 0 and float(t_num) not in re_entry_times:
+                        all_reward_zones.append((trial_idx, float(t_num)))
+
     all_reward_zones.sort(key=lambda x: x[1])
     return all_reward_zones
 
 
 def extract_reward_events(trial_log_df):
-    """Extract all reward delivery events"""
-    reward_events = []
-    
+    """Extract all hit events (reward_event and hits_event are treated synonymously)."""
+    hit_events = []
+
+    # Active zone reward deliveries
     for trial_idx in range(len(trial_log_df)):
         reward_time = pd.to_numeric(trial_log_df.loc[trial_idx, 'reward_event'], errors='coerce')
         if pd.notna(reward_time) and reward_time > 0:
-            reward_events.append((trial_idx, reward_time))
-    
-    reward_events.sort(key=lambda x: x[1])
-    return reward_events
+            hit_events.append((trial_idx, reward_time))
+
+    # Inactive zone correct stops (also hits)
+    if 'hits_event' in trial_log_df.columns:
+        for trial_idx in range(len(trial_log_df)):
+            hits_time = pd.to_numeric(trial_log_df.loc[trial_idx, 'hits_event'], errors='coerce')
+            if pd.notna(hits_time) and hits_time > 0:
+                hit_events.append((trial_idx, hits_time))
+
+    hit_events.sort(key=lambda x: x[1])
+    return hit_events
 
 
 def classify_hits_and_misses(all_reward_zones, reward_events, match_window=10.0):
     """
-    Classify reward zones as hits or misses
-    
+    Classify reward zones as hits or misses.
+
+    Hit: Zone followed by a reward_event OR hits_event within match_window seconds.
+         (Both event types are synonymous — active zone delivery and inactive zone
+         correct stop both count as hits. Re-entries are already excluded from
+         all_reward_zones before this function is called.)
+    Miss: Zone NOT followed by either event type.
+
     Returns:
         Tuple of (hits_list, misses_list, sequence, zone_times, is_hit_sequence)
     """
@@ -485,15 +518,15 @@ def prepare_treadmill_data(treadmill_df):
     # Sort by time
     treadmill_clean = treadmill_clean.sort_values('global_time')
     
-    # Create interpolated series (interpolate to 10Hz, same as daily_analysis)
+    # Create uniformly sampled series at native 50 Hz
     time_min = treadmill_clean['global_time'].min()
     time_max = treadmill_clean['global_time'].max()
-    time_interp = np.arange(time_min, time_max, 0.1)  # 10 Hz
-    
-    speed_interp = np.interp(time_interp, 
-                            treadmill_clean['global_time'].values,
-                            treadmill_clean['speed'].values)
-    
+    time_interp = np.arange(time_min, time_max, 1.0 / 50.0)  # 50 Hz
+
+    speed_interp = np.interp(time_interp,
+                             treadmill_clean['global_time'].values,
+                             treadmill_clean['speed'].values)
+
     return pd.Series(speed_interp, index=time_interp)
 
 

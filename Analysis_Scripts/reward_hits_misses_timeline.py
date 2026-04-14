@@ -62,88 +62,116 @@ def select_data_folder():
 
 
 def load_data_files(folder_path):
-    """Load trial log, capacitive, and treadmill CSV files"""
+    """Load trial log and treadmill CSV files"""
     trial_log_files = [f for f in os.listdir(folder_path) if 'trial_log.csv' in f]
     treadmill_files = [f for f in os.listdir(folder_path) if 'treadmill.csv' in f]
-    capacitive_files = [f for f in os.listdir(folder_path) if 'capacitive.csv' in f]
-    
-    if not trial_log_files or not treadmill_files or not capacitive_files:
-        print("Error: Missing required files (trial_log.csv, treadmill.csv, or capacitive.csv)")
+
+    if not trial_log_files or not treadmill_files:
+        print("Error: Missing required files (trial_log.csv or treadmill.csv)")
         return None
-    
+
     print(f"\nLoading files:")
     print(f"  - {trial_log_files[0]}")
     print(f"  - {treadmill_files[0]}")
-    print(f"  - {capacitive_files[0]}")
-    
+
     data = {
         'trial_log': pd.read_csv(os.path.join(folder_path, trial_log_files[0]), engine='python'),
-        'treadmill': pd.read_csv(os.path.join(folder_path, treadmill_files[0]), comment='/', engine='python'),
-        'capacitive': pd.read_csv(os.path.join(folder_path, capacitive_files[0]), comment='/', engine='python')
+        'treadmill': pd.read_csv(os.path.join(folder_path, treadmill_files[0]), comment='/', engine='python')
     }
-    
+
     print("Files loaded successfully.\n")
     return data
 
 
-def interpolate_treadmill_speed(treadmill_df, capacitive_df):
-    """Interpolate treadmill speed to capacitive timeline and convert mm/s to cm/s"""
-    return pd.Series(
-        data=np.interp(
-            capacitive_df['elapsed_time'],
-            treadmill_df['global_time'],
-            treadmill_df['speed']
-        ) / 10.0,  # Convert mm/s to cm/s
-        index=capacitive_df['elapsed_time']
-    )
+def uniformly_sample_treadmill(treadmill_df):
+    """Uniformly sample treadmill speed at 50 Hz and convert mm/s to cm/s."""
+    time_min = treadmill_df['global_time'].min()
+    time_max = treadmill_df['global_time'].max()
+    uniform_time = np.arange(time_min, time_max, 1.0 / 50.0)
+    uniform_speed = np.interp(
+        uniform_time,
+        treadmill_df['global_time'].values,
+        treadmill_df['speed'].values
+    ) / 10.0  # Convert mm/s to cm/s
+    return pd.Series(uniform_speed, index=uniform_time)
 
 
 def extract_reward_zone_entries(trial_log_df):
-    """Extract all reward zone entry times from texture history"""
+    """Extract all reward zone entry times, excluding re-entries.
+
+    Supports both new hallway format (stay_texture_change_time) and
+    old format (texture_history / texture_change_time).
+    """
+    # Collect re-entry times to exclude
+    re_entry_times = set()
+    if 'zone_re_entry_time' in trial_log_df.columns:
+        for trial_idx in range(len(trial_log_df)):
+            for t in safe_literal_eval(trial_log_df.loc[trial_idx, 'zone_re_entry_time']):
+                t_num = pd.to_numeric(t, errors='coerce')
+                if pd.notna(t_num) and t_num > 0:
+                    re_entry_times.add(float(t_num))
+
     all_reward_zones = []
-    
-    for trial_idx in range(len(trial_log_df)):
-        texture_hist = safe_literal_eval(trial_log_df.loc[trial_idx, 'texture_history'])
-        texture_times = safe_literal_eval(trial_log_df.loc[trial_idx, 'texture_change_time'])
-        
-        if not texture_hist or not texture_times:
-            continue
-        
-        for i, texture in enumerate(texture_hist):
-            if texture == "assets/reward_mean100.jpg" and i < len(texture_times):
-                zone_entry_time = texture_times[i]
-                if pd.notna(zone_entry_time) and zone_entry_time > 0:
-                    all_reward_zones.append((trial_idx, zone_entry_time))
-    
+
+    # New hallway format
+    if 'stay_texture_change_time' in trial_log_df.columns:
+        for trial_idx in range(len(trial_log_df)):
+            times = safe_literal_eval(trial_log_df.loc[trial_idx, 'stay_texture_change_time'])
+            for zone_entry_time in times:
+                t_num = pd.to_numeric(zone_entry_time, errors='coerce')
+                if pd.notna(t_num) and t_num > 0 and float(t_num) not in re_entry_times:
+                    all_reward_zones.append((trial_idx, float(t_num)))
+    # Old hallway format
+    elif 'texture_history' in trial_log_df.columns and 'texture_change_time' in trial_log_df.columns:
+        for trial_idx in range(len(trial_log_df)):
+            texture_hist = safe_literal_eval(trial_log_df.loc[trial_idx, 'texture_history'])
+            texture_times = safe_literal_eval(trial_log_df.loc[trial_idx, 'texture_change_time'])
+            for i, texture in enumerate(texture_hist):
+                if texture == "assets/reward_mean100.jpg" and i < len(texture_times):
+                    t_num = pd.to_numeric(texture_times[i], errors='coerce')
+                    if pd.notna(t_num) and t_num > 0 and float(t_num) not in re_entry_times:
+                        all_reward_zones.append((trial_idx, float(t_num)))
+
     all_reward_zones.sort(key=lambda x: x[1])
     return all_reward_zones
 
 
 def extract_reward_events(trial_log_df):
-    """Extract all reward delivery events"""
-    reward_events = []
-    
+    """Extract all hit events (reward_event and hits_event are treated synonymously)."""
+    hit_events = []
+
+    # Active zone reward deliveries
     for trial_idx in range(len(trial_log_df)):
         reward_time = pd.to_numeric(trial_log_df.loc[trial_idx, 'reward_event'], errors='coerce')
         if pd.notna(reward_time) and reward_time > 0:
-            reward_events.append((trial_idx, reward_time))
-    
-    reward_events.sort(key=lambda x: x[1])
-    return reward_events
+            hit_events.append((trial_idx, reward_time))
+
+    # Inactive zone correct stops (also hits)
+    if 'hits_event' in trial_log_df.columns:
+        for trial_idx in range(len(trial_log_df)):
+            hits_time = pd.to_numeric(trial_log_df.loc[trial_idx, 'hits_event'], errors='coerce')
+            if pd.notna(hits_time) and hits_time > 0:
+                hit_events.append((trial_idx, hits_time))
+
+    hit_events.sort(key=lambda x: x[1])
+    return hit_events
 
 
 def classify_hits_and_misses(all_reward_zones, reward_events, match_window=10.0):
     """
-    Classify reward zones as hits or misses
-    
-    Hit: Reward zone followed by a reward event within match_window seconds
-    Miss: Reward zone NOT followed by a reward event
-    
+    Classify reward zones as hits or misses.
+
+    Hit: Zone followed by a reward_event OR hits_event within match_window seconds.
+         (Both event types are synonymous — active zone delivery and inactive zone
+         correct stop both count as hits. Re-entries are already excluded from
+         all_reward_zones before this function is called.)
+    Miss: Zone NOT followed by either event type.
+
     Args:
-        all_reward_zones: List of (trial_idx, zone_entry_time) tuples
-        reward_events: List of (trial_idx, reward_event_time) tuples
-        match_window: Maximum time between zone entry and reward for a match
-    
+        all_reward_zones: List of (trial_idx, zone_entry_time) tuples (re-entries excluded)
+        reward_events: List of (trial_idx, event_time) tuples combining reward_event + hits_event
+        match_window: Maximum time between zone entry and event for a match
+
     Returns:
         Tuple of (hits, misses) where each is a list of zone_entry_times
     """
@@ -169,13 +197,13 @@ def classify_hits_and_misses(all_reward_zones, reward_events, match_window=10.0)
     return hits, misses
 
 
-def plot_speed_with_hits_misses(capacitive_df, treadmill_interp, hits, misses, output_folder):
+def plot_speed_with_hits_misses(treadmill_interp, hits, misses, output_folder):
     """Create timeline plot showing hit/miss pattern"""
     fig, ax = plt.subplots(figsize=(16, 4))
-    
-    # Get time range from capacitive data
-    time_min = capacitive_df['elapsed_time'].min()
-    time_max = capacitive_df['elapsed_time'].max()
+
+    # Get time range from treadmill data
+    time_min = treadmill_interp.index.min()
+    time_max = treadmill_interp.index.max()
     
     # Add vertical lines for hits (green)
     for i, hit_time in enumerate(hits):
@@ -236,28 +264,28 @@ def main():
         os.makedirs(output_folder)
         print(f"Created output folder: {output_folder}")
     
-    # Interpolate treadmill speed
-    print("Interpolating treadmill speed to capacitive timeline...")
-    treadmill_interp = interpolate_treadmill_speed(data['treadmill'], data['capacitive'])
-    
+    # Sample treadmill speed at native 50 Hz
+    print("Sampling treadmill speed at 50 Hz...")
+    treadmill_interp = uniformly_sample_treadmill(data['treadmill'])
+
     # Extract reward zones and events
     print("Extracting reward zone entries...")
     all_reward_zones = extract_reward_zone_entries(data['trial_log'])
     print(f"Found {len(all_reward_zones)} reward zone entries")
-    
+
     print("Extracting reward events...")
     reward_events = extract_reward_events(data['trial_log'])
     print(f"Found {len(reward_events)} reward delivery events")
-    
+
     # Classify hits and misses
     print("\nClassifying hits and misses...")
     hits, misses = classify_hits_and_misses(all_reward_zones, reward_events)
     print(f"  Hits (zones with rewards): {len(hits)}")
     print(f"  Misses (zones without rewards): {len(misses)}")
-    
+
     # Create plot
     print("\nGenerating timeline plot...")
-    plot_speed_with_hits_misses(data['capacitive'], treadmill_interp, hits, misses, output_folder)
+    plot_speed_with_hits_misses(treadmill_interp, hits, misses, output_folder)
     
     print("\n" + "=" * 60)
     print("ANALYSIS COMPLETE")

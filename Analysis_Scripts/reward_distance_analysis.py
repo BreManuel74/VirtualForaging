@@ -43,84 +43,95 @@ def select_data_folder():
 
 
 def load_data_files(folder_path):
-    """Load trial log, capacitive, and treadmill CSV files"""
+    """Load trial log and treadmill CSV files"""
     trial_log_files = [f for f in os.listdir(folder_path) if 'trial_log.csv' in f]
-    capacitive_files = [f for f in os.listdir(folder_path) if 'capacitive.csv' in f]
     treadmill_files = [f for f in os.listdir(folder_path) if 'treadmill.csv' in f]
-    
-    if not trial_log_files or not capacitive_files or not treadmill_files:
-        print("Error: Missing required files (trial_log.csv, capacitive.csv, or treadmill.csv)")
+
+    if not trial_log_files or not treadmill_files:
+        print("Error: Missing required files (trial_log.csv or treadmill.csv)")
         return None
-    
+
     print(f"\nLoading files:")
     print(f"  - {trial_log_files[0]}")
-    print(f"  - {capacitive_files[0]}")
     print(f"  - {treadmill_files[0]}")
-    
+
     data = {
         'trial_log': pd.read_csv(os.path.join(folder_path, trial_log_files[0]), engine='python'),
-        'capacitive': pd.read_csv(os.path.join(folder_path, capacitive_files[0]), comment='/', engine='python'),
         'treadmill': pd.read_csv(os.path.join(folder_path, treadmill_files[0]), comment='/', engine='python')
     }
-    
+
     print("Files loaded successfully.\n")
     return data
 
 
-def interpolate_treadmill_distance(treadmill_df, capacitive_df):
+def uniformly_sample_treadmill_distance(treadmill_df):
     """
-    Interpolate treadmill distance to capacitive timeline
-    
-    Returns cumulative distance traveled in meters
+    Uniformly sample treadmill distance at 50 Hz.
+
+    Returns cumulative distance traveled in meters, sampled at the
+    treadmill's native 50 Hz rate (not tied to the capacitive timeline).
     """
     # Find first non-zero distance to use as baseline
     non_zero_distances = treadmill_df['distance'][treadmill_df['distance'] != 0]
-    
-    if len(non_zero_distances) > 0:
-        start_distance = non_zero_distances.iloc[0]
-    else:
-        print("Warning: No non-zero distance values found")
-        start_distance = 0
-    
-    # Calculate distance moved from start (in mm, then convert to meters)
+    start_distance = non_zero_distances.iloc[0] if len(non_zero_distances) > 0 else 0
+
+    # Calculate distance moved from start (mm)
     distance_moved = treadmill_df['distance'] - start_distance
-    
-    # Interpolate to capacitive timeline
-    return pd.Series(
-        data=np.interp(
-            capacitive_df['elapsed_time'],
-            treadmill_df['global_time'],
-            distance_moved
-        ) / 1000.0,  # Convert mm to meters
-        index=capacitive_df['elapsed_time']
-    )
+
+    # Uniformly sample at 50 Hz over treadmill's own time range
+    time_min = treadmill_df['global_time'].min()
+    time_max = treadmill_df['global_time'].max()
+    uniform_time = np.arange(time_min, time_max, 1.0 / 50.0)
+
+    uniform_distance = np.interp(
+        uniform_time,
+        treadmill_df['global_time'].values,
+        distance_moved.values
+    ) / 1000.0  # Convert mm to meters
+
+    return pd.Series(uniform_distance, index=uniform_time)
 
 
 def extract_reward_events_with_distance(trial_log_df, distance_interp):
     """
-    Extract reward events and their cumulative distances
-    
+    Extract reward events and their cumulative distances.
+
+    Both reward_event (active zone delivery) and hits_event (inactive zone correct stop)
+    are treated as synonymous hits and included.
+
     Returns:
         List of (reward_time, cumulative_distance) tuples
     """
-    reward_events_with_dist = []
-    
+    event_times = []
+
+    # Active zone reward deliveries
     for trial_idx in range(len(trial_log_df)):
         reward_time = pd.to_numeric(trial_log_df.loc[trial_idx, 'reward_event'], errors='coerce')
         if pd.notna(reward_time) and reward_time > 0:
-            # Find cumulative distance at reward time
-            if reward_time in distance_interp.index:
-                cum_distance = distance_interp.loc[reward_time]
+            event_times.append(reward_time)
+
+    # Inactive zone correct stops (also hits)
+    if 'hits_event' in trial_log_df.columns:
+        for trial_idx in range(len(trial_log_df)):
+            hits_time = pd.to_numeric(trial_log_df.loc[trial_idx, 'hits_event'], errors='coerce')
+            if pd.notna(hits_time) and hits_time > 0:
+                event_times.append(hits_time)
+
+    reward_events_with_dist = []
+    for event_time in event_times:
+        # Find cumulative distance at event time
+        if event_time in distance_interp.index:
+            cum_distance = distance_interp.loc[event_time]
+        else:
+            # Find nearest time point
+            idx = distance_interp.index.searchsorted(event_time)
+            if idx < len(distance_interp):
+                cum_distance = distance_interp.iloc[idx]
             else:
-                # Find nearest time point
-                idx = distance_interp.index.searchsorted(reward_time)
-                if idx < len(distance_interp):
-                    cum_distance = distance_interp.iloc[idx]
-                else:
-                    cum_distance = distance_interp.iloc[-1]
-            
-            reward_events_with_dist.append((reward_time, cum_distance))
-    
+                cum_distance = distance_interp.iloc[-1]
+
+        reward_events_with_dist.append((event_time, cum_distance))
+
     # Sort by time
     reward_events_with_dist.sort(key=lambda x: x[0])
     
@@ -349,11 +360,9 @@ def main():
         os.makedirs(output_folder)
         print(f"Created output folder: {output_folder}")
     
-    # Interpolate treadmill distance
-    print("Interpolating treadmill distance to capacitive timeline...")
-    distance_interp = interpolate_treadmill_distance(
-        data['treadmill'], data['capacitive']
-    )
+    # Sample treadmill distance at native 50 Hz
+    print("Sampling treadmill distance at 50 Hz...")
+    distance_interp = uniformly_sample_treadmill_distance(data['treadmill'])
     print(f"Total distance range: 0 to {distance_interp.max():.2f} meters")
     
     # Extract reward events with distances
