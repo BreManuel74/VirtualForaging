@@ -1420,7 +1420,7 @@ def plot_average_traces_puff(puff_zone_trials, trial_log_df, cap_time, cap_val,
             # Speed aligned to puff events
             speed_puff_event_windows = []
             for puff_event_time in puff_event_times:
-                mask = (cap_time >= puff_event_time - window) & (cap_time <= puff_event_time + window)
+                mask = (speed_time >= puff_event_time - window) & (speed_time <= puff_event_time + window)
                 speed_segment = speed_val[mask]
                 speed_puff_event_windows.append(speed_segment)
             
@@ -1732,13 +1732,13 @@ def analyze_reward_zones(reward_zone_trials, trial_log_df, cap_time, cap_val, sp
     # Analyze reward deliveries - pass trial_log_df to get ALL reward events
     print(f"Analyzing reward deliveries...")
     pupil_diameter_interp = pupil_diameter_data[1] if pupil_diameter_data is not None else None
-    analyze_reward_deliveries(reward_zone_trials, trial_log_df, cap_time, cap_val, speed_val,
+    analyze_reward_deliveries(reward_zone_trials, trial_log_df, cap_time, cap_val, speed_time, speed_val,
                              pupil_diameter_interp, output_folder, window, cap_vmin, cap_vmax)
     
     return (cap_vmin, cap_vmax)
 
 
-def analyze_reward_deliveries(reward_zone_trials, trial_log_df, cap_time, cap_val, speed_val,
+def analyze_reward_deliveries(reward_zone_trials, trial_log_df, cap_time, cap_val, speed_time, speed_val,
                               pupil_diameter_interp, output_folder, window=5, cap_vmin=0, cap_vmax=5000):
     """Analyze data aligned to reward delivery times
     
@@ -1785,7 +1785,7 @@ def analyze_reward_deliveries(reward_zone_trials, trial_log_df, cap_time, cap_va
     
     # Create aligned windows
     speed_windows, aligned_time_speed = create_aligned_windows(
-        cap_time, speed_val, reward_times, window
+        speed_time, speed_val, reward_times, window
     )
     
     cap_windows, aligned_time_cap = create_aligned_windows(
@@ -2416,11 +2416,11 @@ def analyze_puff_zones(puff_zone_trials, trial_log_df, cap_time, cap_val, speed_
     if len(puff_delivery_trials) > 0:
         print(f"Analyzing puff deliveries...")
         # Note: Pass puff_zone_trials and trial_log_df so we can include ALL puff events
-        analyze_puff_deliveries(puff_zone_trials, trial_log_df, cap_time, cap_val, speed_val,
+        analyze_puff_deliveries(puff_zone_trials, trial_log_df, cap_time, cap_val, speed_time, speed_val,
                                output_folder, window, cap_vmin, cap_vmax)
 
 
-def analyze_puff_deliveries(puff_zone_trials, trial_log_df, cap_time, cap_val, speed_val,
+def analyze_puff_deliveries(puff_zone_trials, trial_log_df, cap_time, cap_val, speed_time, speed_val,
                             output_folder, window=10, cap_vmin=0, cap_vmax=5000):
     """Analyze data aligned to puff delivery times
     
@@ -2430,7 +2430,8 @@ def analyze_puff_deliveries(puff_zone_trials, trial_log_df, cap_time, cap_val, s
         trial_log_df: Trial log DataFrame (to get ALL puff events)
         cap_time: Capacitive time array
         cap_val: Capacitive value array
-        speed_val: Treadmill speed array
+        speed_time: Treadmill speed time array
+        speed_val: Treadmill speed value array
         output_folder: Directory to save figures
         window: Window size in seconds
         cap_vmin: Minimum value for capacitive colormap scale
@@ -2471,7 +2472,7 @@ def analyze_puff_deliveries(puff_zone_trials, trial_log_df, cap_time, cap_val, s
     
     # Create aligned windows
     speed_windows, aligned_time_speed = create_aligned_windows(
-        cap_time, speed_val, puff_times, window
+        speed_time, speed_val, puff_times, window
     )
     
     cap_windows, aligned_time_cap = create_aligned_windows(

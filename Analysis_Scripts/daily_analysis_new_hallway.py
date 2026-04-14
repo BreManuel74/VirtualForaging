@@ -10,6 +10,8 @@ import os
 import sys
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
+
+plt.rcParams['svg.fonttype'] = 'none'  # Save SVG text as real text, not paths
 from scipy.stats import norm
 import tkinter as tk
 from tkinter import filedialog
@@ -969,7 +971,7 @@ class LickPlotter:
     
 class DPrimePlotter:
     @staticmethod
-    def plot_hits_misses_cr_fa_bar(df_quarters, df_puff_quarters, ax=None):
+    def plot_hits_misses_cr_fa_bar(df_quarters, df_puff_quarters, ax=None, dprime_values=None, session_dprime=None):
         hits = [0 if pd.isna(df_quarters[f'Q{i+1}_hits'].iloc[i]) else df_quarters[f'Q{i+1}_hits'].iloc[i] for i in range(4)]
         misses = [0 if pd.isna(df_quarters[f'Q{i+1}_misses'].iloc[i]) else df_quarters[f'Q{i+1}_misses'].iloc[i] for i in range(4)]
         correct_rejections = [0 if pd.isna(df_puff_quarters[f'Q{i+1}_correct_rejections'].iloc[i]) else df_puff_quarters[f'Q{i+1}_correct_rejections'].iloc[i] for i in range(4)]
@@ -993,7 +995,6 @@ class DPrimePlotter:
         ax.set_xticks(x)
         ax.set_xticklabels(quarters_labels)
         ax.set_xlim(-0.5, len(x) - 0.5)
-        ax.legend(loc='center left', bbox_to_anchor=(1, 0.5))
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.yaxis.set_major_locator(MaxNLocator(integer=True))
@@ -1006,6 +1007,21 @@ class DPrimePlotter:
                          xytext=(0, 3),  # 3 points vertical offset
                          textcoords="offset points",
                          ha='center', va='bottom', fontsize=10)
+
+        # Build legend entries: bar labels + d-prime info
+        handles, labels = ax.get_legend_handles_labels()
+        if dprime_values is not None:
+            for i, dp in enumerate(dprime_values):
+                dp_str = f"{dp:.3f}" if not (dp is None or (isinstance(dp, float) and np.isnan(dp))) else "N/A"
+                from matplotlib.lines import Line2D
+                handles.append(Line2D([], [], color='none'))
+                labels.append(f"Q{i+1} d\u2019 = {dp_str}")
+        if session_dprime is not None:
+            from matplotlib.lines import Line2D
+            dp_str = f"{session_dprime:.3f}" if not (isinstance(session_dprime, float) and np.isnan(session_dprime)) else "N/A"
+            handles.append(Line2D([], [], color='none'))
+            labels.append(f"Session d\u2019 = {dp_str}")
+        ax.legend(handles, labels, loc='center left', bbox_to_anchor=(1, 0.5))
         
         # Save the figure if it wasn't provided as an argument
         if ax is None:
@@ -1692,6 +1708,27 @@ if __name__ == "__main__":
         except:
             dprime_values.append(np.nan)
             #print(f"Quarter {i+1} d-prime: Could not calculate")
+
+    # Whole-session d-prime calculation
+    total_hits = sum(df_quarters[f'Q{i+1}_hits'].iloc[i] for i in range(4) if not pd.isna(df_quarters[f'Q{i+1}_hits'].iloc[i]))
+    total_misses = sum(df_quarters[f'Q{i+1}_misses'].iloc[i] for i in range(4) if not pd.isna(df_quarters[f'Q{i+1}_misses'].iloc[i]))
+    total_false_alarms = sum(df_puff_quarters[f'Q{i+1}_false_alarms'].iloc[i] for i in range(4) if not pd.isna(df_puff_quarters[f'Q{i+1}_false_alarms'].iloc[i]))
+    total_correct_rejections = sum(df_puff_quarters[f'Q{i+1}_correct_rejections'].iloc[i] for i in range(4) if not pd.isna(df_puff_quarters[f'Q{i+1}_correct_rejections'].iloc[i]))
+
+    session_signal_trials = total_hits + total_misses
+    session_noise_trials = total_false_alarms + total_correct_rejections
+
+    if session_signal_trials > 0 and session_noise_trials > 0:
+        session_hit_rate = total_hits / session_signal_trials
+        session_fa_rate = total_false_alarms / session_noise_trials
+        try:
+            session_dprime = round(calculate_dprime(session_hit_rate, session_fa_rate, session_signal_trials, session_noise_trials), 3)
+        except:
+            session_dprime = np.nan
+    else:
+        session_dprime = np.nan
+
+    print(f"\nWhole-session d-prime: {session_dprime}  (HR: {total_hits}/{session_signal_trials}, FAR: {total_false_alarms}/{session_noise_trials})")
               
               
               
@@ -1746,7 +1783,7 @@ if __name__ == "__main__":
         pass
     fig_dprime = plt.figure(figsize=(10, 5), num='dprime')
     ax_dprime = fig_dprime.add_subplot(111)
-    DPrimePlotter.plot_hits_misses_cr_fa_bar(df_quarters, df_puff_quarters, ax=ax_dprime)
+    DPrimePlotter.plot_hits_misses_cr_fa_bar(df_quarters, df_puff_quarters, ax=ax_dprime, dprime_values=dprime_values, session_dprime=session_dprime)
     plt.tight_layout()
     save_figure(fig_dprime, "dprime_hits_misses_chart")
     

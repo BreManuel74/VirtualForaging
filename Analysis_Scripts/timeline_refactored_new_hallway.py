@@ -22,6 +22,14 @@ from tkinter import filedialog
 import tkinter as tk
 import matplotlib.cm as cm
 
+plt.rcParams['svg.fonttype'] = 'none'  # Save SVG text as real text, not paths
+
+# Configure matplotlib for SVG output with editable text
+plt.rcParams['font.family'] = 'sans-serif'
+plt.rcParams['font.sans-serif'] = ['Arial']
+plt.rcParams['xtick.direction'] = 'in'  # Tick marks face inward
+plt.rcParams['ytick.direction'] = 'in'
+
 
 # ============================================================================
 # UTILITY FUNCTIONS
@@ -1202,7 +1210,6 @@ def plot_treadmill_distance_timeline(ax, tread_dist_time, tread_distance, reward
     
     # Highlight reward and punish intervals
     add_texture_intervals(ax, texture_data, max_time)
-    add_texture_intervals(ax, texture_data, max_time)
     
     if not has_more_plots:
         ax.set_xlabel('Elapsed Time (s)')
@@ -1486,6 +1493,7 @@ def plot_average_traces_reward(reward_zone_trials, trial_log_df, cap_time, cap_v
     axs[0].set_title('Treadmill Speed Aligned to Reward Zone Onset')
     axs[0].legend()
     axs[0].set_xlim(-5, 5)
+    axs[0].set_ylim(bottom=0)
     axs[0].spines['top'].set_visible(False)
     axs[0].spines['right'].set_visible(False)
     
@@ -1656,6 +1664,7 @@ def plot_average_traces_puff(puff_zone_trials, trial_log_df, cap_time, cap_val, 
     axs[0].set_title(f'Average Treadmill Speed Aligned to Puff Zone Entry Times (n={n_puff_events})')
     axs[0].legend()
     axs[0].set_xlim(-5, 5)
+    axs[0].set_ylim(bottom=0)
     axs[0].spines['top'].set_visible(False)
     axs[0].spines['right'].set_visible(False)
     
@@ -1707,6 +1716,7 @@ def plot_average_traces_puff(puff_zone_trials, trial_log_df, cap_time, cap_val, 
     
     axs[2].set_xlabel('Time from Puff Event (s)')
     axs[2].set_xlim(-5, 5)
+    axs[2].set_ylim(bottom=0)
     axs[2].set_xticks(np.arange(-5, 6, 1))
     axs[2].spines['top'].set_visible(False)
     axs[2].spines['right'].set_visible(False)
@@ -1718,7 +1728,7 @@ def plot_average_traces_puff(puff_zone_trials, trial_log_df, cap_time, cap_val, 
     # Create pupil plots if available
     if pupil_diameter_data is not None and pupil_diameter_data[1] is not None:
         _, pupil_raw_times, pupil_raw_diameters = pupil_diameter_data
-        window_pupil = 10
+        window_pupil = 5
         
         # Pupil aligned to puff zone entry (interpolated to common timeline)
         pupil_puff_windows_padded, aligned_time_pupil_puff = create_aligned_windows(
@@ -1777,7 +1787,7 @@ def plot_average_traces_puff(puff_zone_trials, trial_log_df, cap_time, cap_val, 
         axs_pupil[0].set_ylabel('Pupil Diameter (z-score)')
         axs_pupil[0].set_title('Pupil Diameter Aligned to Puff Zone Entry (Interpolated)')
         axs_pupil[0].legend()
-        axs_pupil[0].set_xlim(-10, 10)
+        axs_pupil[0].set_xlim(-5, 5)
         axs_pupil[0].spines['top'].set_visible(False)
         axs_pupil[0].spines['right'].set_visible(False)
         
@@ -1795,14 +1805,14 @@ def plot_average_traces_puff(puff_zone_trials, trial_log_df, cap_time, cap_val, 
             axs_pupil[1].set_ylabel('Pupil Diameter (z-score)')
             axs_pupil[1].set_title('Pupil Diameter Aligned to Puff Events (Interpolated)')
             axs_pupil[1].legend()
-            axs_pupil[1].set_xlim(-10, 10)
+            axs_pupil[1].set_xlim(-5, 5)
             axs_pupil[1].spines['top'].set_visible(False)
             axs_pupil[1].spines['right'].set_visible(False)
         else:
             axs_pupil[0].set_xlabel('Time (s)')
         
         for ax in axs_pupil:
-            ax.set_xticks(np.arange(-10, 11, 2))
+            ax.set_xticks(np.arange(-5, 6, 1))
         
         plt.tight_layout()
         save_figure(fig_pupil, f"pupil_diameter_puff_combined_{'with_events' if pupil_puff_event_data is not None else 'zone_only'}", output_folder)
@@ -2006,6 +2016,210 @@ def analyze_reward_deliveries(reward_zone_trials, trial_log_df, cap_time, cap_va
             center_time=0, event_label="Reward Delivery",
             show_zone_entries=True, zone_entry_color='blue', center_line_color='green'
         )
+
+
+def separate_hits_and_misses(reward_zone_trials):
+    """Separate reward zones into hits (rewarded) and misses (non-rewarded)
+
+    A zone is a "hit" if the third tuple element is non-NaN and > 0, which covers:
+      - reward_event: mouse stopped in an active reward zone and received a reward
+      - hits_event: mouse stopped correctly in an inactive reward zone (also a hit)
+    Re-entries are already excluded upstream in match_reward_zones_to_events.
+    A zone is a "miss" only if neither event type was matched (third element is NaN).
+
+    Args:
+        reward_zone_trials: List of (trial_idx, zone_entry_time, event_time) tuples
+            where event_time is reward_event, hits_event, or NaN
+
+    Returns:
+        tuple: (hits_list, misses_list) where each is a list of (trial_idx, zone_entry_time) tuples
+    """
+    hits = []
+    misses = []
+
+    for trial_idx, zone_entry_time, reward_event_time in reward_zone_trials:
+        if pd.notna(reward_event_time) and reward_event_time > 0:
+            hits.append((trial_idx, zone_entry_time))
+        else:
+            misses.append((trial_idx, zone_entry_time))
+
+    print(f"\n=== REWARD ZONE CLASSIFICATION ===")
+    print(f"Total reward zones: {len(reward_zone_trials)}")
+    print(f"Hits (rewarded zones): {len(hits)} ({len(hits)/len(reward_zone_trials)*100:.1f}%)")
+    print(f"Misses (non-rewarded zones): {len(misses)} ({len(misses)/len(reward_zone_trials)*100:.1f}%)")
+    print("=== END CLASSIFICATION ===\n")
+
+    return hits, misses
+
+
+def analyze_reward_hits_vs_misses(reward_zone_trials, cap_time, cap_val, speed_time, speed_val,
+                                   output_folder, window=5):
+    """Analyze speed data separately for rewarded vs non-rewarded zones
+
+    Uses the same logic as daily_analysis.py to identify misses (no-reward zones).
+    Creates average trace alignment plots (mean ± SEM) for hits and misses.
+
+    Args:
+        reward_zone_trials: List of (trial_idx, zone_entry_time, reward_event_time) tuples
+        cap_time: Capacitive time array
+        cap_val: Capacitive value array
+        speed_time: Treadmill speed time array
+        speed_val: Treadmill speed value array
+        output_folder: Directory to save figures
+        window: Window size in seconds before/after zone entry (default 5)
+    """
+    if len(reward_zone_trials) == 0:
+        print("No reward zones to analyze")
+        return
+
+    print(f"\n{'='*70}")
+    print("ANALYZING REWARD HITS VS MISSES (SPEED)")
+    print(f"{'='*70}")
+
+    # Separate hits and misses
+    hits, misses = separate_hits_and_misses(reward_zone_trials)
+
+    # Initialize variables for comparison plot
+    speed_windows_hits = None
+    speed_windows_misses = None
+    aligned_time_hits = None
+    aligned_time_misses = None
+
+    # ========================================================================
+    # HITS (Rewarded Zones) Analysis
+    # ========================================================================
+    if len(hits) > 0:
+        print(f"\nAnalyzing HITS (rewarded zones): n={len(hits)}")
+
+        hit_zone_times = [zone_time for _, zone_time in hits]
+
+        speed_windows_hits, aligned_time_hits = create_aligned_windows(
+            speed_time, speed_val, hit_zone_times, window
+        )
+
+        if speed_windows_hits is not None:
+            with np.errstate(invalid='ignore'):
+                avg_speed_hits = np.nanmean(speed_windows_hits, axis=0)
+                valid_counts = np.sum(~np.isnan(speed_windows_hits), axis=0)
+                valid_counts = np.where(valid_counts > 0, valid_counts, np.nan)
+                sem_speed_hits = np.nanstd(speed_windows_hits, axis=0) / np.sqrt(valid_counts)
+
+            fig, ax = plt.subplots(figsize=(10, 6))
+            ax.plot(aligned_time_hits, avg_speed_hits, color='darkblue', linewidth=2,
+                    label=f'Mean Speed (n={len(hits)})')
+            ax.fill_between(aligned_time_hits,
+                            avg_speed_hits - sem_speed_hits,
+                            avg_speed_hits + sem_speed_hits,
+                            alpha=0.2, color='darkblue', label='SEM')
+            ax.axvline(x=0, color='red', linestyle='--', linewidth=2, label='Reward Zone Onset (t=0)')
+            ax.set_xlabel('Time from Reward Zone Onset (s)')
+            ax.set_ylabel('Treadmill Speed (cm/s)')
+            ax.set_title(f'Treadmill Speed: REWARDED Zones (Hits, n={len(hits)})')
+            ax.legend()
+            ax.set_xlim(-5, 5)
+            ax.set_ylim(bottom=0)
+            ax.set_xticks(np.arange(-5, 6, 1))
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+            plt.tight_layout()
+            save_figure(fig, 'speed_average_reward_hits', output_folder)
+            plt.show()
+    else:
+        print("No rewarded zones (hits) found")
+
+    # ========================================================================
+    # MISSES (Non-Rewarded Zones) Analysis
+    # ========================================================================
+    if len(misses) > 0:
+        print(f"\nAnalyzing MISSES (non-rewarded zones): n={len(misses)}")
+
+        miss_zone_times = [zone_time for _, zone_time in misses]
+
+        speed_windows_misses, aligned_time_misses = create_aligned_windows(
+            speed_time, speed_val, miss_zone_times, window
+        )
+
+        if speed_windows_misses is not None:
+            with np.errstate(invalid='ignore'):
+                avg_speed_misses = np.nanmean(speed_windows_misses, axis=0)
+                valid_counts = np.sum(~np.isnan(speed_windows_misses), axis=0)
+                valid_counts = np.where(valid_counts > 0, valid_counts, np.nan)
+                sem_speed_misses = np.nanstd(speed_windows_misses, axis=0) / np.sqrt(valid_counts)
+
+            fig, ax = plt.subplots(figsize=(10, 6))
+            ax.plot(aligned_time_misses, avg_speed_misses, color='deepskyblue', linewidth=2,
+                    label=f'Mean Speed (n={len(misses)})')
+            ax.fill_between(aligned_time_misses,
+                            avg_speed_misses - sem_speed_misses,
+                            avg_speed_misses + sem_speed_misses,
+                            alpha=0.2, color='deepskyblue', label='SEM')
+            ax.axvline(x=0, color='red', linestyle='--', linewidth=2, label='Reward Zone Onset (t=0)')
+            ax.set_xlabel('Time from Reward Zone Onset (s)')
+            ax.set_ylabel('Treadmill Speed (cm/s)')
+            ax.set_title(f'Treadmill Speed: NON-REWARDED Zones (Misses, n={len(misses)})')
+            ax.legend()
+            ax.set_xlim(-5, 5)
+            ax.set_ylim(bottom=0)
+            ax.set_xticks(np.arange(-5, 6, 1))
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+            plt.tight_layout()
+            save_figure(fig, 'speed_average_reward_misses', output_folder)
+            plt.show()
+    else:
+        print("No non-rewarded zones (misses) found")
+
+    # ========================================================================
+    # COMPARISON: Hits vs Misses
+    # ========================================================================
+    if len(hits) > 0 and len(misses) > 0:
+        print(f"\nCreating comparison plot: Hits vs Misses")
+
+        if speed_windows_hits is not None and speed_windows_misses is not None:
+            with np.errstate(invalid='ignore'):
+                avg_speed_hits = np.nanmean(speed_windows_hits, axis=0)
+                valid_counts = np.sum(~np.isnan(speed_windows_hits), axis=0)
+                valid_counts = np.where(valid_counts > 0, valid_counts, np.nan)
+                sem_speed_hits = np.nanstd(speed_windows_hits, axis=0) / np.sqrt(valid_counts)
+
+                avg_speed_misses = np.nanmean(speed_windows_misses, axis=0)
+                valid_counts = np.sum(~np.isnan(speed_windows_misses), axis=0)
+                valid_counts = np.where(valid_counts > 0, valid_counts, np.nan)
+                sem_speed_misses = np.nanstd(speed_windows_misses, axis=0) / np.sqrt(valid_counts)
+
+            fig, ax = plt.subplots(figsize=(12, 6))
+
+            ax.plot(aligned_time_hits, avg_speed_hits, color='darkblue', linewidth=2,
+                    label=f'Hits (n={len(hits)})')
+            ax.fill_between(aligned_time_hits,
+                            avg_speed_hits - sem_speed_hits,
+                            avg_speed_hits + sem_speed_hits,
+                            alpha=0.2, color='darkblue')
+
+            ax.plot(aligned_time_misses, avg_speed_misses, color='deepskyblue', linewidth=2,
+                    label=f'Misses (n={len(misses)})')
+            ax.fill_between(aligned_time_misses,
+                            avg_speed_misses - sem_speed_misses,
+                            avg_speed_misses + sem_speed_misses,
+                            alpha=0.2, color='deepskyblue')
+
+            ax.axvline(x=0, color='red', linestyle='--', linewidth=2, label='Reward Zone Onset (t=0)')
+            ax.set_xlabel('Time from Reward Zone Onset (s)')
+            ax.set_ylabel('Treadmill Speed (cm/s)')
+            ax.set_title(f'Treadmill Speed Comparison: Rewarded (n={len(hits)}) vs Non-Rewarded (n={len(misses)}) Zones')
+            ax.legend()
+            ax.set_xlim(-5, 5)
+            ax.set_ylim(bottom=0)
+            ax.set_xticks(np.arange(-5, 6, 1))
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+            plt.tight_layout()
+            save_figure(fig, 'speed_comparison_hits_vs_misses', output_folder)
+            plt.show()
+
+    print(f"\n{'='*70}")
+    print("HITS VS MISSES ANALYSIS COMPLETE")
+    print(f"{'='*70}\n")
 
 
 # ============================================================================
@@ -2645,7 +2859,13 @@ def main():
             reward_zone_trials, data['trial_log'], cap_time, cap_value, tread_time, tread_speed,
             pupil_diameter_data, output_folder, cap_vmax=cap_vmax
         )
-    
+
+        # Analyze hits vs misses separately
+        print("\nAnalyzing reward hits vs misses (speed comparison)...")
+        analyze_reward_hits_vs_misses(
+            reward_zone_trials, cap_time, cap_value, tread_time, tread_speed, output_folder, window=5
+        )
+
     # Step 8: Match and analyze puff zones (using capacitive scale from reward analysis)
     print("\nAnalyzing puff zones...")
     puff_zone_trials = match_puff_zones_to_events(
