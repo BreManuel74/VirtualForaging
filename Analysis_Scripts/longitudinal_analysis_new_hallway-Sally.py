@@ -519,6 +519,9 @@ _ALL_PLOT_KEYS = {
     'epoch_punish_speed', 'epoch_punish_cap',
     'epoch_punish_speed_sess', 'epoch_punish_cap_sess',
     'epoch_punish_speed_sess_clean', 'epoch_punish_cap_sess_clean',
+    'sex_speed', 'sex_distance_indiv', 'sex_reward_indiv',
+    'epoch_reward_speed_sess_sex', 'epoch_reward_cap_sess_sex',
+    'epoch_punish_speed_sess_sex', 'epoch_punish_cap_sess_sex',
 }
 
 _PLOT_LABELS = [
@@ -588,6 +591,13 @@ _PLOT_LABELS = [
     ('epoch_punish_cap_sess',        'Epoch: Capacitive value — session-averaged, aligned to punishment zone entry (per-mouse + condition)'),
     ('epoch_punish_speed_sess_clean','Epoch: Treadmill speed — punishment zone, session-averaged, by condition only (no individual traces)'),
     ('epoch_punish_cap_sess_clean',  'Epoch: Capacitive value — punishment zone, session-averaged, by condition only (no individual traces)'),
+    ('sex_speed',          'Individual: Average speed over time — colored by sex'),
+    ('sex_distance_indiv', 'Individual: Total distance per session — colored by sex (m)'),
+    ('sex_reward_indiv',   'Individual: Reward rate per session — colored by sex (rewards/min)'),
+    ('epoch_reward_speed_sess_sex', 'Epoch: Treadmill speed — session-averaged, aligned to reward zone entry (by sex)'),
+    ('epoch_reward_cap_sess_sex',   'Epoch: Capacitive value — session-averaged, aligned to reward zone entry (by sex)'),
+    ('epoch_punish_speed_sess_sex', 'Epoch: Treadmill speed — punishment zone, session-averaged, by sex'),
+    ('epoch_punish_cap_sess_sex',   'Epoch: Capacitive value — punishment zone, session-averaged, by sex'),
 ]
 
 
@@ -1886,7 +1896,8 @@ def generate_descriptive_stats_report(all_results, level_stats_data=None, output
 def _plot_epoch_panels(all_results, signal_key, ylabel, title_prefix,
                       condition_color_map, window_s=EPOCH_WINDOW_S,
                       hierarchy='event', use_sd=False, show_individual_traces=True,
-                      reward_delivery_vline=True):
+                      reward_delivery_vline=True, group_key='starting_condition',
+                      group_color_map=None, group_label='By Starting Condition'):
     """Create per-mouse and condition-averaged epoch figures for a given signal.
 
     Parameters
@@ -1916,6 +1927,7 @@ def _plot_epoch_panels(all_results, signal_key, ylabel, title_prefix,
     canonical_time = EPOCH_CANONICAL_TIME
     unit_label     = 'sessions' if hierarchy == 'session' else 'events'
     hier_label     = '(session-averaged)' if hierarchy == 'session' else '(event-averaged)'
+    _active_color_map = group_color_map if group_color_map is not None else condition_color_map
 
     # ── Figure 1: per-mouse ───────────────────────────────────────────────────
     n_mice = len(all_results)
@@ -1932,8 +1944,8 @@ def _plot_epoch_panels(all_results, signal_key, ylabel, title_prefix,
         matrix     = result.get(signal_key)
         ax         = axs_flat[i]
         mouse_name = result['mouse']
-        condition  = result['starting_condition']
-        color      = condition_color_map.get(condition, 'steelblue')
+        condition  = result.get(group_key, 'unknown')
+        color      = _active_color_map.get(condition, 'steelblue')
 
         if matrix is not None and matrix.shape[0] > 0:
             with warnings.catch_warnings():
@@ -1995,7 +2007,7 @@ def _plot_epoch_panels(all_results, signal_key, ylabel, title_prefix,
     _yvals_cond = []
     for result in all_results:
         matrix    = result.get(signal_key)
-        condition = result['starting_condition']
+        condition = result.get(group_key, 'unknown')
         if matrix is not None and matrix.shape[0] > 0:
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore', RuntimeWarning)
@@ -2005,7 +2017,7 @@ def _plot_epoch_panels(all_results, signal_key, ylabel, title_prefix,
                 condition_all_matrices.setdefault(condition, []).append(matrix)
 
     for condition in sorted(condition_mouse_means.keys()):
-        color       = condition_color_map.get(condition, 'steelblue')
+        color       = _active_color_map.get(condition, 'steelblue')
         mouse_means = np.array(condition_mouse_means[condition])  # (n_mice_in_cond, 501)
         n_mice_cond = mouse_means.shape[0]
 
@@ -2040,7 +2052,7 @@ def _plot_epoch_panels(all_results, signal_key, ylabel, title_prefix,
         ax_cond.axvline(0.65, color='black', linestyle='--', linewidth=1.0, label='Reward delivery (t=0.65 s)')
     ax_cond.set_xlabel('Time from reward zone entry (s)')
     ax_cond.set_ylabel(ylabel)
-    ax_cond.set_title(f'{title_prefix} {hier_label} — By Starting Condition')
+    ax_cond.set_title(f'{title_prefix} {hier_label} — {group_label}')
     ax_cond.set_xlim(-window_s, window_s)
     # Fit y-axis to mean ± SEM of averaged data (5 % headroom)
     if _yvals_cond:
@@ -2289,6 +2301,9 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     avg_bout_count_fig    = plt.figure(figsize=(12, 6)) if 'avg_bout_count'     in selected_plots else None
     bout_avg_speed_fig    = plt.figure(figsize=(12, 6)) if 'bout_avg_speed'     in selected_plots else None
     bout_avg_dist_fig     = plt.figure(figsize=(12, 6)) if 'bout_avg_dist'      in selected_plots else None
+    sex_speed_fig         = plt.figure(figsize=(12, 6)) if 'sex_speed'          in selected_plots else None
+    sex_distance_indiv_fig= plt.figure(figsize=(12, 6)) if 'sex_distance_indiv' in selected_plots else None
+    sex_reward_indiv_fig  = plt.figure(figsize=(12, 6)) if 'sex_reward_indiv'   in selected_plots else None
     colors = generate_colors(len(data_files))  # Generate colors based on number of mice
     
     all_results = []
@@ -2757,6 +2772,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             'dprimes': dprimes_list,
             'session_lengths': session_lengths,
             'starting_condition': conditions[mouse_name],
+            'sex': 'male' if markers[mouse_name] == 's' else 'female',
             'df': results_df,
             'session_file_errors': session_file_errors,
             'speed_epoch_matrix':        speed_epoch_matrix,
@@ -2856,6 +2872,31 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             # convert mm → m
             plt.plot(day_numbers, df_r['avg_dist_per_bout'] / 1000.0,
                 f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
+
+        # ── Sex-colored individual trace plots ────────────────────────────────
+        _sex_color = 'green' if markers[mouse_name] == 's' else 'purple'
+
+        if sex_speed_fig is not None:
+            plt.figure(sex_speed_fig.number)
+            plt.plot(day_numbers, df_r['average_speed'],
+                f'{markers[mouse_name]}-', color=_sex_color, markersize=8, label=mouse_name)
+
+        if sex_distance_indiv_fig is not None:
+            plt.figure(sex_distance_indiv_fig.number)
+            _dist_m = df_r['total_distance'] / 1000.0
+            plt.plot(day_numbers, _dist_m,
+                f'{markers[mouse_name]}-', color=_sex_color, markersize=8, label=mouse_name)
+
+        if sex_reward_indiv_fig is not None:
+            plt.figure(sex_reward_indiv_fig.number)
+            _rpm_vals = df_r.apply(
+                lambda _row: _row['hits'] / _row['session_length']
+                if pd.notna(_row['session_length']) and _row['session_length'] > 0
+                    and pd.notna(_row['hits'])
+                else float('nan'), axis=1
+            )
+            plt.plot(day_numbers, _rpm_vals.values,
+                f'{markers[mouse_name]}-', color=_sex_color, markersize=8, label=mouse_name)
 
     # Tick spacing for individual mouse plots
     max_day = max_sessions
@@ -3076,6 +3117,60 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         plt.title('Average Distance per Locomotion Bout')
         plt.xlabel('Training Day')
         plt.ylabel('Distance per Bout (m)')
+        plt.grid(False)
+        ax = plt.gca()
+        ax.tick_params(axis='both', direction='in')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.set_ylim(bottom=0)
+        ax.set_xlim(left=0, right=max_day - 0.5)
+        ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
+        ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
+        ax.tick_params(axis='x', which='minor', direction='in')
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+
+    # Configure sex-colored speed plot
+    if sex_speed_fig is not None:
+        plt.figure(sex_speed_fig.number)
+        plt.title('Average Speed Over Time — By Sex')
+        plt.xlabel('Training Day')
+        plt.ylabel('Average Speed (cm/s)')
+        plt.grid(False)
+        ax = plt.gca()
+        ax.tick_params(axis='both', direction='in')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.set_ylim(bottom=0)
+        ax.set_xlim(left=0, right=max_day - 0.5)
+        ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
+        ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
+        ax.tick_params(axis='x', which='minor', direction='in')
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+
+    # Configure sex-colored distance plot
+    if sex_distance_indiv_fig is not None:
+        plt.figure(sex_distance_indiv_fig.number)
+        plt.title('Total Distance Per Session — By Sex')
+        plt.xlabel('Training Day')
+        plt.ylabel('Distance (m)')
+        plt.grid(False)
+        ax = plt.gca()
+        ax.tick_params(axis='both', direction='in')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.set_ylim(bottom=0)
+        ax.set_xlim(left=0, right=max_day - 0.5)
+        ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
+        ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
+        ax.tick_params(axis='x', which='minor', direction='in')
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+
+    # Configure sex-colored reward rate plot
+    if sex_reward_indiv_fig is not None:
+        plt.figure(sex_reward_indiv_fig.number)
+        plt.title('Reward Rate Per Session — By Sex')
+        plt.xlabel('Training Day')
+        plt.ylabel('Rewards per Minute')
         plt.grid(False)
         ax = plt.gca()
         ax.tick_params(axis='both', direction='in')
@@ -4194,6 +4289,10 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     punish_cap_sess_per_mouse_fig      = punish_cap_sess_cond_fig      = None
     punish_speed_sess_cond_clean_fig   = None
     punish_cap_sess_cond_clean_fig     = None
+    epoch_speed_sess_sex_per_mouse_fig  = epoch_speed_sess_sex_fig  = None
+    epoch_cap_sess_sex_per_mouse_fig    = epoch_cap_sess_sex_fig    = None
+    epoch_punish_speed_sess_sex_per_mouse_fig = epoch_punish_speed_sess_sex_fig = None
+    epoch_punish_cap_sess_sex_per_mouse_fig   = epoch_punish_cap_sess_sex_fig   = None
     _epoch_keys = {'epoch_reward_speed', 'epoch_reward_cap',
                    'epoch_reward_speed_sess', 'epoch_reward_cap_sess',
                    'epoch_reward_speed_early_late', 'epoch_reward_cap_early_late',
@@ -4202,7 +4301,9 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                    'epoch_reward_speed_early_late_clean', 'epoch_reward_cap_early_late_clean',
                    'epoch_punish_speed', 'epoch_punish_cap',
                    'epoch_punish_speed_sess', 'epoch_punish_cap_sess',
-                   'epoch_punish_speed_sess_clean', 'epoch_punish_cap_sess_clean'}
+                   'epoch_punish_speed_sess_clean', 'epoch_punish_cap_sess_clean',
+                   'epoch_reward_speed_sess_sex', 'epoch_reward_cap_sess_sex',
+                   'epoch_punish_speed_sess_sex', 'epoch_punish_cap_sess_sex'}
     if _epoch_keys & set(selected_plots):
         _any_speed = any(r.get('speed_epoch_matrix') is not None for r in all_results)
         _any_cap   = any(r.get('cap_epoch_matrix')   is not None for r in all_results)
@@ -4395,6 +4496,63 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                 reward_delivery_vline=False,
             )
 
+        # ── Sex-split session-averaged epoch plots ───────────────────────────────────
+        _sex_color_map = {'male': 'green', 'female': 'purple'}
+
+        if 'epoch_reward_speed_sess_sex' in selected_plots and _any_speed:
+            epoch_speed_sess_sex_per_mouse_fig, epoch_speed_sess_sex_fig = _plot_epoch_panels(
+                all_results, 'speed_epoch_session_means',
+                ylabel='Treadmill Speed (cm/s)',
+                title_prefix='Speed Aligned to Reward Zone Entry',
+                condition_color_map=condition_color_map,
+                hierarchy='session',
+                show_individual_traces=False,
+                group_key='sex',
+                group_color_map=_sex_color_map,
+                group_label='By Sex',
+            )
+
+        if 'epoch_reward_cap_sess_sex' in selected_plots and _any_cap:
+            epoch_cap_sess_sex_per_mouse_fig, epoch_cap_sess_sex_fig = _plot_epoch_panels(
+                all_results, 'cap_epoch_session_means',
+                ylabel='Capacitive Value (z-score)',
+                title_prefix='Capacitive Value Aligned to Reward Zone Entry',
+                condition_color_map=condition_color_map,
+                hierarchy='session',
+                show_individual_traces=False,
+                group_key='sex',
+                group_color_map=_sex_color_map,
+                group_label='By Sex',
+            )
+
+        if 'epoch_punish_speed_sess_sex' in selected_plots and _any_punish_speed:
+            epoch_punish_speed_sess_sex_per_mouse_fig, epoch_punish_speed_sess_sex_fig = _plot_epoch_panels(
+                all_results, 'punish_speed_epoch_session_means',
+                ylabel='Treadmill Speed (cm/s)',
+                title_prefix='Speed Aligned to Punishment Zone Entry',
+                condition_color_map=condition_color_map,
+                hierarchy='session',
+                show_individual_traces=False,
+                reward_delivery_vline=False,
+                group_key='sex',
+                group_color_map=_sex_color_map,
+                group_label='By Sex',
+            )
+
+        if 'epoch_punish_cap_sess_sex' in selected_plots and _any_punish_cap:
+            epoch_punish_cap_sess_sex_per_mouse_fig, epoch_punish_cap_sess_sex_fig = _plot_epoch_panels(
+                all_results, 'punish_cap_epoch_session_means',
+                ylabel='Capacitive Value (z-score)',
+                title_prefix='Capacitive Value Aligned to Punishment Zone Entry',
+                condition_color_map=condition_color_map,
+                hierarchy='session',
+                show_individual_traces=False,
+                reward_delivery_vline=False,
+                group_key='sex',
+                group_color_map=_sex_color_map,
+                group_label='By Sex',
+            )
+
     # Create the level-based analysis plots
     level_reward_fig = level_speed_collapsed_fig = level_speed_condition_fig = None
     level_lick_collapsed_fig = level_lick_condition_fig = None
@@ -4476,7 +4634,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         f.write(report_text + "\n")
     print(f"\nMissing data report saved to: {report_path}")
 
-    return speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, distance_fig, bout_count_fig, avg_bout_count_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_bar_fig, condition_speed_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, epoch_speed_per_mouse_fig, epoch_speed_cond_fig, epoch_cap_per_mouse_fig, epoch_cap_cond_fig, epoch_speed_sess_per_mouse_fig, epoch_speed_sess_cond_fig, epoch_cap_sess_per_mouse_fig, epoch_cap_sess_cond_fig, epoch_speed_early_per_mouse_fig, epoch_speed_late_per_mouse_fig, epoch_speed_early_cond_fig, epoch_speed_late_cond_fig, epoch_cap_early_per_mouse_fig, epoch_cap_late_per_mouse_fig, epoch_cap_early_cond_fig, epoch_cap_late_cond_fig, epoch_speed_early_ev_per_mouse_fig, epoch_speed_late_ev_per_mouse_fig, epoch_speed_early_ev_cond_fig, epoch_speed_late_ev_cond_fig, epoch_cap_early_ev_per_mouse_fig, epoch_cap_late_ev_per_mouse_fig, epoch_cap_early_ev_cond_fig, epoch_cap_late_ev_cond_fig, epoch_speed_sess_cond_clean_fig, epoch_cap_sess_cond_clean_fig, epoch_speed_early_cond_clean_fig, epoch_speed_late_cond_clean_fig, epoch_cap_early_cond_clean_fig, epoch_cap_late_cond_clean_fig, punish_speed_per_mouse_fig, punish_speed_cond_fig, punish_cap_per_mouse_fig, punish_cap_cond_fig, punish_speed_sess_per_mouse_fig, punish_speed_sess_cond_fig, punish_cap_sess_per_mouse_fig, punish_cap_sess_cond_fig, punish_speed_sess_cond_clean_fig, punish_cap_sess_cond_clean_fig, all_results, _level_stats_data
+    return speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, distance_fig, bout_count_fig, avg_bout_count_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_bar_fig, condition_speed_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, epoch_speed_per_mouse_fig, epoch_speed_cond_fig, epoch_cap_per_mouse_fig, epoch_cap_cond_fig, epoch_speed_sess_per_mouse_fig, epoch_speed_sess_cond_fig, epoch_cap_sess_per_mouse_fig, epoch_cap_sess_cond_fig, epoch_speed_early_per_mouse_fig, epoch_speed_late_per_mouse_fig, epoch_speed_early_cond_fig, epoch_speed_late_cond_fig, epoch_cap_early_per_mouse_fig, epoch_cap_late_per_mouse_fig, epoch_cap_early_cond_fig, epoch_cap_late_cond_fig, epoch_speed_early_ev_per_mouse_fig, epoch_speed_late_ev_per_mouse_fig, epoch_speed_early_ev_cond_fig, epoch_speed_late_ev_cond_fig, epoch_cap_early_ev_per_mouse_fig, epoch_cap_late_ev_per_mouse_fig, epoch_cap_early_ev_cond_fig, epoch_cap_late_ev_cond_fig, epoch_speed_sess_cond_clean_fig, epoch_cap_sess_cond_clean_fig, epoch_speed_early_cond_clean_fig, epoch_speed_late_cond_clean_fig, epoch_cap_early_cond_clean_fig, epoch_cap_late_cond_clean_fig, punish_speed_per_mouse_fig, punish_speed_cond_fig, punish_cap_per_mouse_fig, punish_cap_cond_fig, punish_speed_sess_per_mouse_fig, punish_speed_sess_cond_fig, punish_cap_sess_per_mouse_fig, punish_cap_sess_cond_fig, punish_speed_sess_cond_clean_fig, punish_cap_sess_cond_clean_fig, sex_speed_fig, sex_distance_indiv_fig, sex_reward_indiv_fig, epoch_speed_sess_sex_per_mouse_fig, epoch_speed_sess_sex_fig, epoch_cap_sess_sex_per_mouse_fig, epoch_cap_sess_sex_fig, epoch_punish_speed_sess_sex_per_mouse_fig, epoch_punish_speed_sess_sex_fig, epoch_punish_cap_sess_sex_per_mouse_fig, epoch_punish_cap_sess_sex_fig, all_results, _level_stats_data
 
 def _ask_mode(root):
     """Ask whether to generate plots or run the descriptive stats report.
@@ -4632,7 +4790,7 @@ def main():
             print("No transitions CSV selected — level plot will be empty.")
 
     # Analyze data and plot results
-    speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, distance_fig, bout_count_fig, avg_bout_count_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_bar_fig, condition_speed_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, epoch_speed_per_mouse_fig, epoch_speed_cond_fig, epoch_cap_per_mouse_fig, epoch_cap_cond_fig, epoch_speed_sess_per_mouse_fig, epoch_speed_sess_cond_fig, epoch_cap_sess_per_mouse_fig, epoch_cap_sess_cond_fig, epoch_speed_early_per_mouse_fig, epoch_speed_late_per_mouse_fig, epoch_speed_early_cond_fig, epoch_speed_late_cond_fig, epoch_cap_early_per_mouse_fig, epoch_cap_late_per_mouse_fig, epoch_cap_early_cond_fig, epoch_cap_late_cond_fig, epoch_speed_early_ev_per_mouse_fig, epoch_speed_late_ev_per_mouse_fig, epoch_speed_early_ev_cond_fig, epoch_speed_late_ev_cond_fig, epoch_cap_early_ev_per_mouse_fig, epoch_cap_late_ev_per_mouse_fig, epoch_cap_early_ev_cond_fig, epoch_cap_late_ev_cond_fig, epoch_speed_sess_cond_clean_fig, epoch_cap_sess_cond_clean_fig, epoch_speed_early_cond_clean_fig, epoch_speed_late_cond_clean_fig, epoch_cap_early_cond_clean_fig, epoch_cap_late_cond_clean_fig, punish_speed_per_mouse_fig, punish_speed_cond_fig, punish_cap_per_mouse_fig, punish_cap_cond_fig, punish_speed_sess_per_mouse_fig, punish_speed_sess_cond_fig, punish_cap_sess_per_mouse_fig, punish_cap_sess_cond_fig, punish_speed_sess_cond_clean_fig, punish_cap_sess_cond_clean_fig, all_results, _level_stats_data = analyze_mouse_data(
+    speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, distance_fig, bout_count_fig, avg_bout_count_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_bar_fig, condition_speed_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, epoch_speed_per_mouse_fig, epoch_speed_cond_fig, epoch_cap_per_mouse_fig, epoch_cap_cond_fig, epoch_speed_sess_per_mouse_fig, epoch_speed_sess_cond_fig, epoch_cap_sess_per_mouse_fig, epoch_cap_sess_cond_fig, epoch_speed_early_per_mouse_fig, epoch_speed_late_per_mouse_fig, epoch_speed_early_cond_fig, epoch_speed_late_cond_fig, epoch_cap_early_per_mouse_fig, epoch_cap_late_per_mouse_fig, epoch_cap_early_cond_fig, epoch_cap_late_cond_fig, epoch_speed_early_ev_per_mouse_fig, epoch_speed_late_ev_per_mouse_fig, epoch_speed_early_ev_cond_fig, epoch_speed_late_ev_cond_fig, epoch_cap_early_ev_per_mouse_fig, epoch_cap_late_ev_per_mouse_fig, epoch_cap_early_ev_cond_fig, epoch_cap_late_ev_cond_fig, epoch_speed_sess_cond_clean_fig, epoch_cap_sess_cond_clean_fig, epoch_speed_early_cond_clean_fig, epoch_speed_late_cond_clean_fig, epoch_cap_early_cond_clean_fig, epoch_cap_late_cond_clean_fig, punish_speed_per_mouse_fig, punish_speed_cond_fig, punish_cap_per_mouse_fig, punish_cap_cond_fig, punish_speed_sess_per_mouse_fig, punish_speed_sess_cond_fig, punish_cap_sess_per_mouse_fig, punish_cap_sess_cond_fig, punish_speed_sess_cond_clean_fig, punish_cap_sess_cond_clean_fig, sex_speed_fig, sex_distance_indiv_fig, sex_reward_indiv_fig, epoch_speed_sess_sex_per_mouse_fig, epoch_speed_sess_sex_fig, epoch_cap_sess_sex_per_mouse_fig, epoch_cap_sess_sex_fig, epoch_punish_speed_sess_sex_per_mouse_fig, epoch_punish_speed_sess_sex_fig, epoch_punish_cap_sess_sex_per_mouse_fig, epoch_punish_cap_sess_sex_fig, all_results, _level_stats_data = analyze_mouse_data(
         file_paths, markers, starting_conditions,
         transitions_csv_path=transitions_csv_path,
         selected_plots=selected_plots,
@@ -4675,6 +4833,11 @@ def main():
         punish_speed_sess_per_mouse_fig, punish_speed_sess_cond_fig,
         punish_cap_sess_per_mouse_fig, punish_cap_sess_cond_fig,
         punish_speed_sess_cond_clean_fig, punish_cap_sess_cond_clean_fig,
+        sex_speed_fig, sex_distance_indiv_fig, sex_reward_indiv_fig,
+        epoch_speed_sess_sex_per_mouse_fig, epoch_speed_sess_sex_fig,
+        epoch_cap_sess_sex_per_mouse_fig, epoch_cap_sess_sex_fig,
+        epoch_punish_speed_sess_sex_per_mouse_fig, epoch_punish_speed_sess_sex_fig,
+        epoch_punish_cap_sess_sex_per_mouse_fig, epoch_punish_cap_sess_sex_fig,
     ] if f is not None]
 
     # Configure all figures (add legend only when labeled artists exist, then tight layout)
@@ -4789,6 +4952,17 @@ def main():
         (punish_cap_sess_cond_fig,            'epoch_punish_cap_sess_condition',       'Capacitive epoch (punish, session) — by condition'),
         (punish_speed_sess_cond_clean_fig,    'epoch_punish_speed_sess_condition_clean','Speed epoch (punish, session) — by condition, no individual traces'),
         (punish_cap_sess_cond_clean_fig,      'epoch_punish_cap_sess_condition_clean', 'Capacitive epoch (punish, session) — by condition, no individual traces'),
+        (sex_speed_fig,          'sex_speed',          'Individual speed plot — by sex'),
+        (sex_distance_indiv_fig, 'sex_distance_indiv', 'Individual distance plot — by sex'),
+        (sex_reward_indiv_fig,   'sex_reward_indiv',   'Individual reward rate plot — by sex'),
+        (epoch_speed_sess_sex_per_mouse_fig, 'epoch_reward_speed_sess_sex_per_mouse', 'Speed epoch (session, reward zone) — per mouse (sex coloring)'),
+        (epoch_speed_sess_sex_fig,           'epoch_reward_speed_sess_sex',           'Speed epoch (session, reward zone) — by sex'),
+        (epoch_cap_sess_sex_per_mouse_fig,   'epoch_reward_cap_sess_sex_per_mouse',   'Capacitive epoch (session, reward zone) — per mouse (sex coloring)'),
+        (epoch_cap_sess_sex_fig,             'epoch_reward_cap_sess_sex',             'Capacitive epoch (session, reward zone) — by sex'),
+        (epoch_punish_speed_sess_sex_per_mouse_fig, 'epoch_punish_speed_sess_sex_per_mouse', 'Speed epoch (session, punish zone) — per mouse (sex coloring)'),
+        (epoch_punish_speed_sess_sex_fig,           'epoch_punish_speed_sess_sex',           'Speed epoch (session, punish zone) — by sex'),
+        (epoch_punish_cap_sess_sex_per_mouse_fig,   'epoch_punish_cap_sess_sex_per_mouse',   'Capacitive epoch (session, punish zone) — per mouse (sex coloring)'),
+        (epoch_punish_cap_sess_sex_fig,             'epoch_punish_cap_sess_sex',             'Capacitive epoch (session, punish zone) — by sex'),
     ]
 
     for fig, name, title in plot_configs:
