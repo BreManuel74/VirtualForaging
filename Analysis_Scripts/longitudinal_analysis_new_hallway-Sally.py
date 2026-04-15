@@ -29,7 +29,7 @@ import math
 script_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, script_dir)
 import lick_detection_algorithm as lda
-from scipy.stats import norm
+from scipy.stats import norm, ttest_ind
 from scipy.signal import butter, filtfilt
 from timeline_refactored import (
     safe_literal_eval,
@@ -526,6 +526,14 @@ _ALL_PLOT_KEYS = {
     'sex_speed', 'sex_distance_indiv', 'sex_reward_indiv',
     'epoch_reward_speed_sess_sex', 'epoch_reward_cap_sess_sex',
     'epoch_punish_speed_sess_sex', 'epoch_punish_cap_sess_sex',
+    'epoch_reward_speed_pre_post',
+    'epoch_reward_speed_diff',
+    'epoch_reward_speed_pre_post_entry',
+    'epoch_reward_speed_diff_entry',
+    'epoch_punish_speed_pre_post',
+    'epoch_punish_speed_diff',
+    'epoch_punish_speed_pre_post_entry',
+    'epoch_punish_speed_diff_entry',
 }
 
 _PLOT_LABELS = [
@@ -603,6 +611,14 @@ _PLOT_LABELS = [
     ('epoch_reward_cap_sess_sex',   'Epoch: Capacitive value — session-averaged, aligned to reward zone entry (by sex)'),
     ('epoch_punish_speed_sess_sex', 'Epoch: Treadmill speed — punishment zone, session-averaged, by sex'),
     ('epoch_punish_cap_sess_sex',   'Epoch: Capacitive value — punishment zone, session-averaged, by sex'),
+    ('epoch_reward_speed_pre_post',  'Epoch: Speed — pre- vs post-reward delivery bar chart, by condition (0–0.65 s vs 0.65–1.3 s)'),
+    ('epoch_reward_speed_diff',      'Epoch: Speed — pre-minus-post-reward difference bar chart, by condition (positive = faster before reward)'),
+    ('epoch_reward_speed_pre_post_entry', 'Epoch: Reward zone speed — 1 s pre- vs 1 s post-zone entry bar chart, by condition'),
+    ('epoch_reward_speed_diff_entry',     'Epoch: Reward zone speed — pre-minus-post zone entry difference bar chart (1 s windows), by condition'),
+    ('epoch_punish_speed_pre_post',  'Epoch: Punishment zone speed — pre vs post 0.65 s cutoff bar chart, by condition (0–0.65 s vs 0.65–1.3 s)'),
+    ('epoch_punish_speed_diff',      'Epoch: Punishment zone speed — pre-minus-post 0.65 s cutoff difference bar chart, by condition'),
+    ('epoch_punish_speed_pre_post_entry', 'Epoch: Punishment zone speed — 1 s pre- vs 1 s post-zone entry bar chart, by condition'),
+    ('epoch_punish_speed_diff_entry',     'Epoch: Punishment zone speed — pre-minus-post zone entry difference bar chart (1 s windows), by condition'),
 ]
 
 
@@ -4371,6 +4387,14 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     epoch_cap_sess_sex_per_mouse_fig    = epoch_cap_sess_sex_fig    = None
     epoch_punish_speed_sess_sex_per_mouse_fig = epoch_punish_speed_sess_sex_fig = None
     epoch_punish_cap_sess_sex_per_mouse_fig   = epoch_punish_cap_sess_sex_fig   = None
+    epoch_reward_speed_pre_post_fig = None
+    epoch_reward_speed_diff_fig = None
+    epoch_reward_speed_pre_post_entry_fig = None
+    epoch_reward_speed_diff_entry_fig = None
+    epoch_punish_speed_pre_post_fig = None
+    epoch_punish_speed_diff_fig = None
+    epoch_punish_speed_pre_post_entry_fig = None
+    epoch_punish_speed_diff_entry_fig = None
     _epoch_keys = {'epoch_reward_speed', 'epoch_reward_cap',
                    'epoch_reward_speed_sess', 'epoch_reward_cap_sess',
                    'epoch_reward_speed_early_late', 'epoch_reward_cap_early_late',
@@ -4381,7 +4405,15 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                    'epoch_punish_speed_sess', 'epoch_punish_cap_sess',
                    'epoch_punish_speed_sess_clean', 'epoch_punish_cap_sess_clean',
                    'epoch_reward_speed_sess_sex', 'epoch_reward_cap_sess_sex',
-                   'epoch_punish_speed_sess_sex', 'epoch_punish_cap_sess_sex'}
+                   'epoch_punish_speed_sess_sex', 'epoch_punish_cap_sess_sex',
+                   'epoch_reward_speed_pre_post',
+                   'epoch_reward_speed_diff',
+                   'epoch_reward_speed_pre_post_entry',
+                   'epoch_reward_speed_diff_entry',
+                   'epoch_punish_speed_pre_post',
+                   'epoch_punish_speed_diff',
+                   'epoch_punish_speed_pre_post_entry',
+                   'epoch_punish_speed_diff_entry'}
     if _epoch_keys & set(selected_plots):
         _any_speed = any(r.get('speed_epoch_matrix') is not None for r in all_results)
         _any_cap   = any(r.get('cap_epoch_matrix')   is not None for r in all_results)
@@ -4645,6 +4677,748 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                 group_label='By Sex',
             )
 
+        # ── Punishment zone: pre/post 0.65 s cutoff speed bar chart ──────────
+        if 'epoch_punish_speed_pre_post' in selected_plots and _any_punish_speed:
+            _pre_mask_pp  = (EPOCH_CANONICAL_TIME >= 0.0)  & (EPOCH_CANONICAL_TIME <= 0.65)
+            _post_mask_pp = (EPOCH_CANONICAL_TIME >  0.65) & (EPOCH_CANONICAL_TIME <= 1.30)
+            _ppp_by_cond: dict = {}
+            for _r in all_results:
+                _sess_mat = _r.get('punish_speed_epoch_session_means')
+                if _sess_mat is None or _sess_mat.shape[0] == 0:
+                    continue
+                _cond = _r['starting_condition']
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    _pre_per_sess  = np.nanmean(_sess_mat[:, _pre_mask_pp],  axis=1)
+                    _post_per_sess = np.nanmean(_sess_mat[:, _post_mask_pp], axis=1)
+                    _pre_mean  = float(np.nanmean(_pre_per_sess))
+                    _post_mean = float(np.nanmean(_post_per_sess))
+                _ppp_by_cond.setdefault(_cond, []).append((_r['mouse'], _pre_mean, _post_mean))
+
+            if _ppp_by_cond:
+                _conds_ppp   = sorted(_ppp_by_cond.keys())
+                _n_conds_ppp = len(_conds_ppp)
+                epoch_punish_speed_pre_post_fig, _axs_ppp = plt.subplots(
+                    1, _n_conds_ppp,
+                    figsize=(4 * _n_conds_ppp + 1, 5),
+                    sharey=True, squeeze=False,
+                )
+                _all_ppp_yvals = []
+                for _ci, _cond in enumerate(_conds_ppp):
+                    _ax       = _axs_ppp[0, _ci]
+                    _color    = condition_color_map.get(_cond, 'steelblue')
+                    _entries  = _ppp_by_cond[_cond]
+                    _n_ppp    = len(_entries)
+                    _pre_vals = [e[1] for e in _entries]
+                    _post_vals= [e[2] for e in _entries]
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _mn_pre   = float(np.nanmean(_pre_vals))
+                        _mn_post  = float(np.nanmean(_post_vals))
+                        _sem_pre  = (float(np.nanstd(_pre_vals,  ddof=1) / np.sqrt(_n_ppp))
+                                     if _n_ppp > 1 else 0.0)
+                        _sem_post = (float(np.nanstd(_post_vals, ddof=1) / np.sqrt(_n_ppp))
+                                     if _n_ppp > 1 else 0.0)
+                    _all_ppp_yvals.extend([_mn_pre + _sem_pre, _mn_post + _sem_post,
+                                           _mn_pre - _sem_pre, _mn_post - _sem_post])
+                    _all_ppp_yvals.extend(_pre_vals + _post_vals)
+                    _ax.bar(0, _mn_pre,  width=0.5, color=_color, alpha=0.7,
+                            yerr=_sem_pre,  capsize=7,
+                            error_kw={'elinewidth': 1.5, 'capthick': 1.5})
+                    _ax.bar(1, _mn_post, width=0.5, color=_color, alpha=0.7,
+                            yerr=_sem_post, capsize=7,
+                            error_kw={'elinewidth': 1.5, 'capthick': 1.5})
+                    _rng_ppp = np.random.default_rng(seed=42)
+                    _jitter  = (_rng_ppp.random(_n_ppp) - 0.5) * 0.18
+                    for _j, (_mname, _pv, _qv) in enumerate(_entries):
+                        _xp = 0 + _jitter[_j]
+                        _xq = 1 + _jitter[_j]
+                        _ax.plot([_xp, _xq], [_pv, _qv], '-',
+                                 color=_color, linewidth=0.9, alpha=0.5, zorder=2)
+                        _ax.plot(_xp, _pv, 'o', color='white',
+                                 markeredgecolor=_color, markeredgewidth=1.5,
+                                 markersize=7, zorder=3)
+                        _ax.plot(_xq, _qv, 'o', color='white',
+                                 markeredgecolor=_color, markeredgewidth=1.5,
+                                 markersize=7, zorder=3)
+                    _ax.set_xticks([0, 1])
+                    _ax.set_xticklabels(['Pre-cutoff\n(0\u20130.65 s)', 'Post-cutoff\n(0.65\u20131.3 s)'],
+                                        fontsize=9)
+                    _ax.set_title(f'{_cond}\n(n={_n_ppp} mice)', fontsize=10)
+                    _ax.set_ylabel('Treadmill Speed (cm/s)' if _ci == 0 else '', fontsize=9)
+                    _ax.set_xlim(-0.6, 1.6)
+                    _ax.tick_params(axis='both', direction='in')
+                    _ax.spines['top'].set_visible(False)
+                    _ax.spines['right'].set_visible(False)
+                if _all_ppp_yvals:
+                    _ymax_ppp = float(np.nanmax(_all_ppp_yvals))
+                    _ymin_ppp = float(np.nanmin(_all_ppp_yvals))
+                else:
+                    _ymax_ppp, _ymin_ppp = 1.0, 0.0
+                _bot_ppp = _ymin_ppp * 1.05 if _ymin_ppp < 0 else 0.0
+                _axs_ppp[0, 0].set_ylim(_bot_ppp, _ymax_ppp * 1.05)
+                epoch_punish_speed_pre_post_fig.suptitle(
+                    'Average Speed: Pre- vs Post-Cutoff (Punishment Zone)\n'
+                    '(session-averaged punishment zone entry epochs, by condition)',
+                    fontsize=12,
+                )
+                epoch_punish_speed_pre_post_fig.tight_layout()
+
+        # ── Punishment zone: pre-minus-post speed difference bar chart ────────
+        if 'epoch_punish_speed_diff' in selected_plots and _any_punish_speed:
+            _pre_mask_pd  = (EPOCH_CANONICAL_TIME >= 0.0)  & (EPOCH_CANONICAL_TIME <= 0.65)
+            _post_mask_pd = (EPOCH_CANONICAL_TIME >  0.65) & (EPOCH_CANONICAL_TIME <= 1.30)
+            _pdiff_by_cond: dict = {}
+            for _r in all_results:
+                _sess_mat = _r.get('punish_speed_epoch_session_means')
+                if _sess_mat is None or _sess_mat.shape[0] == 0:
+                    continue
+                _cond = _r['starting_condition']
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    _pre_pd  = float(np.nanmean(np.nanmean(_sess_mat[:, _pre_mask_pd],  axis=1)))
+                    _post_pd = float(np.nanmean(np.nanmean(_sess_mat[:, _post_mask_pd], axis=1)))
+                _pdiff_by_cond.setdefault(_cond, []).append((_r['mouse'], _pre_pd - _post_pd))
+
+            if _pdiff_by_cond:
+                _conds_pd   = sorted(_pdiff_by_cond.keys())
+                _n_conds_pd = len(_conds_pd)
+                epoch_punish_speed_diff_fig, _ax_pd = plt.subplots(
+                    1, 1, figsize=(max(4, _n_conds_pd * 1.4 + 1.5), 5)
+                )
+                _all_pdiff_vals = []
+                _bar_x_pd = np.arange(_n_conds_pd)
+                _rng_pd   = np.random.default_rng(seed=42)
+                for _ci, _cond in enumerate(_conds_pd):
+                    _color    = condition_color_map.get(_cond, 'steelblue')
+                    _entries  = _pdiff_by_cond[_cond]
+                    _n_pd     = len(_entries)
+                    _dvals_pd = [e[1] for e in _entries]
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _mn_pd  = float(np.nanmean(_dvals_pd))
+                        _sem_pd = (float(np.nanstd(_dvals_pd, ddof=1) / np.sqrt(_n_pd))
+                                   if _n_pd > 1 else 0.0)
+                    _all_pdiff_vals.extend(_dvals_pd + [_mn_pd + _sem_pd, _mn_pd - _sem_pd])
+                    _ax_pd.bar(_ci, _mn_pd, width=0.55, color=_color, alpha=0.7,
+                               yerr=_sem_pd, capsize=7,
+                               error_kw={'elinewidth': 1.5, 'capthick': 1.5})
+                    _jitter_pd = (_rng_pd.random(_n_pd) - 0.5) * 0.22
+                    for _j, (_mname, _dv) in enumerate(_entries):
+                        _ax_pd.plot(_ci + _jitter_pd[_j], _dv, 'o',
+                                    color='white', markeredgecolor=_color,
+                                    markeredgewidth=1.5, markersize=7, zorder=3)
+                _ax_pd.axhline(0, color='black', linewidth=0.9, linestyle='--', zorder=1)
+                _ax_pd.set_xticks(_bar_x_pd)
+                _ax_pd.set_xticklabels(_conds_pd, fontsize=10)
+                _ax_pd.set_ylabel('Speed difference (cm/s)\n[pre-cutoff \u2212 post-cutoff]', fontsize=9)
+                _ax_pd.set_xlabel('Condition', fontsize=10)
+                if _all_pdiff_vals:
+                    _ymax_pd = float(np.nanmax(_all_pdiff_vals))
+                    _ymin_pd = float(np.nanmin(_all_pdiff_vals))
+                    _pad_pd  = max(abs(_ymax_pd), abs(_ymin_pd)) * 0.12 or 0.5
+                    _ax_pd.set_ylim(_ymin_pd - _pad_pd, _ymax_pd + _pad_pd)
+                _ax_pd.tick_params(axis='both', direction='in')
+                _ax_pd.spines['top'].set_visible(False)
+                _ax_pd.spines['right'].set_visible(False)
+
+                # ── Welch's t-tests for all condition pairs ───────────────────
+                import itertools as _itertools_pd
+                _pairs_pd = list(_itertools_pd.combinations(range(_n_conds_pd), 2))
+                _ylim_cur_pd = list(_ax_pd.get_ylim())
+                _bracket_step_pd = (_ylim_cur_pd[1] - _ylim_cur_pd[0]) * 0.14
+                _bracket_base_pd = _ylim_cur_pd[1]
+                for _pi, (_ia, _ib) in enumerate(_pairs_pd):
+                    _vals_a_pd = [e[1] for e in _pdiff_by_cond[_conds_pd[_ia]]]
+                    _vals_b_pd = [e[1] for e in _pdiff_by_cond[_conds_pd[_ib]]]
+                    if len(_vals_a_pd) < 2 or len(_vals_b_pd) < 2:
+                        continue
+                    _t_stat_pd, _p_val_pd = ttest_ind(_vals_a_pd, _vals_b_pd, equal_var=False)
+                    if _p_val_pd < 0.001:
+                        _sig_str_pd = f'p = {_p_val_pd:.2e}***'
+                    elif _p_val_pd < 0.01:
+                        _sig_str_pd = f'p = {_p_val_pd:.3f}**'
+                    elif _p_val_pd < 0.05:
+                        _sig_str_pd = f'p = {_p_val_pd:.3f}*'
+                    else:
+                        _sig_str_pd = f'p = {_p_val_pd:.3f} (ns)'
+                    _bh_pd = _bracket_base_pd + _bracket_step_pd * (_pi + 0.6)
+                    _ax_pd.plot([_ia, _ia, _ib, _ib],
+                                [_bh_pd - _bracket_step_pd * 0.15,
+                                 _bh_pd,
+                                 _bh_pd,
+                                 _bh_pd - _bracket_step_pd * 0.15],
+                                color='black', linewidth=1.0)
+                    _ax_pd.text((_ia + _ib) / 2, _bh_pd + _bracket_step_pd * 0.05,
+                                _sig_str_pd, ha='center', va='bottom', fontsize=8)
+                if _pairs_pd:
+                    _new_top_pd = _bracket_base_pd + _bracket_step_pd * (len(_pairs_pd) + 1.5)
+                    _ax_pd.set_ylim(_ylim_cur_pd[0], _new_top_pd)
+
+                epoch_punish_speed_diff_fig.suptitle(
+                    'Pre- vs Post-Cutoff Speed Difference by Condition (Punishment Zone)\n'
+                    '(mean \u00b1 SEM across mice; positive = faster before 0.65 s cutoff)',
+                    fontsize=11,
+                )
+                epoch_punish_speed_diff_fig.tight_layout()
+
+        # ── Punishment zone: 1 s pre- vs 1 s post-zone entry bar chart ────────
+        if 'epoch_punish_speed_pre_post_entry' in selected_plots and _any_punish_speed:
+            _pre_mask_pe  = (EPOCH_CANONICAL_TIME >= -1.0) & (EPOCH_CANONICAL_TIME <  0.0)
+            _post_mask_pe = (EPOCH_CANONICAL_TIME >= 0.0)  & (EPOCH_CANONICAL_TIME <= 1.0)
+            _ppe_by_cond: dict = {}
+            for _r in all_results:
+                _sess_mat = _r.get('punish_speed_epoch_session_means')
+                if _sess_mat is None or _sess_mat.shape[0] == 0:
+                    continue
+                _cond = _r['starting_condition']
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    _pre_per_sess  = np.nanmean(_sess_mat[:, _pre_mask_pe],  axis=1)
+                    _post_per_sess = np.nanmean(_sess_mat[:, _post_mask_pe], axis=1)
+                    _pre_mean  = float(np.nanmean(_pre_per_sess))
+                    _post_mean = float(np.nanmean(_post_per_sess))
+                _ppe_by_cond.setdefault(_cond, []).append((_r['mouse'], _pre_mean, _post_mean))
+
+            if _ppe_by_cond:
+                _conds_ppe   = sorted(_ppe_by_cond.keys())
+                _n_conds_ppe = len(_conds_ppe)
+                epoch_punish_speed_pre_post_entry_fig, _axs_ppe = plt.subplots(
+                    1, _n_conds_ppe,
+                    figsize=(4 * _n_conds_ppe + 1, 5),
+                    sharey=True, squeeze=False,
+                )
+                _all_ppe_yvals = []
+                for _ci, _cond in enumerate(_conds_ppe):
+                    _ax       = _axs_ppe[0, _ci]
+                    _color    = condition_color_map.get(_cond, 'steelblue')
+                    _entries  = _ppe_by_cond[_cond]
+                    _n_ppe    = len(_entries)
+                    _pre_vals = [e[1] for e in _entries]
+                    _post_vals= [e[2] for e in _entries]
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _mn_pre   = float(np.nanmean(_pre_vals))
+                        _mn_post  = float(np.nanmean(_post_vals))
+                        _sem_pre  = (float(np.nanstd(_pre_vals,  ddof=1) / np.sqrt(_n_ppe))
+                                     if _n_ppe > 1 else 0.0)
+                        _sem_post = (float(np.nanstd(_post_vals, ddof=1) / np.sqrt(_n_ppe))
+                                     if _n_ppe > 1 else 0.0)
+                    _all_ppe_yvals.extend([_mn_pre + _sem_pre, _mn_post + _sem_post,
+                                           _mn_pre - _sem_pre, _mn_post - _sem_post])
+                    _all_ppe_yvals.extend(_pre_vals + _post_vals)
+                    _ax.bar(0, _mn_pre,  width=0.5, color=_color, alpha=0.7,
+                            yerr=_sem_pre,  capsize=7,
+                            error_kw={'elinewidth': 1.5, 'capthick': 1.5})
+                    _ax.bar(1, _mn_post, width=0.5, color=_color, alpha=0.7,
+                            yerr=_sem_post, capsize=7,
+                            error_kw={'elinewidth': 1.5, 'capthick': 1.5})
+                    _rng_ppe = np.random.default_rng(seed=42)
+                    _jitter  = (_rng_ppe.random(_n_ppe) - 0.5) * 0.18
+                    for _j, (_mname, _pv, _qv) in enumerate(_entries):
+                        _xp = 0 + _jitter[_j]
+                        _xq = 1 + _jitter[_j]
+                        _ax.plot([_xp, _xq], [_pv, _qv], '-',
+                                 color=_color, linewidth=0.9, alpha=0.5, zorder=2)
+                        _ax.plot(_xp, _pv, 'o', color='white',
+                                 markeredgecolor=_color, markeredgewidth=1.5,
+                                 markersize=7, zorder=3)
+                        _ax.plot(_xq, _qv, 'o', color='white',
+                                 markeredgecolor=_color, markeredgewidth=1.5,
+                                 markersize=7, zorder=3)
+                    _ax.set_xticks([0, 1])
+                    _ax.set_xticklabels(['Pre-entry\n(−1–0 s)', 'Post-entry\n(0–1 s)'],
+                                        fontsize=9)
+                    _ax.set_title(f'{_cond}\n(n={_n_ppe} mice)', fontsize=10)
+                    _ax.set_ylabel('Treadmill Speed (cm/s)' if _ci == 0 else '', fontsize=9)
+                    _ax.set_xlim(-0.6, 1.6)
+                    _ax.tick_params(axis='both', direction='in')
+                    _ax.spines['top'].set_visible(False)
+                    _ax.spines['right'].set_visible(False)
+                if _all_ppe_yvals:
+                    _ymax_ppe = float(np.nanmax(_all_ppe_yvals))
+                    _ymin_ppe = float(np.nanmin(_all_ppe_yvals))
+                else:
+                    _ymax_ppe, _ymin_ppe = 1.0, 0.0
+                _bot_ppe = _ymin_ppe * 1.05 if _ymin_ppe < 0 else 0.0
+                _axs_ppe[0, 0].set_ylim(_bot_ppe, _ymax_ppe * 1.05)
+                epoch_punish_speed_pre_post_entry_fig.suptitle(
+                    'Average Speed: 1 s Pre- vs 1 s Post-Zone Entry (Punishment Zone)\n'
+                    '(session-averaged punishment zone entry epochs, by condition)',
+                    fontsize=12,
+                )
+                epoch_punish_speed_pre_post_entry_fig.tight_layout()
+
+        # ── Punishment zone: pre-minus-post zone entry difference bar chart ───
+        if 'epoch_punish_speed_diff_entry' in selected_plots and _any_punish_speed:
+            _pre_mask_de  = (EPOCH_CANONICAL_TIME >= -1.0) & (EPOCH_CANONICAL_TIME <  0.0)
+            _post_mask_de = (EPOCH_CANONICAL_TIME >= 0.0)  & (EPOCH_CANONICAL_TIME <= 1.0)
+            _pde_by_cond: dict = {}
+            for _r in all_results:
+                _sess_mat = _r.get('punish_speed_epoch_session_means')
+                if _sess_mat is None or _sess_mat.shape[0] == 0:
+                    continue
+                _cond = _r['starting_condition']
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    _pre_de  = float(np.nanmean(np.nanmean(_sess_mat[:, _pre_mask_de],  axis=1)))
+                    _post_de = float(np.nanmean(np.nanmean(_sess_mat[:, _post_mask_de], axis=1)))
+                _pde_by_cond.setdefault(_cond, []).append((_r['mouse'], _pre_de - _post_de))
+
+            if _pde_by_cond:
+                _conds_de   = sorted(_pde_by_cond.keys())
+                _n_conds_de = len(_conds_de)
+                epoch_punish_speed_diff_entry_fig, _ax_de = plt.subplots(
+                    1, 1, figsize=(max(4, _n_conds_de * 1.4 + 1.5), 5)
+                )
+                _all_pde_vals = []
+                _bar_x_de = np.arange(_n_conds_de)
+                _rng_de   = np.random.default_rng(seed=42)
+                for _ci, _cond in enumerate(_conds_de):
+                    _color    = condition_color_map.get(_cond, 'steelblue')
+                    _entries  = _pde_by_cond[_cond]
+                    _n_de     = len(_entries)
+                    _dvals_de = [e[1] for e in _entries]
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _mn_de  = float(np.nanmean(_dvals_de))
+                        _sem_de = (float(np.nanstd(_dvals_de, ddof=1) / np.sqrt(_n_de))
+                                   if _n_de > 1 else 0.0)
+                    _all_pde_vals.extend(_dvals_de + [_mn_de + _sem_de, _mn_de - _sem_de])
+                    _ax_de.bar(_ci, _mn_de, width=0.55, color=_color, alpha=0.7,
+                               yerr=_sem_de, capsize=7,
+                               error_kw={'elinewidth': 1.5, 'capthick': 1.5})
+                    _jitter_de = (_rng_de.random(_n_de) - 0.5) * 0.22
+                    for _j, (_mname, _dv) in enumerate(_entries):
+                        _ax_de.plot(_ci + _jitter_de[_j], _dv, 'o',
+                                    color='white', markeredgecolor=_color,
+                                    markeredgewidth=1.5, markersize=7, zorder=3)
+                _ax_de.axhline(0, color='black', linewidth=0.9, linestyle='--', zorder=1)
+                _ax_de.set_xticks(_bar_x_de)
+                _ax_de.set_xticklabels(_conds_de, fontsize=10)
+                _ax_de.set_ylabel('Speed difference (cm/s)\n[pre-entry − post-entry]', fontsize=9)
+                _ax_de.set_xlabel('Condition', fontsize=10)
+                if _all_pde_vals:
+                    _ymax_de = float(np.nanmax(_all_pde_vals))
+                    _ymin_de = float(np.nanmin(_all_pde_vals))
+                    _pad_de  = max(abs(_ymax_de), abs(_ymin_de)) * 0.12 or 0.5
+                    _ax_de.set_ylim(_ymin_de - _pad_de, _ymax_de + _pad_de)
+                _ax_de.tick_params(axis='both', direction='in')
+                _ax_de.spines['top'].set_visible(False)
+                _ax_de.spines['right'].set_visible(False)
+
+                # ── Welch's t-tests for all condition pairs ───────────────
+                import itertools as _itertools_de
+                _pairs_de = list(_itertools_de.combinations(range(_n_conds_de), 2))
+                _ylim_cur_de = list(_ax_de.get_ylim())
+                _bracket_step_de = (_ylim_cur_de[1] - _ylim_cur_de[0]) * 0.14
+                _bracket_base_de = _ylim_cur_de[1]
+                for _pi, (_ia, _ib) in enumerate(_pairs_de):
+                    _vals_a_de = [e[1] for e in _pde_by_cond[_conds_de[_ia]]]
+                    _vals_b_de = [e[1] for e in _pde_by_cond[_conds_de[_ib]]]
+                    if len(_vals_a_de) < 2 or len(_vals_b_de) < 2:
+                        continue
+                    _t_stat_de, _p_val_de = ttest_ind(_vals_a_de, _vals_b_de, equal_var=False)
+                    if _p_val_de < 0.001:
+                        _sig_str_de = f'p = {_p_val_de:.2e}***'
+                    elif _p_val_de < 0.01:
+                        _sig_str_de = f'p = {_p_val_de:.3f}**'
+                    elif _p_val_de < 0.05:
+                        _sig_str_de = f'p = {_p_val_de:.3f}*'
+                    else:
+                        _sig_str_de = f'p = {_p_val_de:.3f} (ns)'
+                    _bh_de = _bracket_base_de + _bracket_step_de * (_pi + 0.6)
+                    _ax_de.plot([_ia, _ia, _ib, _ib],
+                                [_bh_de - _bracket_step_de * 0.15,
+                                 _bh_de,
+                                 _bh_de,
+                                 _bh_de - _bracket_step_de * 0.15],
+                                color='black', linewidth=1.0)
+                    _ax_de.text((_ia + _ib) / 2, _bh_de + _bracket_step_de * 0.05,
+                                _sig_str_de, ha='center', va='bottom', fontsize=8)
+                if _pairs_de:
+                    _new_top_de = _bracket_base_de + _bracket_step_de * (len(_pairs_de) + 1.5)
+                    _ax_de.set_ylim(_ylim_cur_de[0], _new_top_de)
+
+                epoch_punish_speed_diff_entry_fig.suptitle(
+                    'Pre- vs Post-Zone Entry Speed Difference by Condition (Punishment Zone)\n'
+                    '(mean ± SEM across mice; positive = faster before zone entry)',
+                    fontsize=11,
+                )
+                epoch_punish_speed_diff_entry_fig.tight_layout()
+
+        # ── Pre/post-reward delivery speed bar chart ───────────────────────
+        if 'epoch_reward_speed_pre_post' in selected_plots and _any_speed:
+            _pre_mask  = (EPOCH_CANONICAL_TIME >= 0.0)  & (EPOCH_CANONICAL_TIME <= 0.65)
+            _post_mask = (EPOCH_CANONICAL_TIME >  0.65) & (EPOCH_CANONICAL_TIME <= 1.30)
+            # Collect per-mouse session-averaged bin means, grouped by condition
+            _pp_by_cond: dict = {}
+            for _r in all_results:
+                _sess_mat = _r.get('speed_epoch_session_means')
+                if _sess_mat is None or _sess_mat.shape[0] == 0:
+                    continue
+                _cond = _r['starting_condition']
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    _pre_per_sess  = np.nanmean(_sess_mat[:, _pre_mask],  axis=1)
+                    _post_per_sess = np.nanmean(_sess_mat[:, _post_mask], axis=1)
+                    _pre_mean  = float(np.nanmean(_pre_per_sess))
+                    _post_mean = float(np.nanmean(_post_per_sess))
+                _pp_by_cond.setdefault(_cond, []).append((_r['mouse'], _pre_mean, _post_mean))
+
+            if _pp_by_cond:
+                _conds_pp   = sorted(_pp_by_cond.keys())
+                _n_conds_pp = len(_conds_pp)
+                epoch_reward_speed_pre_post_fig, _axs_pp = plt.subplots(
+                    1, _n_conds_pp,
+                    figsize=(4 * _n_conds_pp + 1, 5),
+                    sharey=True, squeeze=False,
+                )
+                _all_pp_yvals = []
+                for _ci, _cond in enumerate(_conds_pp):
+                    _ax      = _axs_pp[0, _ci]
+                    _color   = condition_color_map.get(_cond, 'steelblue')
+                    _entries = _pp_by_cond[_cond]
+                    _n_pp    = len(_entries)
+                    _pre_vals  = [e[1] for e in _entries]
+                    _post_vals = [e[2] for e in _entries]
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _mn_pre   = float(np.nanmean(_pre_vals))
+                        _mn_post  = float(np.nanmean(_post_vals))
+                        _sem_pre  = (float(np.nanstd(_pre_vals,  ddof=1) / np.sqrt(_n_pp))
+                                     if _n_pp > 1 else 0.0)
+                        _sem_post = (float(np.nanstd(_post_vals, ddof=1) / np.sqrt(_n_pp))
+                                     if _n_pp > 1 else 0.0)
+                    _all_pp_yvals.extend([_mn_pre + _sem_pre, _mn_post + _sem_post,
+                                          _mn_pre - _sem_pre, _mn_post - _sem_post])
+                    _all_pp_yvals.extend(_pre_vals + _post_vals)
+                    _ax.bar(0, _mn_pre,  width=0.5, color=_color, alpha=0.7,
+                            yerr=_sem_pre,  capsize=7,
+                            error_kw={'elinewidth': 1.5, 'capthick': 1.5})
+                    _ax.bar(1, _mn_post, width=0.5, color=_color, alpha=0.7,
+                            yerr=_sem_post, capsize=7,
+                            error_kw={'elinewidth': 1.5, 'capthick': 1.5})
+                    _rng_pp = np.random.default_rng(seed=42)
+                    _jitter = (_rng_pp.random(_n_pp) - 0.5) * 0.18
+                    for _j, (_mname, _pv, _qv) in enumerate(_entries):
+                        _xp = 0 + _jitter[_j]
+                        _xq = 1 + _jitter[_j]
+                        _ax.plot([_xp, _xq], [_pv, _qv], '-',
+                                 color=_color, linewidth=0.9, alpha=0.5, zorder=2)
+                        _ax.plot(_xp, _pv, 'o', color='white',
+                                 markeredgecolor=_color, markeredgewidth=1.5,
+                                 markersize=7, zorder=3)
+                        _ax.plot(_xq, _qv, 'o', color='white',
+                                 markeredgecolor=_color, markeredgewidth=1.5,
+                                 markersize=7, zorder=3)
+                    _ax.set_xticks([0, 1])
+                    _ax.set_xticklabels(['Pre-reward\n(0\u20130.65 s)', 'Post-reward\n(0.65\u20131.3 s)'],
+                                        fontsize=9)
+                    _ax.set_title(f'{_cond}\n(n={_n_pp} mice)', fontsize=10)
+                    _ax.set_ylabel('Treadmill Speed (cm/s)' if _ci == 0 else '', fontsize=9)
+                    _ax.set_xlim(-0.6, 1.6)
+                    _ax.tick_params(axis='both', direction='in')
+                    _ax.spines['top'].set_visible(False)
+                    _ax.spines['right'].set_visible(False)
+                if _all_pp_yvals:
+                    _ymax_pp = float(np.nanmax(_all_pp_yvals))
+                    _ymin_pp = float(np.nanmin(_all_pp_yvals))
+                else:
+                    _ymax_pp, _ymin_pp = 1.0, 0.0
+                _bot_pp = _ymin_pp * 1.05 if _ymin_pp < 0 else 0.0
+                _axs_pp[0, 0].set_ylim(_bot_pp, _ymax_pp * 1.05)
+                epoch_reward_speed_pre_post_fig.suptitle(
+                    'Average Speed: Pre- vs Post-Reward Delivery\n'
+                    '(session-averaged reward zone entry epochs, by condition)',
+                    fontsize=12,
+                )
+                epoch_reward_speed_pre_post_fig.tight_layout()
+
+        # ── Pre-minus-post reward speed difference bar chart ──────────────────
+        if 'epoch_reward_speed_diff' in selected_plots and _any_speed:
+            _pre_mask_d  = (EPOCH_CANONICAL_TIME >= 0.0)  & (EPOCH_CANONICAL_TIME <= 0.65)
+            _post_mask_d = (EPOCH_CANONICAL_TIME >  0.65) & (EPOCH_CANONICAL_TIME <= 1.30)
+            # condition -> list of (mouse_name, diff_value)
+            _diff_by_cond: dict = {}
+            for _r in all_results:
+                _sess_mat = _r.get('speed_epoch_session_means')
+                if _sess_mat is None or _sess_mat.shape[0] == 0:
+                    continue
+                _cond = _r['starting_condition']
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    _pre_d  = float(np.nanmean(np.nanmean(_sess_mat[:, _pre_mask_d],  axis=1)))
+                    _post_d = float(np.nanmean(np.nanmean(_sess_mat[:, _post_mask_d], axis=1)))
+                _diff_by_cond.setdefault(_cond, []).append((_r['mouse'], _pre_d - _post_d))
+
+            if _diff_by_cond:
+                _conds_d   = sorted(_diff_by_cond.keys())
+                _n_conds_d = len(_conds_d)
+                epoch_reward_speed_diff_fig, _ax_d = plt.subplots(
+                    1, 1, figsize=(max(4, _n_conds_d * 1.4 + 1.5), 5)
+                )
+                _all_diff_vals = []
+                _bar_x = np.arange(_n_conds_d)
+                _rng_d = np.random.default_rng(seed=42)
+                for _ci, _cond in enumerate(_conds_d):
+                    _color   = condition_color_map.get(_cond, 'steelblue')
+                    _entries = _diff_by_cond[_cond]
+                    _n_d     = len(_entries)
+                    _dvals   = [e[1] for e in _entries]
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _mn_d  = float(np.nanmean(_dvals))
+                        _sem_d = (float(np.nanstd(_dvals, ddof=1) / np.sqrt(_n_d))
+                                  if _n_d > 1 else 0.0)
+                    _all_diff_vals.extend(_dvals + [_mn_d + _sem_d, _mn_d - _sem_d])
+                    _ax_d.bar(_ci, _mn_d, width=0.55, color=_color, alpha=0.7,
+                              yerr=_sem_d, capsize=7,
+                              error_kw={'elinewidth': 1.5, 'capthick': 1.5})
+                    _jitter_d = (_rng_d.random(_n_d) - 0.5) * 0.22
+                    for _j, (_mname, _dv) in enumerate(_entries):
+                        _ax_d.plot(_ci + _jitter_d[_j], _dv, 'o',
+                                   color='white', markeredgecolor=_color,
+                                   markeredgewidth=1.5, markersize=7, zorder=3)
+                _ax_d.axhline(0, color='black', linewidth=0.9, linestyle='--', zorder=1)
+                _ax_d.set_xticks(_bar_x)
+                _ax_d.set_xticklabels(_conds_d, fontsize=10)
+                _ax_d.set_ylabel('Speed difference (cm/s)\n[pre-reward − post-reward]', fontsize=9)
+                _ax_d.set_xlabel('Condition', fontsize=10)
+                if _all_diff_vals:
+                    _ymax_d = float(np.nanmax(_all_diff_vals))
+                    _ymin_d = float(np.nanmin(_all_diff_vals))
+                    _pad_d  = max(abs(_ymax_d), abs(_ymin_d)) * 0.12 or 0.5
+                    _ax_d.set_ylim(_ymin_d - _pad_d, _ymax_d + _pad_d)
+                _ax_d.tick_params(axis='both', direction='in')
+                _ax_d.spines['top'].set_visible(False)
+                _ax_d.spines['right'].set_visible(False)
+
+                # ── Welch's t-tests for all condition pairs ───────────────────
+                import itertools as _itertools_d
+                _pairs_d = list(_itertools_d.combinations(range(_n_conds_d), 2))
+                _ylim_cur = list(_ax_d.get_ylim())
+                _bracket_step = (_ylim_cur[1] - _ylim_cur[0]) * 0.14
+                _bracket_base = _ylim_cur[1]
+                for _pi, (_ia, _ib) in enumerate(_pairs_d):
+                    _vals_a = [e[1] for e in _diff_by_cond[_conds_d[_ia]]]
+                    _vals_b = [e[1] for e in _diff_by_cond[_conds_d[_ib]]]
+                    if len(_vals_a) < 2 or len(_vals_b) < 2:
+                        continue
+                    _t_stat_d, _p_val_d = ttest_ind(_vals_a, _vals_b, equal_var=False)
+                    if _p_val_d < 0.001:
+                        _sig_str = f'p = {_p_val_d:.2e}***'
+                    elif _p_val_d < 0.01:
+                        _sig_str = f'p = {_p_val_d:.3f}**'
+                    elif _p_val_d < 0.05:
+                        _sig_str = f'p = {_p_val_d:.3f}*'
+                    else:
+                        _sig_str = f'p = {_p_val_d:.3f} (ns)'
+                    _bh = _bracket_base + _bracket_step * (_pi + 0.6)
+                    _ax_d.plot([_ia, _ia, _ib, _ib],
+                               [_bh - _bracket_step * 0.15,
+                                _bh,
+                                _bh,
+                                _bh - _bracket_step * 0.15],
+                               color='black', linewidth=1.0)
+                    _ax_d.text((_ia + _ib) / 2, _bh + _bracket_step * 0.05,
+                               _sig_str, ha='center', va='bottom', fontsize=8)
+                if _pairs_d:
+                    _new_top = _bracket_base + _bracket_step * (len(_pairs_d) + 1.5)
+                    _ax_d.set_ylim(_ylim_cur[0], _new_top)
+
+                epoch_reward_speed_diff_fig.suptitle(
+                    'Pre- vs Post-Reward Speed Difference by Condition\n'
+                    '(mean \u00b1 SEM across mice; positive = faster before reward delivery)',
+                    fontsize=11,
+                )
+                epoch_reward_speed_diff_fig.tight_layout()
+
+        # ── Reward zone: 1 s pre- vs 1 s post-zone entry bar chart ──────────
+        if 'epoch_reward_speed_pre_post_entry' in selected_plots and _any_speed:
+            _pre_mask_re  = (EPOCH_CANONICAL_TIME >= -0.65) & (EPOCH_CANONICAL_TIME <  0.0)
+            _post_mask_re = (EPOCH_CANONICAL_TIME >= 0.0)   & (EPOCH_CANONICAL_TIME <= 0.65)
+            _rpe_by_cond: dict = {}
+            for _r in all_results:
+                _sess_mat = _r.get('speed_epoch_session_means')
+                if _sess_mat is None or _sess_mat.shape[0] == 0:
+                    continue
+                _cond = _r['starting_condition']
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    _pre_per_sess  = np.nanmean(_sess_mat[:, _pre_mask_re],  axis=1)
+                    _post_per_sess = np.nanmean(_sess_mat[:, _post_mask_re], axis=1)
+                    _pre_mean  = float(np.nanmean(_pre_per_sess))
+                    _post_mean = float(np.nanmean(_post_per_sess))
+                _rpe_by_cond.setdefault(_cond, []).append((_r['mouse'], _pre_mean, _post_mean))
+
+            if _rpe_by_cond:
+                _conds_rpe   = sorted(_rpe_by_cond.keys())
+                _n_conds_rpe = len(_conds_rpe)
+                epoch_reward_speed_pre_post_entry_fig, _axs_rpe = plt.subplots(
+                    1, _n_conds_rpe,
+                    figsize=(4 * _n_conds_rpe + 1, 5),
+                    sharey=True, squeeze=False,
+                )
+                _all_rpe_yvals = []
+                for _ci, _cond in enumerate(_conds_rpe):
+                    _ax       = _axs_rpe[0, _ci]
+                    _color    = condition_color_map.get(_cond, 'steelblue')
+                    _entries  = _rpe_by_cond[_cond]
+                    _n_rpe    = len(_entries)
+                    _pre_vals = [e[1] for e in _entries]
+                    _post_vals= [e[2] for e in _entries]
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _mn_pre   = float(np.nanmean(_pre_vals))
+                        _mn_post  = float(np.nanmean(_post_vals))
+                        _sem_pre  = (float(np.nanstd(_pre_vals,  ddof=1) / np.sqrt(_n_rpe))
+                                     if _n_rpe > 1 else 0.0)
+                        _sem_post = (float(np.nanstd(_post_vals, ddof=1) / np.sqrt(_n_rpe))
+                                     if _n_rpe > 1 else 0.0)
+                    _all_rpe_yvals.extend([_mn_pre + _sem_pre, _mn_post + _sem_post,
+                                           _mn_pre - _sem_pre, _mn_post - _sem_post])
+                    _all_rpe_yvals.extend(_pre_vals + _post_vals)
+                    _ax.bar(0, _mn_pre,  width=0.5, color=_color, alpha=0.7,
+                            yerr=_sem_pre,  capsize=7,
+                            error_kw={'elinewidth': 1.5, 'capthick': 1.5})
+                    _ax.bar(1, _mn_post, width=0.5, color=_color, alpha=0.7,
+                            yerr=_sem_post, capsize=7,
+                            error_kw={'elinewidth': 1.5, 'capthick': 1.5})
+                    _rng_rpe = np.random.default_rng(seed=42)
+                    _jitter  = (_rng_rpe.random(_n_rpe) - 0.5) * 0.18
+                    for _j, (_mname, _pv, _qv) in enumerate(_entries):
+                        _xp = 0 + _jitter[_j]
+                        _xq = 1 + _jitter[_j]
+                        _ax.plot([_xp, _xq], [_pv, _qv], '-',
+                                 color=_color, linewidth=0.9, alpha=0.5, zorder=2)
+                        _ax.plot(_xp, _pv, 'o', color='white',
+                                 markeredgecolor=_color, markeredgewidth=1.5,
+                                 markersize=7, zorder=3)
+                        _ax.plot(_xq, _qv, 'o', color='white',
+                                 markeredgecolor=_color, markeredgewidth=1.5,
+                                 markersize=7, zorder=3)
+                    _ax.set_xticks([0, 1])
+                    _ax.set_xticklabels(['Pre-entry\n(−1–0 s)', 'Post-entry\n(0–1 s)'],
+                                        fontsize=9)
+                    _ax.set_title(f'{_cond}\n(n={_n_rpe} mice)', fontsize=10)
+                    _ax.set_ylabel('Treadmill Speed (cm/s)' if _ci == 0 else '', fontsize=9)
+                    _ax.set_xlim(-0.6, 1.6)
+                    _ax.tick_params(axis='both', direction='in')
+                    _ax.spines['top'].set_visible(False)
+                    _ax.spines['right'].set_visible(False)
+                if _all_rpe_yvals:
+                    _ymax_rpe = float(np.nanmax(_all_rpe_yvals))
+                    _ymin_rpe = float(np.nanmin(_all_rpe_yvals))
+                else:
+                    _ymax_rpe, _ymin_rpe = 1.0, 0.0
+                _bot_rpe = _ymin_rpe * 1.05 if _ymin_rpe < 0 else 0.0
+                _axs_rpe[0, 0].set_ylim(_bot_rpe, _ymax_rpe * 1.05)
+                epoch_reward_speed_pre_post_entry_fig.suptitle(
+                    'Average Speed: 0.65 s Pre- vs 0.65 s Post-Zone Entry (Reward Zone)\n'
+                    '(session-averaged reward zone entry epochs, by condition)',
+                    fontsize=12,
+                )
+                epoch_reward_speed_pre_post_entry_fig.tight_layout()
+
+        # ── Reward zone: pre-minus-post zone entry difference bar chart ───────
+        if 'epoch_reward_speed_diff_entry' in selected_plots and _any_speed:
+            _pre_mask_rde  = (EPOCH_CANONICAL_TIME >= -0.65) & (EPOCH_CANONICAL_TIME <  0.0)
+            _post_mask_rde = (EPOCH_CANONICAL_TIME >= 0.0)   & (EPOCH_CANONICAL_TIME <= 0.65)
+            _rde_by_cond: dict = {}
+            for _r in all_results:
+                _sess_mat = _r.get('speed_epoch_session_means')
+                if _sess_mat is None or _sess_mat.shape[0] == 0:
+                    continue
+                _cond = _r['starting_condition']
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    _pre_rde  = float(np.nanmean(np.nanmean(_sess_mat[:, _pre_mask_rde],  axis=1)))
+                    _post_rde = float(np.nanmean(np.nanmean(_sess_mat[:, _post_mask_rde], axis=1)))
+                _rde_by_cond.setdefault(_cond, []).append((_r['mouse'], _pre_rde - _post_rde))
+
+            if _rde_by_cond:
+                _conds_rde   = sorted(_rde_by_cond.keys())
+                _n_conds_rde = len(_conds_rde)
+                epoch_reward_speed_diff_entry_fig, _ax_rde = plt.subplots(
+                    1, 1, figsize=(max(4, _n_conds_rde * 1.4 + 1.5), 5)
+                )
+                _all_rde_vals = []
+                _bar_x_rde = np.arange(_n_conds_rde)
+                _rng_rde   = np.random.default_rng(seed=42)
+                for _ci, _cond in enumerate(_conds_rde):
+                    _color    = condition_color_map.get(_cond, 'steelblue')
+                    _entries  = _rde_by_cond[_cond]
+                    _n_rde    = len(_entries)
+                    _dvals_rde = [e[1] for e in _entries]
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _mn_rde  = float(np.nanmean(_dvals_rde))
+                        _sem_rde = (float(np.nanstd(_dvals_rde, ddof=1) / np.sqrt(_n_rde))
+                                    if _n_rde > 1 else 0.0)
+                    _all_rde_vals.extend(_dvals_rde + [_mn_rde + _sem_rde, _mn_rde - _sem_rde])
+                    _ax_rde.bar(_ci, _mn_rde, width=0.55, color=_color, alpha=0.7,
+                                yerr=_sem_rde, capsize=7,
+                                error_kw={'elinewidth': 1.5, 'capthick': 1.5})
+                    _jitter_rde = (_rng_rde.random(_n_rde) - 0.5) * 0.22
+                    for _j, (_mname, _dv) in enumerate(_entries):
+                        _ax_rde.plot(_ci + _jitter_rde[_j], _dv, 'o',
+                                     color='white', markeredgecolor=_color,
+                                     markeredgewidth=1.5, markersize=7, zorder=3)
+                _ax_rde.axhline(0, color='black', linewidth=0.9, linestyle='--', zorder=1)
+                _ax_rde.set_xticks(_bar_x_rde)
+                _ax_rde.set_xticklabels(_conds_rde, fontsize=10)
+                _ax_rde.set_ylabel('Speed difference (cm/s)\n[pre-entry − post-entry]', fontsize=9)
+                _ax_rde.set_xlabel('Condition', fontsize=10)
+                if _all_rde_vals:
+                    _ymax_rde = float(np.nanmax(_all_rde_vals))
+                    _ymin_rde = float(np.nanmin(_all_rde_vals))
+                    _pad_rde  = max(abs(_ymax_rde), abs(_ymin_rde)) * 0.12 or 0.5
+                    _ax_rde.set_ylim(_ymin_rde - _pad_rde, _ymax_rde + _pad_rde)
+                _ax_rde.tick_params(axis='both', direction='in')
+                _ax_rde.spines['top'].set_visible(False)
+                _ax_rde.spines['right'].set_visible(False)
+
+                # ── Welch's t-tests for all condition pairs ───────────────
+                import itertools as _itertools_rde
+                _pairs_rde = list(_itertools_rde.combinations(range(_n_conds_rde), 2))
+                _ylim_cur_rde = list(_ax_rde.get_ylim())
+                _bracket_step_rde = (_ylim_cur_rde[1] - _ylim_cur_rde[0]) * 0.14
+                _bracket_base_rde = _ylim_cur_rde[1]
+                for _pi, (_ia, _ib) in enumerate(_pairs_rde):
+                    _vals_a_rde = [e[1] for e in _rde_by_cond[_conds_rde[_ia]]]
+                    _vals_b_rde = [e[1] for e in _rde_by_cond[_conds_rde[_ib]]]
+                    if len(_vals_a_rde) < 2 or len(_vals_b_rde) < 2:
+                        continue
+                    _t_stat_rde, _p_val_rde = ttest_ind(_vals_a_rde, _vals_b_rde, equal_var=False)
+                    if _p_val_rde < 0.001:
+                        _sig_str_rde = f'p = {_p_val_rde:.2e}***'
+                    elif _p_val_rde < 0.01:
+                        _sig_str_rde = f'p = {_p_val_rde:.3f}**'
+                    elif _p_val_rde < 0.05:
+                        _sig_str_rde = f'p = {_p_val_rde:.3f}*'
+                    else:
+                        _sig_str_rde = f'p = {_p_val_rde:.3f} (ns)'
+                    _bh_rde = _bracket_base_rde + _bracket_step_rde * (_pi + 0.6)
+                    _ax_rde.plot([_ia, _ia, _ib, _ib],
+                                 [_bh_rde - _bracket_step_rde * 0.15,
+                                  _bh_rde,
+                                  _bh_rde,
+                                  _bh_rde - _bracket_step_rde * 0.15],
+                                 color='black', linewidth=1.0)
+                    _ax_rde.text((_ia + _ib) / 2, _bh_rde + _bracket_step_rde * 0.05,
+                                 _sig_str_rde, ha='center', va='bottom', fontsize=8)
+                if _pairs_rde:
+                    _new_top_rde = _bracket_base_rde + _bracket_step_rde * (len(_pairs_rde) + 1.5)
+                    _ax_rde.set_ylim(_ylim_cur_rde[0], _new_top_rde)
+
+                epoch_reward_speed_diff_entry_fig.suptitle(
+                    'Pre- vs Post-Zone Entry Speed Difference by Condition (Reward Zone)\n'
+                    '(mean ± SEM across mice; positive = faster before zone entry)',
+                    fontsize=11,
+                )
+                epoch_reward_speed_diff_entry_fig.tight_layout()
+
     # Create the level-based analysis plots
     level_reward_fig = level_speed_collapsed_fig = level_speed_condition_fig = None
     level_lick_collapsed_fig = level_lick_condition_fig = None
@@ -4726,7 +5500,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         f.write(report_text + "\n")
     print(f"\nMissing data report saved to: {report_path}")
 
-    return speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, avg_sex_speed_fig, distance_fig, bout_count_fig, avg_bout_count_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_bar_fig, condition_speed_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, epoch_speed_per_mouse_fig, epoch_speed_cond_fig, epoch_cap_per_mouse_fig, epoch_cap_cond_fig, epoch_speed_sess_per_mouse_fig, epoch_speed_sess_cond_fig, epoch_cap_sess_per_mouse_fig, epoch_cap_sess_cond_fig, epoch_speed_early_per_mouse_fig, epoch_speed_late_per_mouse_fig, epoch_speed_early_cond_fig, epoch_speed_late_cond_fig, epoch_cap_early_per_mouse_fig, epoch_cap_late_per_mouse_fig, epoch_cap_early_cond_fig, epoch_cap_late_cond_fig, epoch_speed_early_ev_per_mouse_fig, epoch_speed_late_ev_per_mouse_fig, epoch_speed_early_ev_cond_fig, epoch_speed_late_ev_cond_fig, epoch_cap_early_ev_per_mouse_fig, epoch_cap_late_ev_per_mouse_fig, epoch_cap_early_ev_cond_fig, epoch_cap_late_ev_cond_fig, epoch_speed_sess_cond_clean_fig, epoch_cap_sess_cond_clean_fig, epoch_speed_early_cond_clean_fig, epoch_speed_late_cond_clean_fig, epoch_cap_early_cond_clean_fig, epoch_cap_late_cond_clean_fig, punish_speed_per_mouse_fig, punish_speed_cond_fig, punish_cap_per_mouse_fig, punish_cap_cond_fig, punish_speed_sess_per_mouse_fig, punish_speed_sess_cond_fig, punish_cap_sess_per_mouse_fig, punish_cap_sess_cond_fig, punish_speed_sess_cond_clean_fig, punish_cap_sess_cond_clean_fig, sex_speed_fig, sex_distance_indiv_fig, sex_reward_indiv_fig, epoch_speed_sess_sex_per_mouse_fig, epoch_speed_sess_sex_fig, epoch_cap_sess_sex_per_mouse_fig, epoch_cap_sess_sex_fig, epoch_punish_speed_sess_sex_per_mouse_fig, epoch_punish_speed_sess_sex_fig, epoch_punish_cap_sess_sex_per_mouse_fig, epoch_punish_cap_sess_sex_fig, all_results, _level_stats_data
+    return speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, avg_sex_speed_fig, distance_fig, bout_count_fig, avg_bout_count_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_bar_fig, condition_speed_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, epoch_speed_per_mouse_fig, epoch_speed_cond_fig, epoch_cap_per_mouse_fig, epoch_cap_cond_fig, epoch_speed_sess_per_mouse_fig, epoch_speed_sess_cond_fig, epoch_cap_sess_per_mouse_fig, epoch_cap_sess_cond_fig, epoch_speed_early_per_mouse_fig, epoch_speed_late_per_mouse_fig, epoch_speed_early_cond_fig, epoch_speed_late_cond_fig, epoch_cap_early_per_mouse_fig, epoch_cap_late_per_mouse_fig, epoch_cap_early_cond_fig, epoch_cap_late_cond_fig, epoch_speed_early_ev_per_mouse_fig, epoch_speed_late_ev_per_mouse_fig, epoch_speed_early_ev_cond_fig, epoch_speed_late_ev_cond_fig, epoch_cap_early_ev_per_mouse_fig, epoch_cap_late_ev_per_mouse_fig, epoch_cap_early_ev_cond_fig, epoch_cap_late_ev_cond_fig, epoch_speed_sess_cond_clean_fig, epoch_cap_sess_cond_clean_fig, epoch_speed_early_cond_clean_fig, epoch_speed_late_cond_clean_fig, epoch_cap_early_cond_clean_fig, epoch_cap_late_cond_clean_fig, punish_speed_per_mouse_fig, punish_speed_cond_fig, punish_cap_per_mouse_fig, punish_cap_cond_fig, punish_speed_sess_per_mouse_fig, punish_speed_sess_cond_fig, punish_cap_sess_per_mouse_fig, punish_cap_sess_cond_fig, punish_speed_sess_cond_clean_fig, punish_cap_sess_cond_clean_fig, sex_speed_fig, sex_distance_indiv_fig, sex_reward_indiv_fig, epoch_speed_sess_sex_per_mouse_fig, epoch_speed_sess_sex_fig, epoch_cap_sess_sex_per_mouse_fig, epoch_cap_sess_sex_fig, epoch_punish_speed_sess_sex_per_mouse_fig, epoch_punish_speed_sess_sex_fig, epoch_punish_cap_sess_sex_per_mouse_fig, epoch_punish_cap_sess_sex_fig, epoch_reward_speed_pre_post_fig, epoch_reward_speed_diff_fig, epoch_reward_speed_pre_post_entry_fig, epoch_reward_speed_diff_entry_fig, epoch_punish_speed_pre_post_fig, epoch_punish_speed_diff_fig, epoch_punish_speed_pre_post_entry_fig, epoch_punish_speed_diff_entry_fig, all_results, _level_stats_data
 
 def _ask_mode(root):
     """Ask whether to generate plots or run the descriptive stats report.
@@ -4882,7 +5656,7 @@ def main():
             print("No transitions CSV selected — level plot will be empty.")
 
     # Analyze data and plot results
-    speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, avg_sex_speed_fig, distance_fig, bout_count_fig, avg_bout_count_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_bar_fig, condition_speed_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, epoch_speed_per_mouse_fig, epoch_speed_cond_fig, epoch_cap_per_mouse_fig, epoch_cap_cond_fig, epoch_speed_sess_per_mouse_fig, epoch_speed_sess_cond_fig, epoch_cap_sess_per_mouse_fig, epoch_cap_sess_cond_fig, epoch_speed_early_per_mouse_fig, epoch_speed_late_per_mouse_fig, epoch_speed_early_cond_fig, epoch_speed_late_cond_fig, epoch_cap_early_per_mouse_fig, epoch_cap_late_per_mouse_fig, epoch_cap_early_cond_fig, epoch_cap_late_cond_fig, epoch_speed_early_ev_per_mouse_fig, epoch_speed_late_ev_per_mouse_fig, epoch_speed_early_ev_cond_fig, epoch_speed_late_ev_cond_fig, epoch_cap_early_ev_per_mouse_fig, epoch_cap_late_ev_per_mouse_fig, epoch_cap_early_ev_cond_fig, epoch_cap_late_ev_cond_fig, epoch_speed_sess_cond_clean_fig, epoch_cap_sess_cond_clean_fig, epoch_speed_early_cond_clean_fig, epoch_speed_late_cond_clean_fig, epoch_cap_early_cond_clean_fig, epoch_cap_late_cond_clean_fig, punish_speed_per_mouse_fig, punish_speed_cond_fig, punish_cap_per_mouse_fig, punish_cap_cond_fig, punish_speed_sess_per_mouse_fig, punish_speed_sess_cond_fig, punish_cap_sess_per_mouse_fig, punish_cap_sess_cond_fig, punish_speed_sess_cond_clean_fig, punish_cap_sess_cond_clean_fig, sex_speed_fig, sex_distance_indiv_fig, sex_reward_indiv_fig, epoch_speed_sess_sex_per_mouse_fig, epoch_speed_sess_sex_fig, epoch_cap_sess_sex_per_mouse_fig, epoch_cap_sess_sex_fig, epoch_punish_speed_sess_sex_per_mouse_fig, epoch_punish_speed_sess_sex_fig, epoch_punish_cap_sess_sex_per_mouse_fig, epoch_punish_cap_sess_sex_fig, all_results, _level_stats_data = analyze_mouse_data(
+    speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, avg_sex_speed_fig, distance_fig, bout_count_fig, avg_bout_count_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_bar_fig, condition_speed_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, epoch_speed_per_mouse_fig, epoch_speed_cond_fig, epoch_cap_per_mouse_fig, epoch_cap_cond_fig, epoch_speed_sess_per_mouse_fig, epoch_speed_sess_cond_fig, epoch_cap_sess_per_mouse_fig, epoch_cap_sess_cond_fig, epoch_speed_early_per_mouse_fig, epoch_speed_late_per_mouse_fig, epoch_speed_early_cond_fig, epoch_speed_late_cond_fig, epoch_cap_early_per_mouse_fig, epoch_cap_late_per_mouse_fig, epoch_cap_early_cond_fig, epoch_cap_late_cond_fig, epoch_speed_early_ev_per_mouse_fig, epoch_speed_late_ev_per_mouse_fig, epoch_speed_early_ev_cond_fig, epoch_speed_late_ev_cond_fig, epoch_cap_early_ev_per_mouse_fig, epoch_cap_late_ev_per_mouse_fig, epoch_cap_early_ev_cond_fig, epoch_cap_late_ev_cond_fig, epoch_speed_sess_cond_clean_fig, epoch_cap_sess_cond_clean_fig, epoch_speed_early_cond_clean_fig, epoch_speed_late_cond_clean_fig, epoch_cap_early_cond_clean_fig, epoch_cap_late_cond_clean_fig, punish_speed_per_mouse_fig, punish_speed_cond_fig, punish_cap_per_mouse_fig, punish_cap_cond_fig, punish_speed_sess_per_mouse_fig, punish_speed_sess_cond_fig, punish_cap_sess_per_mouse_fig, punish_cap_sess_cond_fig, punish_speed_sess_cond_clean_fig, punish_cap_sess_cond_clean_fig, sex_speed_fig, sex_distance_indiv_fig, sex_reward_indiv_fig, epoch_speed_sess_sex_per_mouse_fig, epoch_speed_sess_sex_fig, epoch_cap_sess_sex_per_mouse_fig, epoch_cap_sess_sex_fig, epoch_punish_speed_sess_sex_per_mouse_fig, epoch_punish_speed_sess_sex_fig, epoch_punish_cap_sess_sex_per_mouse_fig, epoch_punish_cap_sess_sex_fig, epoch_reward_speed_pre_post_fig, epoch_reward_speed_diff_fig, epoch_reward_speed_pre_post_entry_fig, epoch_reward_speed_diff_entry_fig, epoch_punish_speed_pre_post_fig, epoch_punish_speed_diff_fig, epoch_punish_speed_pre_post_entry_fig, epoch_punish_speed_diff_entry_fig, all_results, _level_stats_data = analyze_mouse_data(
         file_paths, markers, starting_conditions,
         transitions_csv_path=transitions_csv_path,
         selected_plots=selected_plots,
@@ -4930,6 +5704,14 @@ def main():
         epoch_cap_sess_sex_per_mouse_fig, epoch_cap_sess_sex_fig,
         epoch_punish_speed_sess_sex_per_mouse_fig, epoch_punish_speed_sess_sex_fig,
         epoch_punish_cap_sess_sex_per_mouse_fig, epoch_punish_cap_sess_sex_fig,
+        epoch_reward_speed_pre_post_fig,
+        epoch_reward_speed_diff_fig,
+        epoch_reward_speed_pre_post_entry_fig,
+        epoch_reward_speed_diff_entry_fig,
+        epoch_punish_speed_pre_post_fig,
+        epoch_punish_speed_diff_fig,
+        epoch_punish_speed_pre_post_entry_fig,
+        epoch_punish_speed_diff_entry_fig,
     ] if f is not None]
 
     # Configure all figures (add legend only when labeled artists exist, then tight layout)
@@ -5056,6 +5838,14 @@ def main():
         (epoch_punish_speed_sess_sex_fig,           'epoch_punish_speed_sess_sex',           'Speed epoch (session, punish zone) — by sex'),
         (epoch_punish_cap_sess_sex_per_mouse_fig,   'epoch_punish_cap_sess_sex_per_mouse',   'Capacitive epoch (session, punish zone) — per mouse (sex coloring)'),
         (epoch_punish_cap_sess_sex_fig,             'epoch_punish_cap_sess_sex',             'Capacitive epoch (session, punish zone) — by sex'),
+        (epoch_reward_speed_pre_post_fig,            'epoch_reward_speed_pre_post',            'Pre/post-reward speed bar chart by condition'),
+        (epoch_reward_speed_diff_fig,                'epoch_reward_speed_diff',                'Pre-minus-post-reward speed difference by condition'),
+        (epoch_reward_speed_pre_post_entry_fig,      'epoch_reward_speed_pre_post_entry',      'Pre/post-entry reward zone speed bar chart by condition (1 s windows)'),
+        (epoch_reward_speed_diff_entry_fig,          'epoch_reward_speed_diff_entry',          'Pre-minus-post-entry reward zone speed difference by condition (1 s windows)'),
+        (epoch_punish_speed_pre_post_fig,            'epoch_punish_speed_pre_post',            'Pre/post-cutoff punishment zone speed bar chart by condition'),
+        (epoch_punish_speed_diff_fig,                'epoch_punish_speed_diff',                'Pre-minus-post-cutoff punishment zone speed difference by condition'),
+        (epoch_punish_speed_pre_post_entry_fig,      'epoch_punish_speed_pre_post_entry',      'Pre/post-entry punishment zone speed bar chart by condition (1 s windows)'),
+        (epoch_punish_speed_diff_entry_fig,          'epoch_punish_speed_diff_entry',          'Pre-minus-post-entry punishment zone speed difference by condition (1 s windows)'),
     ]
 
     for fig, name, title in plot_configs:
