@@ -566,6 +566,8 @@ _ALL_PLOT_KEYS = {
     'epoch_punish_speed_sess_sex', 'epoch_punish_cap_sess_sex',
     'epoch_reward_speed_pre_post',
     'epoch_reward_speed_diff',
+    'epoch_reward_cap_pre_post',
+    'epoch_reward_cap_diff',
     'epoch_reward_speed_pre_post_entry',
     'epoch_reward_speed_diff_entry',
     'epoch_reward_speed_pre_post_entry_1s',
@@ -576,9 +578,20 @@ _ALL_PLOT_KEYS = {
     'epoch_punish_speed_diff',
     'epoch_punish_speed_pre_post_entry',
     'epoch_punish_speed_diff_entry',
+    'epoch_punish_cap_pre_post',
+    'epoch_punish_cap_diff',
+    'epoch_punish_cap_pre_post_entry',
+    'epoch_punish_cap_diff_entry',
     'expl_speed_histogram',
     'expl_speed_boxplot',
     'expl_speed_rm_anova_resid',
+    'expl_cap_histogram',
+    'expl_cap_boxplot',
+    'expl_cap_rm_anova_resid',
+    'expl_cap_distfit',
+    'expl_lick_distfit',
+    'expl_lick_boxplot',
+    'expl_lick_rm_anova_resid',
 }
 
 _PLOT_LABELS = [
@@ -658,6 +671,8 @@ _PLOT_LABELS = [
     ('epoch_punish_cap_sess_sex',   'Epoch: Capacitive value — punishment zone, session-averaged, by sex'),
     ('epoch_reward_speed_pre_post',  'Epoch: Speed — pre- vs post-reward delivery bar chart, by condition (0–0.65 s vs 0.65–1.3 s)'),
     ('epoch_reward_speed_diff',      'Epoch: Speed — pre-minus-post-reward difference bar chart, by condition (positive = faster before reward)'),
+    ('epoch_reward_cap_pre_post',    'Epoch: Capacitive (z-scored) — pre- vs post-reward delivery bar chart, by condition (0–0.65 s vs 0.65–1.3 s)'),
+    ('epoch_reward_cap_diff',        'Epoch: Capacitive (z-scored) — pre-minus-post-reward difference bar chart, by condition (Mann-Whitney U)'),
     ('epoch_reward_speed_pre_post_entry', 'Epoch: Reward zone speed — 0.65 s pre- vs 0.65 s post-zone entry bar chart, by condition'),
     ('epoch_reward_speed_diff_entry',     'Epoch: Reward zone speed — pre-minus-post zone entry difference bar chart (0.65 s windows), by condition'),
     ('epoch_reward_speed_pre_post_entry_1s', 'Epoch: Reward zone speed — 1 s pre- vs 1 s post-zone entry bar chart, by condition'),
@@ -668,9 +683,21 @@ _PLOT_LABELS = [
     ('epoch_punish_speed_diff',      'Epoch: Punishment zone speed — pre-minus-post 0.65 s cutoff difference bar chart, by condition'),
     ('epoch_punish_speed_pre_post_entry', 'Epoch: Punishment zone speed — 1 s pre- vs 1 s post-zone entry bar chart, by condition'),
     ('epoch_punish_speed_diff_entry',     'Epoch: Punishment zone speed — pre-minus-post zone entry difference bar chart (1 s windows), by condition'),
+    ('epoch_punish_cap_pre_post',    'Epoch: Punishment zone capacitive (z-scored) — pre vs post 0.65 s cutoff bar chart, by condition (0–0.65 s vs 0.65–1.3 s)'),
+    ('epoch_punish_cap_diff',        'Epoch: Punishment zone capacitive (z-scored) — pre-minus-post 0.65 s cutoff difference bar chart, by condition (Mann-Whitney U)'),
+    ('epoch_punish_cap_pre_post_entry', 'Epoch: Punishment zone capacitive (z-scored) — 1 s pre- vs 1 s post-zone entry bar chart, by condition'),
+    ('epoch_punish_cap_diff_entry',     'Epoch: Punishment zone capacitive (z-scored) — pre-minus-post zone entry difference bar chart (1 s windows), by condition (Mann-Whitney U)'),
     ('expl_speed_histogram',       'Exploratory: Speed distribution — histogram (all session speeds + per-mouse means, Shapiro-Wilk)'),
     ('expl_speed_boxplot',         'Exploratory: Speed distribution — box and whisker (per-mouse + overall)'),
     ('expl_speed_rm_anova_resid',  'Exploratory: Repeated-measures ANOVA residuals — Q-Q plot, histogram, residuals vs fitted (condition × session)'),
+    ('expl_cap_histogram',         'Exploratory: Z-scored mean capacitive sensor value distribution — histogram (all session values + per-mouse means, Shapiro-Wilk)'),
+    ('expl_cap_boxplot',           'Exploratory: Z-scored mean capacitive sensor value distribution — box and whisker (per-mouse + overall)'),
+
+    ('expl_cap_rm_anova_resid',    'Exploratory: Capacitive RM ANOVA residuals — Q-Q plot, histogram, residuals vs fitted (condition × session)'),
+    ('expl_cap_distfit',           'Exploratory: Capacitive sensor value distribution fit — Normal, Log-normal, Gamma (histogram + Q-Q + AIC comparison)'),
+    ('expl_lick_distfit',          'Exploratory: Lick count Poisson vs Negative Binomial distribution fit — rootogram, Q-Q, mean–variance, AIC/χ² comparison'),
+    ('expl_lick_boxplot',          'Exploratory: Raw lick count distribution — box and whisker (per-mouse + overall)'),
+    ('expl_lick_rm_anova_resid',   'Exploratory: Raw lick count RM ANOVA residuals — Q-Q plot, histogram, residuals vs fitted (DV = log(1+count), condition × session)'),
 ]
 
 
@@ -2400,6 +2427,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         sensitivities = []  # List for sensitivity values
         lick_counts = []  # List for daily lick counts
         session_lengths = []  # List for session lengths in minutes
+        avg_cap_values = []  # List for per-session mean raw capacitive sensor value
         false_alarms_list = []  # List for false alarm counts
         correct_rejections_list = []  # List for correct rejection counts
         specificities_list = []  # List for specificity values
@@ -2538,9 +2566,14 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                         )
                         fig.savefig(plot_path, dpi=150, bbox_inches='tight')
                         plt.close(fig)
+                    # Per-session mean of the raw capacitive sensor signal
+                    _cap_raw = pd.to_numeric(
+                        capacitive_data['capacitive_value'], errors='coerce').dropna()
+                    avg_cap_session = float(np.nanmean(_cap_raw)) if len(_cap_raw) > 0 else float('nan')
                 else:
                     session_length_minutes = float('nan')
                     lick_count = float('nan')
+                    avg_cap_session = float('nan')
 
                 # ── Trial-log-derived metrics ─────────────────────────────
                 if trial_log is not None:
@@ -2683,6 +2716,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                 sensitivities.append(sensitivity)
                 lick_counts.append(lick_count)
                 session_lengths.append(session_length_minutes)
+                avg_cap_values.append(avg_cap_session)
                 false_alarms_list.append(false_alarm_count)
                 correct_rejections_list.append(correct_rejection_count)
                 specificities_list.append(specificity)
@@ -2801,6 +2835,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             'sensitivity': sensitivities,
             'lick_count': lick_counts,
             'session_length': session_lengths,
+            'avg_cap': avg_cap_values,
             'false_alarms': false_alarms_list,
             'correct_rejections': correct_rejections_list,
             'specificity': specificities_list,
@@ -4670,6 +4705,1574 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         except Exception as _e:
             print(f'[expl_speed_rm_anova_resid] Error: {_e}')
 
+    # ── Exploratory: z-scored mean capacitive sensor value histogram ──────────
+    # DV = z-scored mean raw capacitive sensor value (avg_cap), globally
+    # z-scored across all sessions. Parallels the log(speed) exploratory histogram.
+    expl_cap_histogram_fig = None
+    if 'expl_cap_histogram' in selected_plots:
+        from scipy.stats import shapiro as _shapiro_cap
+        from scipy.stats import gaussian_kde as _gkde_cap
+
+        # Collect per-session mean raw capacitive sensor values (avg_cap column)
+        _cap_all_raw = []
+        _cap_per_mouse_raw = []
+        for _r in all_results:
+            _df_r = _r['df']
+            _cv = pd.to_numeric(_df_r.get('avg_cap', pd.Series(dtype=float)), errors='coerce')
+            _cv_valid = _cv.dropna().values
+            _cap_all_raw.extend(_cv_valid.tolist())
+            if len(_cv_valid) > 0:
+                _cap_per_mouse_raw.append(float(np.mean(_cv_valid)))
+
+        # Global z-score
+        _cap_all_raw = np.array(_cap_all_raw, dtype=float)
+        _cap_per_m   = np.array(_cap_per_mouse_raw, dtype=float)
+        _glb_mu, _glb_sd = float(np.mean(_cap_all_raw)), float(np.std(_cap_all_raw, ddof=1))
+        if _glb_sd > 0:
+            _cap_all_z = (_cap_all_raw - _glb_mu) / _glb_sd
+            _cap_per_z = (_cap_per_m   - _glb_mu) / _glb_sd
+        else:
+            _cap_all_z = _cap_all_raw - _glb_mu
+            _cap_per_z = _cap_per_m  - _glb_mu
+
+        expl_cap_histogram_fig, (ax_ch1, ax_ch2) = plt.subplots(1, 2, figsize=(14, 5))
+        for ax_ch, data_z, panel_title in [
+            (ax_ch1, _cap_all_z,
+             f'All session values (n={len(_cap_all_z)} sessions)'),
+            (ax_ch2, _cap_per_z,
+             f'Per-mouse mean (n={len(_cap_per_z)} mice)'),
+        ]:
+            ax_ch.hist(data_z, bins='auto', color='teal', alpha=0.65,
+                       edgecolor='white', linewidth=0.5, density=True)
+            if len(data_z) >= 3:
+                _kde_xc = np.linspace(data_z.min(), data_z.max(), 300)
+                try:
+                    _kdec = _gkde_cap(data_z)
+                    ax_ch.plot(_kde_xc, _kdec(_kde_xc), color='darkslategray',
+                               linewidth=2, label='KDE')
+                except Exception:
+                    pass
+            if len(data_z) >= 3:
+                _swc_stat, _swc_p = _shapiro_cap(data_z)
+                _swc_text = (f'Shapiro-Wilk: W={_swc_stat:.3f}, p={_swc_p:.4f}\n'
+                             f'{"Normal (p>0.05)" if _swc_p > 0.05 else "Non-normal (p\u22640.05)"}')
+                ax_ch.text(0.97, 0.97, _swc_text, transform=ax_ch.transAxes,
+                           fontsize=8, va='top', ha='right',
+                           bbox=dict(boxstyle='round,pad=0.3', facecolor='lightyellow',
+                                     edgecolor='gray', alpha=0.8))
+            ax_ch.set_title(panel_title)
+            ax_ch.set_xlabel('Z-scored mean capacitive value  [z(raw cap units)]')
+            ax_ch.set_ylabel('Density')
+            ax_ch.tick_params(axis='both', direction='in')
+            ax_ch.spines['top'].set_visible(False)
+            ax_ch.spines['right'].set_visible(False)
+
+        expl_cap_histogram_fig.suptitle(
+            'Z-Scored Mean Capacitive Sensor Value Distribution — Exploratory\n'
+            'Left: one value per session per mouse (raw repeated-measures data)  |  '
+            'Right: one mean per mouse\n'
+            f'Global z-score: \u03bc={_glb_mu:.4f} (raw cap units), \u03c3={_glb_sd:.4f}',
+            fontsize=10,
+        )
+        expl_cap_histogram_fig.tight_layout()
+
+    # ── Exploratory: z-scored mean capacitive value box-and-whisker ──────────
+    expl_cap_boxplot_fig = None
+    if 'expl_cap_boxplot' in selected_plots:
+        _cap_bx_names = []
+        _cap_bx_vals  = []
+        _cap_bx_all   = []
+        # Recompute global z-score parameters if histogram block was skipped
+        _all_cv_tmp = []
+        for _r in all_results:
+            _df_r = _r['df']
+            _cv = pd.to_numeric(_df_r.get('avg_cap', pd.Series(dtype=float)), errors='coerce')
+            _all_cv_tmp.extend(_cv.dropna().values.tolist())
+        _all_cv_tmp = np.array(_all_cv_tmp, dtype=float)
+        _bx_mu  = float(np.mean(_all_cv_tmp)) if len(_all_cv_tmp) else 0.0
+        _bx_sd  = float(np.std(_all_cv_tmp, ddof=1)) if len(_all_cv_tmp) > 1 else 1.0
+        if _bx_sd == 0:
+            _bx_sd = 1.0
+
+        for _r in all_results:
+            _df_r = _r['df']
+            _cv = pd.to_numeric(_df_r.get('avg_cap', pd.Series(dtype=float)), errors='coerce')
+            _cv_valid = _cv.dropna().values
+            if len(_cv_valid) > 0:
+                _z = (_cv_valid - _bx_mu) / _bx_sd
+                _cap_bx_names.append(_r['mouse'])
+                _cap_bx_vals.append(_z.tolist())
+                _cap_bx_all.extend(_z.tolist())
+
+        n_mice_cbx = len(_cap_bx_names)
+        expl_cap_boxplot_fig, (ax_cbx1, ax_cbx2) = plt.subplots(
+            1, 2, figsize=(max(10, n_mice_cbx * 0.8 + 3), 6),
+            gridspec_kw={'width_ratios': [max(3, n_mice_cbx), 1]},
+        )
+        ax_cbx1.boxplot(_cap_bx_vals, labels=_cap_bx_names,
+                        patch_artist=True,
+                        boxprops=dict(facecolor='teal', alpha=0.6),
+                        medianprops=dict(color='darkslategray', linewidth=2),
+                        whiskerprops=dict(color='teal'),
+                        capprops=dict(color='teal'),
+                        flierprops=dict(marker='o', markerfacecolor='teal',
+                                        markersize=4, alpha=0.5, linestyle='none'))
+        ax_cbx1.set_title('Z-scored mean capacitive value per mouse\n(each session = one data point)')
+        ax_cbx1.set_xlabel('Mouse')
+        ax_cbx1.set_ylabel('Z-scored mean capacitive value  [z(raw cap)]')
+        ax_cbx1.tick_params(axis='x', rotation=45)
+        ax_cbx1.tick_params(axis='both', direction='in')
+        ax_cbx1.spines['top'].set_visible(False)
+        ax_cbx1.spines['right'].set_visible(False)
+
+        ax_cbx2.boxplot([_cap_bx_all], labels=['All mice'],
+                        patch_artist=True,
+                        boxprops=dict(facecolor='mediumaquamarine', alpha=0.6),
+                        medianprops=dict(color='darkgreen', linewidth=2),
+                        whiskerprops=dict(color='mediumaquamarine'),
+                        capprops=dict(color='mediumaquamarine'),
+                        flierprops=dict(marker='o', markerfacecolor='mediumaquamarine',
+                                        markersize=4, alpha=0.5, linestyle='none'))
+        ax_cbx2.set_title(f'Overall\n(n={len(_cap_bx_all)} sessions)')
+        ax_cbx2.set_ylabel('Z-scored mean capacitive value  [z(raw cap)]')
+        ax_cbx2.tick_params(axis='both', direction='in')
+        ax_cbx2.spines['top'].set_visible(False)
+        ax_cbx2.spines['right'].set_visible(False)
+
+        expl_cap_boxplot_fig.suptitle('Z-Scored Mean Capacitive Sensor Value Box-and-Whisker — Exploratory', fontsize=11)
+        expl_cap_boxplot_fig.tight_layout()
+
+    # ── Exploratory: capacitive RM ANOVA residual diagnostics ─────────────────
+    expl_cap_rm_anova_resid_fig = None
+    if 'expl_cap_rm_anova_resid' in selected_plots:
+        import warnings as _warnings_cap
+        try:
+            import statsmodels.formula.api as _smf_cap
+            from scipy.stats import shapiro as _shapiro_c, levene as _levene_c
+            from scipy.stats import probplot as _probplot_c
+
+            # ── Build long-format DataFrame (z-scored log-transformed mean cap value) ──
+            # Log transform first (lognormal fit), then z-score.
+            # First pass: collect log(avg_cap) values to compute global z-score params
+            _c_all_cv = []
+            for _r in all_results:
+                _df_r = _r['df']
+                _cv = pd.to_numeric(_df_r.get('avg_cap', pd.Series(dtype=float)), errors='coerce')
+                _cv_pos = _cv.dropna()
+                _cv_pos = _cv_pos[_cv_pos > 0]
+                _c_all_cv.extend(np.log(_cv_pos.values).tolist())
+            _c_all_cv = np.array(_c_all_cv, dtype=float)
+            _c_mu = float(np.mean(_c_all_cv)) if len(_c_all_cv) else 0.0
+            _c_sd = float(np.std(_c_all_cv, ddof=1)) if len(_c_all_cv) > 1 else 1.0
+            if _c_sd == 0:
+                _c_sd = 1.0
+
+            # Second pass: build long-format df with z-scored log(avg_cap)
+            _c_rows = []
+            for _r in all_results:
+                _df_r = _r['df'].copy()
+                _df_r = _df_r.reset_index(drop=True)
+                _df_r['session_num'] = np.arange(1, len(_df_r) + 1, dtype=float)
+                _df_r['mouse']       = _r['mouse']
+                _df_r['condition']   = _r['starting_condition']
+                _cv = pd.to_numeric(_df_r.get('avg_cap', pd.Series(dtype=float)), errors='coerce')
+                _df_r['z_avg_cap'] = np.where(
+                    _cv.notna() & (_cv > 0),
+                    (np.log(_cv.clip(lower=1e-9)) - _c_mu) / _c_sd,
+                    np.nan,
+                )
+                _c_rows.append(_df_r[['mouse', 'condition', 'session_num', 'z_avg_cap']])
+            _df_c_long = pd.concat(_c_rows, ignore_index=True).dropna(subset=['z_avg_cap'])
+
+            # ── Fit OLS with mouse as fixed-effect blocking factor ────────────
+            _c_formula = 'z_avg_cap ~ C(condition) + session_num + C(condition):session_num + C(mouse)'
+            with _warnings_cap.catch_warnings():
+                _warnings_cap.simplefilter('ignore')
+                _c_ols = _smf_cap.ols(_c_formula, data=_df_c_long).fit()
+
+            _c_resid  = _c_ols.resid.values
+            _c_fitted = _c_ols.fittedvalues.values
+            _c_conds  = _df_c_long['condition'].values
+            _c_resid_mean = float(np.mean(_c_resid))
+            _c_resid_var  = float(_c_ols.mse_resid)
+            _c_resid_sd   = float(np.sqrt(_c_resid_var))
+            _c_r2         = float(_c_ols.rsquared)
+            _c_r2_adj     = float(_c_ols.rsquared_adj)
+            _c_y_var      = float(_df_c_long['z_avg_cap'].var(ddof=1))
+            _c_y_mean     = float(_df_c_long['z_avg_cap'].mean())
+            _c_unexplained = 1.0 - _c_r2
+            _c_snr         = float(np.mean(_c_fitted)) / _c_resid_sd if _c_resid_sd > 0 else np.nan
+
+            # PRESS / predicted R²
+            try:
+                _c_influence = _c_ols.get_influence()
+                _c_hat       = _c_influence.hat_matrix_diag
+                _c_press_r   = _c_resid / (1.0 - np.clip(_c_hat, None, 0.9999))
+                _c_press     = float(np.sum(_c_press_r ** 2))
+                _c_ss_total  = float(np.sum((_df_c_long['z_avg_cap'].values - _c_y_mean) ** 2))
+                _c_r2_pred   = float(1.0 - _c_press / _c_ss_total) if _c_ss_total > 0 else np.nan
+            except Exception:
+                _c_press, _c_r2_pred, _c_hat = np.nan, np.nan, None
+                _c_influence = None
+
+            # ── Shapiro-Wilk on residuals ─────────────────────────────────────
+            _c_sw_stat, _c_sw_p = _shapiro_c(_c_resid) if len(_c_resid) >= 3 else (np.nan, np.nan)
+
+            # ── Levene's test across condition groups ─────────────────────────
+            _c_cond_groups = [_c_resid[_c_conds == c] for c in np.unique(_c_conds)
+                              if np.sum(_c_conds == c) >= 2]
+            if len(_c_cond_groups) >= 2:
+                _c_lev_stat, _c_lev_p = _levene_c(*_c_cond_groups)
+            else:
+                _c_lev_stat, _c_lev_p = np.nan, np.nan
+
+            # ── pingouin mixed ANOVA table (optional) ─────────────────────────
+            _c_pg_text = ''
+            try:
+                import pingouin as _pg_c
+                _c_pg_result = _pg_c.mixed_anova(
+                    data=_df_c_long, dv='z_avg_cap', within='session_num',
+                    between='condition', subject='mouse',
+                )
+                _c_pg_lines = ['Mixed ANOVA (pingouin):']
+                for _, _row in _c_pg_result.iterrows():
+                    _src  = _row.get('Source', '')
+                    _f    = _row.get('F', np.nan)
+                    _pval = _row.get('p-unc', np.nan)
+                    _eta  = _row.get('np2', np.nan)
+                    _c_pg_lines.append(
+                        f"  {_src:<28} F={_f:.3f}  p={_pval:.4f}  \u03b7\u00b2={_eta:.3f}"
+                    )
+                _c_pg_text = '\n'.join(_c_pg_lines)
+            except Exception:
+                _c_pg_text = 'pingouin not available \u2014 ANOVA table omitted'
+
+            # ── Cook's D and leverage ─────────────────────────────────────────
+            _c_mice_labels   = _df_c_long['mouse'].values
+            _c_sess_nums_lbl = _df_c_long['session_num'].values.astype(int)
+            _c_obs_labels    = np.array([f'{m}\nS{s}' for m, s in
+                                         zip(_c_mice_labels, _c_sess_nums_lbl)])
+            _c_obs_index     = np.arange(len(_c_resid))
+            try:
+                _c_cooks_d  = _c_influence.cooks_distance[0]
+                _c_lev_diag = _c_hat.copy()
+                _c_n_params = len(_c_ols.params)
+                _c_cooks_thresh = 4.0 / max(len(_c_resid) - _c_n_params, 1)
+                _c_lev_thresh   = 2.0 * _c_n_params / max(len(_c_resid), 1)
+                _c_high_cooks   = np.where(_c_cooks_d > _c_cooks_thresh)[0]
+                _c_high_lev     = np.where(_c_lev_diag > _c_lev_thresh)[0]
+            except Exception:
+                _c_cooks_d = _c_lev_diag = None
+                _c_cooks_thresh = _c_lev_thresh = np.nan
+                _c_high_cooks = _c_high_lev = np.array([], dtype=int)
+
+            # ── Build figure: 3 rows × 2 cols ────────────────────────────────
+            expl_cap_rm_anova_resid_fig, _c_axes = plt.subplots(3, 2, figsize=(13, 15))
+            (ax_cqq, ax_crh), (ax_crf, ax_crs), (ax_ccd, ax_clv) = _c_axes
+
+            # ── Q-Q plot ──────────────────────────────────────────────────────
+            (_c_qq_osm, _c_qq_osr), (_c_qq_slope, _c_qq_int, _) = _probplot_c(_c_resid, dist='norm')
+            ax_cqq.plot(_c_qq_osm, _c_qq_osr, 'o', color='teal',
+                        markersize=4, alpha=0.7, label='Residuals')
+            ax_cqq.plot(
+                [_c_qq_osm[0], _c_qq_osm[-1]],
+                [_c_qq_slope * _c_qq_osm[0] + _c_qq_int,
+                 _c_qq_slope * _c_qq_osm[-1] + _c_qq_int],
+                'r-', linewidth=1.5, label='Normal line',
+            )
+            ax_cqq.set_title('Normal Q-Q Plot of Residuals')
+            ax_cqq.set_xlabel('Theoretical quantiles')
+            ax_cqq.set_ylabel('Sample quantiles')
+            ax_cqq.tick_params(axis='both', direction='in')
+            ax_cqq.spines['top'].set_visible(False)
+            ax_cqq.spines['right'].set_visible(False)
+            ax_cqq.legend(fontsize=8)
+            _c_sw_label = (f'Shapiro-Wilk: W={_c_sw_stat:.3f}, p={_c_sw_p:.4f}\n'
+                           f'{"Normal (p>0.05)" if _c_sw_p > 0.05 else "Non-normal (p\u22640.05)"}')
+            ax_cqq.text(0.03, 0.97, _c_sw_label, transform=ax_cqq.transAxes,
+                        fontsize=8, va='top', ha='left',
+                        bbox=dict(boxstyle='round,pad=0.3', facecolor='lightyellow',
+                                  edgecolor='gray', alpha=0.8))
+            _c_formula_label = (
+                'Error terms: \u03b5\u1d62 = y\u1d62 \u2212 \u0177\u1d62\n'
+                'y\u1d62 = z-score(log(mean cap value), session i)\n'
+                '\u0177\u1d62 = model fitted value\n'
+                'Model: z(log(avg_cap)) ~ condition\n'
+                '       + session + condition\u00d7session\n'
+                '       + mouse  (blocking factor)'
+            )
+            ax_cqq.text(0.97, 0.03, _c_formula_label, transform=ax_cqq.transAxes,
+                        fontsize=7.5, va='bottom', ha='right', family='monospace',
+                        bbox=dict(boxstyle='round,pad=0.35', facecolor='#f5f5f5',
+                                  edgecolor='gray', alpha=0.88))
+
+            # ── Residual histogram ────────────────────────────────────────────
+            from scipy.stats import gaussian_kde as _gkde_cr
+            ax_crh.hist(_c_resid, bins='auto', color='teal', alpha=0.65,
+                        edgecolor='white', linewidth=0.5, density=True)
+            if len(_c_resid) >= 3:
+                _c_kde_x = np.linspace(_c_resid.min(), _c_resid.max(), 300)
+                try:
+                    _c_kde2 = _gkde_cr(_c_resid)
+                    ax_crh.plot(_c_kde_x, _c_kde2(_c_kde_x), color='darkslategray',
+                                linewidth=2, label='KDE')
+                except Exception:
+                    pass
+            ax_crh.axvline(0, color='red', linewidth=1.5, linestyle='--', label='Zero')
+            ax_crh.axvline(_c_resid_mean, color='darkorange', linewidth=1.5,
+                           linestyle=':', label=f'Mean={_c_resid_mean:.3f}')
+            ax_crh.set_title('Histogram of Residuals')
+            ax_crh.set_xlabel('Residual \u03b5\u1d62  [z-score units — z(mean cap value)]')
+            ax_crh.set_ylabel('Density')
+            ax_crh.tick_params(axis='both', direction='in')
+            ax_crh.spines['top'].set_visible(False)
+            ax_crh.spines['right'].set_visible(False)
+            ax_crh.legend(fontsize=8)
+            _c_r2_pred_str = f'{_c_r2_pred:.4f}' if not np.isnan(_c_r2_pred) else 'n/a'
+            _c_stats_box = (
+                f'E[\u03b5]         = {_c_resid_mean:+.5f}  (\u22480 by OLS)\n'
+                f'Var(\u03b5)  = MSE = {_c_resid_var:.5f}\n'
+                f'SD(\u03b5)   = RMSE = {_c_resid_sd:.5f}\n'
+                f'\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\n'
+                f'Var(Y)         = {_c_y_var:.5f}\n'
+                f'Var(\u03b5)/Var(Y) = {_c_unexplained:.4f}  (= 1\u2212R\u00b2)\n'
+                f'R\u00b2             = {_c_r2:.4f}\n'
+                f'R\u00b2 adj         = {_c_r2_adj:.4f}\n'
+                f'R\u00b2 pred (PRESS) = {_c_r2_pred_str}\n'
+                f'SNR (fitted/SD\u03b5) = {_c_snr:.3f}'
+            )
+            ax_crh.text(0.98, 0.98, _c_stats_box, transform=ax_crh.transAxes,
+                        fontsize=7.5, va='top', ha='right', family='monospace',
+                        bbox=dict(boxstyle='round,pad=0.35', facecolor='#f0f4ff',
+                                  edgecolor='steelblue', alpha=0.92))
+
+            # ── Residuals vs Fitted ───────────────────────────────────────────
+            _c_uniq_conds = np.unique(_c_conds)
+            _c_cond_colors = generate_colors(max(len(_c_uniq_conds), 1))
+            _c_cond_color  = {c: _c_cond_colors[i] for i, c in enumerate(_c_uniq_conds)}
+            for _cc in _c_uniq_conds:
+                _cmask = _c_conds == _cc
+                ax_crf.scatter(_c_fitted[_cmask], _c_resid[_cmask],
+                               color=_c_cond_color[_cc], alpha=0.5, s=18, label=str(_cc))
+            ax_crf.axhline(0, color='red', linewidth=1.5, linestyle='--')
+            try:
+                from statsmodels.nonparametric.smoothers_lowess import lowess as _c_lowess
+                _c_lw = _c_lowess(_c_resid, _c_fitted, frac=0.4)
+                ax_crf.plot(_c_lw[:, 0], _c_lw[:, 1], color='black',
+                            linewidth=1.5, linestyle='-', label='Lowess')
+            except Exception:
+                pass
+            ax_crf.set_title('Residuals vs Fitted Values')
+            ax_crf.set_xlabel('Fitted values [z(log(mean cap))]')
+            ax_crf.set_ylabel('Residuals [z(log(mean cap))]')
+            ax_crf.tick_params(axis='both', direction='in')
+            ax_crf.spines['top'].set_visible(False)
+            ax_crf.spines['right'].set_visible(False)
+            ax_crf.legend(fontsize=8, title='Condition')
+
+            # ── Residuals vs session number ───────────────────────────────────
+            _c_sess_nums = _df_c_long['session_num'].values
+            ax_crs.scatter(_c_sess_nums, _c_resid,
+                           color='teal', alpha=0.4, s=18)
+            ax_crs.axhline(0, color='red', linewidth=1.5, linestyle='--')
+            try:
+                _c_lw2 = _c_lowess(_c_resid, _c_sess_nums, frac=0.4)
+                ax_crs.plot(_c_lw2[:, 0], _c_lw2[:, 1], color='black',
+                            linewidth=1.5, linestyle='-', label='Lowess')
+                ax_crs.legend(fontsize=8)
+            except Exception:
+                pass
+            ax_crs.set_title('Residuals vs Session Number\n(check for time-trend)')
+            ax_crs.set_xlabel('Session number')
+            ax_crs.set_ylabel('Residuals [z(log(mean cap))]')
+            ax_crs.tick_params(axis='both', direction='in')
+            ax_crs.spines['top'].set_visible(False)
+            ax_crs.spines['right'].set_visible(False)
+
+            # ── Cook's D bar chart ────────────────────────────────────────────
+            if _c_cooks_d is not None:
+                _c_cd_colors = np.where(_c_cooks_d > _c_cooks_thresh, 'crimson', 'teal')
+                ax_ccd.bar(_c_obs_index, _c_cooks_d, color=_c_cd_colors, alpha=0.75, width=0.8)
+                ax_ccd.axhline(_c_cooks_thresh, color='crimson', linewidth=1.5,
+                               linestyle='--',
+                               label=f'Threshold 4/(n\u2212p)={_c_cooks_thresh:.3f}')
+                for _idx in _c_high_cooks:
+                    ax_ccd.text(_idx, _c_cooks_d[_idx] * 1.04, _c_obs_labels[_idx],
+                                fontsize=6, ha='center', va='bottom', color='crimson',
+                                linespacing=1.2)
+                ax_ccd.set_title(
+                    f"Cook's D per Observation\n"
+                    f"({len(_c_high_cooks)} flagged > threshold, shown in red)"
+                )
+                ax_ccd.set_xlabel('Observation index')
+                ax_ccd.set_ylabel("Cook's D")
+                ax_ccd.tick_params(axis='both', direction='in')
+                ax_ccd.spines['top'].set_visible(False)
+                ax_ccd.spines['right'].set_visible(False)
+                ax_ccd.legend(fontsize=8)
+            else:
+                ax_ccd.text(0.5, 0.5, "Cook's D unavailable",
+                            transform=ax_ccd.transAxes, ha='center', va='center')
+                ax_ccd.axis('off')
+
+            # ── Leverage vs Cook's D (influence plot) ─────────────────────────
+            if _c_cooks_d is not None:
+                for _cc in _c_uniq_conds:
+                    _cmask = _c_conds == _cc
+                    ax_clv.scatter(_c_lev_diag[_cmask], _c_cooks_d[_cmask],
+                                   color=_c_cond_color[_cc], alpha=0.6,
+                                   s=20, label=str(_cc))
+                ax_clv.axvline(_c_lev_thresh, color='darkorange', linewidth=1.5,
+                               linestyle='--',
+                               label=f'Leverage 2p/n={_c_lev_thresh:.3f}')
+                ax_clv.axhline(_c_cooks_thresh, color='crimson', linewidth=1.5,
+                               linestyle='--',
+                               label=f"Cook's D 4/(n\u2212p)={_c_cooks_thresh:.3f}")
+                _c_both_flag = np.where((_c_cooks_d > _c_cooks_thresh) &
+                                        (_c_lev_diag > _c_lev_thresh))[0]
+                for _idx in _c_both_flag:
+                    ax_clv.annotate(_c_obs_labels[_idx],
+                                    (_c_lev_diag[_idx], _c_cooks_d[_idx]),
+                                    textcoords='offset points', xytext=(4, 4),
+                                    fontsize=6, color='crimson')
+                ax_clv.set_title(
+                    f'Leverage vs Cook\u2019s D (Influence Plot)\n'
+                    f'High-leverage: {len(_c_high_lev)} obs  |  '
+                    f'High-influence: {len(_c_high_cooks)} obs  |  '
+                    f'Both: {len(_c_both_flag)} obs'
+                )
+                ax_clv.set_xlabel('Leverage h\u1d62\u1d62')
+                ax_clv.set_ylabel("Cook's D")
+                ax_clv.tick_params(axis='both', direction='in')
+                ax_clv.spines['top'].set_visible(False)
+                ax_clv.spines['right'].set_visible(False)
+                ax_clv.legend(fontsize=7, title='Condition', ncol=2)
+            else:
+                ax_clv.text(0.5, 0.5, 'Leverage unavailable',
+                            transform=ax_clv.transAxes, ha='center', va='center')
+                ax_clv.axis('off')
+
+            # ── Suptitle: summary stats ───────────────────────────────────────
+            _c_n_mice   = _df_c_long['mouse'].nunique()
+            _c_n_obs    = len(_df_c_long)
+            _c_lev_str  = (f'Levene (across conditions): F={_c_lev_stat:.3f}, p={_c_lev_p:.4f}'
+                           if not np.isnan(_c_lev_p)
+                           else 'Levene: insufficient groups')
+            _c_summary  = (
+                f'Capacitive RM ANOVA residual diagnostics (DV = z(log(mean cap value)))  |  '
+                f'n={_c_n_mice} mice, {_c_n_obs} obs  |  '
+                f'E[\u03b5]={_c_resid_mean:+.4f} (\u22480)  '
+                f'Var(\u03b5)={_c_resid_var:.4f}  SD(\u03b5)={_c_resid_sd:.4f}  '
+                f'Var(\u03b5)/Var(Y)={_c_unexplained:.3f} (=1\u2212R\u00b2)  '
+                f'R\u00b2={_c_r2:.3f}  |  {_c_lev_str}'
+            )
+            expl_cap_rm_anova_resid_fig.suptitle(_c_summary, fontsize=8.5, y=1.01, wrap=True)
+
+            if _c_pg_text:
+                expl_cap_rm_anova_resid_fig.text(
+                    0.01, -0.02, _c_pg_text,
+                    fontsize=7.5, family='monospace', va='top',
+                    transform=expl_cap_rm_anova_resid_fig.transFigure,
+                    bbox=dict(boxstyle='round,pad=0.4', facecolor='#f5f5f5',
+                              edgecolor='gray', alpha=0.9),
+                )
+
+            expl_cap_rm_anova_resid_fig.tight_layout()
+            print('\n\u2500\u2500 Capacitive RM ANOVA Residual Diagnostics \u2500\u2500')
+            print(f'  Formula:          \u03b5\u1d62 = y\u1d62 \u2212 \u0177\u1d62  (observed \u2212 model fitted value)')
+            print(f'  Model DV:         z-score(log(mean capacitive value))  [z(log(cap units))]')
+            print(f'  Global z-score:   \u03bc={_c_mu:.4f} log(cap units), \u03c3={_c_sd:.4f}  (computed on log scale)')
+            print(f'  N mice:           {_c_n_mice}')
+            print(f'  N observations:   {_c_n_obs}')
+            print(f'  E[\u03b5]  (mean):    {_c_resid_mean:+.6f}  (\u22480 by OLS construction)')
+            print(f'  Var(\u03b5) (MSE):    {_c_resid_var:.6f}')
+            print(f'  SD(\u03b5)  (RMSE):   {_c_resid_sd:.6f}')
+            print(f'  Var(Y):           {_c_y_var:.6f}')
+            print(f'  Var(\u03b5)/Var(Y):   {_c_unexplained:.4f}  (= 1 \u2212 R\u00b2 = unexplained variance fraction)')
+            print(f'  R\u00b2:              {_c_r2:.4f}')
+            print(f'  R\u00b2 adj:          {_c_r2_adj:.4f}')
+            print(f'  R\u00b2 pred (PRESS): {_c_r2_pred_str}  (leave-one-out; gap vs R\u00b2 indicates overfitting)')
+            print(f'  SNR (\u0177\u0305/SD\u03b5):    {_c_snr:.4f}')
+            print(f'  Shapiro-Wilk:     W={_c_sw_stat:.4f}, p={_c_sw_p:.6f}')
+            print(f'  Levene test:      F={_c_lev_stat:.4f}, p={_c_lev_p:.6f}')
+            if _c_cooks_d is not None:
+                print(f'  Cook\'s D thresh:  {_c_cooks_thresh:.4f}  (4/(n\u2212p))')
+                print(f'  Leverage thresh:  {_c_lev_thresh:.4f}  (2p/n)')
+                _c_flag_strs = [f'{m}(S{s})' for m, s in
+                                zip(_c_mice_labels[_c_high_cooks], _c_sess_nums_lbl[_c_high_cooks])]
+                print(f'  High-influence obs (Cook\'s D > thresh): {len(_c_high_cooks)}'
+                      + (f'  [{", ".join(_c_flag_strs)}]' if len(_c_high_cooks) else ''))
+                _c_lev_strs = [f'{m}(S{s})' for m, s in
+                               zip(_c_mice_labels[_c_high_lev], _c_sess_nums_lbl[_c_high_lev])]
+                print(f'  High-leverage obs (h\u1d62\u1d62 > thresh):      {len(_c_high_lev)}'
+                      + (f'  [{", ".join(_c_lev_strs)}]' if len(_c_high_lev) else ''))
+            if _c_pg_text:
+                print(_c_pg_text)
+
+        except ImportError as _e:
+            print(f'[expl_cap_rm_anova_resid] Missing dependency: {_e}')
+            print('  Install statsmodels: conda install statsmodels')
+        except Exception as _e:
+            print(f'[expl_cap_rm_anova_resid] Error: {_e}')
+
+    # ── Exploratory: capacitive sensor value distribution fit ─────────────────
+    # DV = per-session mean raw capacitive value (avg_cap, pooled across all mice).
+    # Tests Normal, Log-normal, and Gamma families via MLE + AIC.
+    # Figure layout: 3 rows × 2 cols
+    #   [0, :] Histogram of raw avg_cap values with fitted PDFs + KDE
+    #   [1, 0] Normal Q-Q  |  [1, 1] Log-normal Q-Q
+    #   [2, 0] Gamma Q-Q   |  [2, 1] AIC / fit-statistic comparison bar chart
+    expl_cap_distfit_fig = None
+    if 'expl_cap_distfit' in selected_plots:
+        try:
+            from scipy.stats import (norm as _norm_d, lognorm as _lognorm_d,
+                                     gamma as _gamma_d, probplot as _probplot_cd,
+                                     shapiro as _sw_cd, kstest as _kstest_cd)
+            from scipy.stats import gaussian_kde as _gkde_cd
+            from matplotlib.gridspec import GridSpec as _GridSpec_cd
+            import warnings as _warnings_cd
+
+            # ── Collect per-session avg_cap values ────────────────────────────
+            _cd_all = []
+            _cd_per_mouse = []
+            for _r in all_results:
+                _cv = pd.to_numeric(
+                    _r['df'].get('avg_cap', pd.Series(dtype=float)), errors='coerce'
+                ).dropna().values
+                _cd_all.extend(_cv.tolist())
+                if len(_cv) > 0:
+                    _cd_per_mouse.append(float(np.mean(_cv)))
+
+            _cd_arr = np.array(_cd_all, dtype=float)
+            _cd_n   = len(_cd_arr)
+            _cd_mean   = float(np.mean(_cd_arr))
+            _cd_median = float(np.median(_cd_arr))
+            _cd_sd     = float(np.std(_cd_arr, ddof=1))
+            _cd_skew   = float(pd.Series(_cd_arr).skew())
+            _cd_kurt   = float(pd.Series(_cd_arr).kurt())  # excess kurtosis
+
+            # Shapiro-Wilk on raw values
+            _cd_sw_stat, _cd_sw_p = _sw_cd(_cd_arr) if _cd_n >= 3 else (np.nan, np.nan)
+
+            # ── MLE fits via scipy ────────────────────────────────────────────
+            # Normal
+            with _warnings_cd.catch_warnings():
+                _warnings_cd.simplefilter('ignore')
+                _nm_loc, _nm_scale = _norm_d.fit(_cd_arr)
+                _nm_ll  = float(np.sum(_norm_d.logpdf(_cd_arr, _nm_loc, _nm_scale)))
+                _nm_aic = 2 * 2 - 2 * _nm_ll   # 2 params: μ, σ
+                _nm_ks  = float(_kstest_cd(_cd_arr, 'norm',
+                                           args=(_nm_loc, _nm_scale)).statistic)
+
+            # Log-normal (requires positive values)
+            _cd_pos = _cd_arr[_cd_arr > 0]
+            _ln_ok  = len(_cd_pos) >= 5
+            if _ln_ok:
+                with _warnings_cd.catch_warnings():
+                    _warnings_cd.simplefilter('ignore')
+                    _ln_s, _ln_loc, _ln_scale = _lognorm_d.fit(_cd_pos, floc=0)
+                    _ln_ll  = float(np.sum(_lognorm_d.logpdf(_cd_pos, _ln_s, _ln_loc, _ln_scale)))
+                    _ln_aic = 2 * 2 - 2 * _ln_ll   # 2 free params (s, scale; loc fixed at 0)
+                    _ln_ks  = float(_kstest_cd(_cd_pos, 'lognorm',
+                                               args=(_ln_s, _ln_loc, _ln_scale)).statistic)
+            else:
+                _ln_s = _ln_loc = _ln_scale = _ln_ll = _ln_aic = _ln_ks = np.nan
+
+            # Gamma (requires positive values)
+            _gm_ok = len(_cd_pos) >= 5
+            if _gm_ok:
+                with _warnings_cd.catch_warnings():
+                    _warnings_cd.simplefilter('ignore')
+                    _gm_a, _gm_loc, _gm_scale = _gamma_d.fit(_cd_pos, floc=0)
+                    _gm_ll  = float(np.sum(_gamma_d.logpdf(_cd_pos, _gm_a, _gm_loc, _gm_scale)))
+                    _gm_aic = 2 * 2 - 2 * _gm_ll   # 2 free params (a, scale; loc fixed at 0)
+                    _gm_ks  = float(_kstest_cd(_cd_pos, 'gamma',
+                                               args=(_gm_a, _gm_loc, _gm_scale)).statistic)
+            else:
+                _gm_a = _gm_loc = _gm_scale = _gm_ll = _gm_aic = _gm_ks = np.nan
+
+            # ── Determine preferred distribution ──────────────────────────────
+            _cd_aics = {'Normal': _nm_aic}
+            if _ln_ok:
+                _cd_aics['Log-normal'] = _ln_aic
+            if _gm_ok:
+                _cd_aics['Gamma'] = _gm_aic
+            _cd_best = min(_cd_aics, key=_cd_aics.get)
+            _cd_delta_aics = {k: v - _cd_aics[_cd_best] for k, v in _cd_aics.items()}
+
+            # ── Build figure ──────────────────────────────────────────────────
+            expl_cap_distfit_fig = plt.figure(figsize=(14, 16))
+            _gs_cd = _GridSpec_cd(3, 2, figure=expl_cap_distfit_fig,
+                                  hspace=0.42, wspace=0.38)
+            ax_cdhist = expl_cap_distfit_fig.add_subplot(_gs_cd[0, :])   # full-width histogram
+            ax_cdnm   = expl_cap_distfit_fig.add_subplot(_gs_cd[1, 0])   # Normal Q-Q
+            ax_cdln   = expl_cap_distfit_fig.add_subplot(_gs_cd[1, 1])   # Log-normal Q-Q
+            ax_cdgm   = expl_cap_distfit_fig.add_subplot(_gs_cd[2, 0])   # Gamma Q-Q
+            ax_cdaic  = expl_cap_distfit_fig.add_subplot(_gs_cd[2, 1])   # AIC comparison
+
+            # ── [0, :] Raw histogram + fitted PDFs + KDE ──────────────────────
+            _cd_plot_arr = _cd_pos if (not _ln_ok or _cd_arr.min() <= 0) else _cd_arr
+            ax_cdhist.hist(_cd_plot_arr, bins='auto', color='steelblue', alpha=0.50,
+                           edgecolor='white', linewidth=0.5, density=True,
+                           label='Observed (density)')
+            # KDE
+            if _cd_n >= 3:
+                try:
+                    _cd_kde_fn = _gkde_cd(_cd_plot_arr)
+                    _cd_x = np.linspace(_cd_plot_arr.min(), _cd_plot_arr.max(), 500)
+                    ax_cdhist.plot(_cd_x, _cd_kde_fn(_cd_x), color='navy',
+                                   linewidth=2.2, label='KDE (observed)')
+                except Exception:
+                    pass
+            # Normal PDF
+            _cd_x_all = np.linspace(_nm_loc - 4 * _nm_scale,
+                                    _nm_loc + 4 * _nm_scale, 500)
+            ax_cdhist.plot(_cd_x_all, _norm_d.pdf(_cd_x_all, _nm_loc, _nm_scale),
+                           color='crimson', linewidth=1.8, linestyle='-',
+                           label=f'Normal (\u03bc={_nm_loc:.3g}, \u03c3={_nm_scale:.3g})')
+            # Log-normal PDF
+            if _ln_ok:
+                _cd_x_pos = np.linspace(_cd_pos.min() * 0.5, _cd_pos.max() * 1.2, 500)
+                ax_cdhist.plot(_cd_x_pos,
+                               _lognorm_d.pdf(_cd_x_pos, _ln_s, _ln_loc, _ln_scale),
+                               color='darkorange', linewidth=1.8, linestyle='--',
+                               label=f'Log-normal (s={_ln_s:.3g})')
+            # Gamma PDF
+            if _gm_ok:
+                ax_cdhist.plot(_cd_x_pos,
+                               _gamma_d.pdf(_cd_x_pos, _gm_a, _gm_loc, _gm_scale),
+                               color='darkgreen', linewidth=1.8, linestyle=':',
+                               label=f'Gamma (a={_gm_a:.3g})')
+            ax_cdhist.set_title(
+                f'Raw Capacitive Sensor Value Histogram — all sessions (n={_cd_n})  |  '
+                f'mean={_cd_mean:.4g}  median={_cd_median:.4g}  '
+                f'SD={_cd_sd:.4g}  skew={_cd_skew:.3f}  excess kurt={_cd_kurt:.3f}',
+                fontsize=9,
+            )
+            ax_cdhist.set_xlabel('Mean capacitive sensor value per session (raw units)')
+            ax_cdhist.set_ylabel('Density')
+            ax_cdhist.legend(fontsize=8)
+            ax_cdhist.tick_params(axis='both', direction='in')
+            ax_cdhist.spines['top'].set_visible(False)
+            ax_cdhist.spines['right'].set_visible(False)
+            _sw_label_hist = (f'Shapiro-Wilk (raw): W={_cd_sw_stat:.4f}, p={_cd_sw_p:.4f}\n'
+                              f'{"Normal (p>0.05)" if _cd_sw_p > 0.05 else "Non-normal (p\u22640.05)"}')
+            ax_cdhist.text(0.98, 0.98, _sw_label_hist, transform=ax_cdhist.transAxes,
+                           fontsize=8, va='top', ha='right',
+                           bbox=dict(boxstyle='round,pad=0.3', facecolor='lightyellow',
+                                     edgecolor='gray', alpha=0.85))
+
+            # ── [1, 0] Normal Q-Q ─────────────────────────────────────────────
+            (_cd_nm_osm, _cd_nm_osr), (_cd_nm_sl, _cd_nm_int, _) = _probplot_cd(
+                _cd_arr, dist='norm', sparams=(_nm_loc, _nm_scale),
+            )
+            ax_cdnm.plot(_cd_nm_osm, _cd_nm_osr, 'o', color='crimson',
+                         markersize=4, alpha=0.6, label='Data')
+            ax_cdnm.plot([_cd_nm_osm[0], _cd_nm_osm[-1]],
+                         [_cd_nm_sl * _cd_nm_osm[0] + _cd_nm_int,
+                          _cd_nm_sl * _cd_nm_osm[-1] + _cd_nm_int],
+                         'k-', linewidth=1.5, label='Reference line')
+            ax_cdnm.set_title('Normal Q-Q')
+            ax_cdnm.set_xlabel('Theoretical quantiles (Normal)')
+            ax_cdnm.set_ylabel('Observed quantiles')
+            ax_cdnm.legend(fontsize=8)
+            ax_cdnm.tick_params(axis='both', direction='in')
+            ax_cdnm.spines['top'].set_visible(False)
+            ax_cdnm.spines['right'].set_visible(False)
+            ax_cdnm.text(0.03, 0.97,
+                         f'AIC={_nm_aic:.2f}\nKS D={_nm_ks:.4f}\n'
+                         f'SW p={_cd_sw_p:.4f}',
+                         transform=ax_cdnm.transAxes, fontsize=8, va='top',
+                         bbox=dict(boxstyle='round,pad=0.3', facecolor='#fff0f0',
+                                   edgecolor='crimson', alpha=0.85))
+
+            # ── [1, 1] Log-normal Q-Q ─────────────────────────────────────────
+            if _ln_ok:
+                (_cd_ln_osm, _cd_ln_osr), (_cd_ln_sl, _cd_ln_int, _) = _probplot_cd(
+                    _cd_pos, dist='lognorm', sparams=(_ln_s, _ln_loc, _ln_scale),
+                )
+                ax_cdln.plot(_cd_ln_osm, _cd_ln_osr, 'o', color='darkorange',
+                             markersize=4, alpha=0.6, label='Data')
+                ax_cdln.plot([_cd_ln_osm[0], _cd_ln_osm[-1]],
+                             [_cd_ln_sl * _cd_ln_osm[0] + _cd_ln_int,
+                              _cd_ln_sl * _cd_ln_osm[-1] + _cd_ln_int],
+                             'k-', linewidth=1.5, label='Reference line')
+                ax_cdln.set_title('Log-normal Q-Q')
+                ax_cdln.set_xlabel('Theoretical quantiles (Log-normal)')
+                ax_cdln.set_ylabel('Observed quantiles')
+                ax_cdln.legend(fontsize=8)
+                ax_cdln.tick_params(axis='both', direction='in')
+                ax_cdln.spines['top'].set_visible(False)
+                ax_cdln.spines['right'].set_visible(False)
+                ax_cdln.text(0.03, 0.97,
+                             f'AIC={_ln_aic:.2f}\nKS D={_ln_ks:.4f}',
+                             transform=ax_cdln.transAxes, fontsize=8, va='top',
+                             bbox=dict(boxstyle='round,pad=0.3', facecolor='#fff5e0',
+                                       edgecolor='darkorange', alpha=0.85))
+            else:
+                ax_cdln.text(0.5, 0.5, 'Log-normal fit unavailable\n(requires positive values)',
+                             transform=ax_cdln.transAxes, ha='center', va='center', fontsize=10)
+                ax_cdln.axis('off')
+
+            # ── [2, 0] Gamma Q-Q ──────────────────────────────────────────────
+            if _gm_ok:
+                (_cd_gm_osm, _cd_gm_osr), (_cd_gm_sl, _cd_gm_int, _) = _probplot_cd(
+                    _cd_pos, dist='gamma', sparams=(_gm_a, _gm_loc, _gm_scale),
+                )
+                ax_cdgm.plot(_cd_gm_osm, _cd_gm_osr, 'o', color='darkgreen',
+                             markersize=4, alpha=0.6, label='Data')
+                ax_cdgm.plot([_cd_gm_osm[0], _cd_gm_osm[-1]],
+                             [_cd_gm_sl * _cd_gm_osm[0] + _cd_gm_int,
+                              _cd_gm_sl * _cd_gm_osm[-1] + _cd_gm_int],
+                             'k-', linewidth=1.5, label='Reference line')
+                ax_cdgm.set_title('Gamma Q-Q')
+                ax_cdgm.set_xlabel('Theoretical quantiles (Gamma)')
+                ax_cdgm.set_ylabel('Observed quantiles')
+                ax_cdgm.legend(fontsize=8)
+                ax_cdgm.tick_params(axis='both', direction='in')
+                ax_cdgm.spines['top'].set_visible(False)
+                ax_cdgm.spines['right'].set_visible(False)
+                ax_cdgm.text(0.03, 0.97,
+                             f'AIC={_gm_aic:.2f}\nKS D={_gm_ks:.4f}',
+                             transform=ax_cdgm.transAxes, fontsize=8, va='top',
+                             bbox=dict(boxstyle='round,pad=0.3', facecolor='#f0fff0',
+                                       edgecolor='darkgreen', alpha=0.85))
+            else:
+                ax_cdgm.text(0.5, 0.5, 'Gamma fit unavailable\n(requires positive values)',
+                             transform=ax_cdgm.transAxes, ha='center', va='center', fontsize=10)
+                ax_cdgm.axis('off')
+
+            # ── [2, 1] AIC comparison bar chart ───────────────────────────────
+            _aic_names  = list(_cd_aics.keys())
+            _aic_vals   = [_cd_aics[k] for k in _aic_names]
+            _aic_deltas = [_cd_delta_aics[k] for k in _aic_names]
+            _aic_colors = ['crimson' if k == 'Normal'
+                           else 'darkorange' if k == 'Log-normal'
+                           else 'darkgreen'
+                           for k in _aic_names]
+            _aic_hatches = ['//' if k == _cd_best else '' for k in _aic_names]
+            _aic_bars = ax_cdaic.bar(_aic_names, _aic_vals,
+                                     color=_aic_colors, alpha=0.70,
+                                     edgecolor='black', linewidth=0.8)
+            for _bar, _hatch in zip(_aic_bars, _aic_hatches):
+                _bar.set_hatch(_hatch)
+            # Annotate bars with ΔAIC
+            for _bar, _daic in zip(_aic_bars, _aic_deltas):
+                _xc = _bar.get_x() + _bar.get_width() / 2
+                _yc = _bar.get_height()
+                ax_cdaic.text(_xc, _yc * 1.005,
+                              f'\u0394AIC={_daic:+.1f}',
+                              ha='center', va='bottom', fontsize=8)
+            ax_cdaic.set_title(
+                f'AIC Comparison\n(hatched = preferred: {_cd_best}  |  lower AIC = better fit)',
+                fontsize=9,
+            )
+            ax_cdaic.set_ylabel('AIC')
+            ax_cdaic.tick_params(axis='both', direction='in')
+            ax_cdaic.spines['top'].set_visible(False)
+            ax_cdaic.spines['right'].set_visible(False)
+            # KS D table inside the panel
+            _ks_lines = ['KS statistic D (lower = better):']
+            for _kn, _kd in [('Normal', _nm_ks),
+                              ('Log-normal', _ln_ks if _ln_ok else float('nan')),
+                              ('Gamma', _gm_ks if _gm_ok else float('nan'))]:
+                _ks_lines.append(f'  {_kn:<12}: {_kd:.4f}')
+            ax_cdaic.text(0.02, 0.04, '\n'.join(_ks_lines),
+                          transform=ax_cdaic.transAxes, fontsize=7.5,
+                          va='bottom', ha='left', family='monospace',
+                          bbox=dict(boxstyle='round,pad=0.35', facecolor='#f5f5f5',
+                                    edgecolor='gray', alpha=0.88))
+
+            # ── Suptitle ──────────────────────────────────────────────────────
+            _cd_summary = (
+                f'Capacitive Sensor Value Distribution Fit  |  '
+                f'n={_cd_n} sessions, {len(_cd_per_mouse)} mice  |  '
+                f'mean={_cd_mean:.4g}  SD={_cd_sd:.4g}  '
+                f'skew={_cd_skew:.3f}  kurt={_cd_kurt:.3f}  |  '
+                f'SW p={_cd_sw_p:.4f}  |  '
+                f'Best fit (AIC): {_cd_best}'
+            )
+            expl_cap_distfit_fig.suptitle(_cd_summary, fontsize=9, y=1.01, wrap=True)
+            expl_cap_distfit_fig.tight_layout()
+
+            # ── Console summary ───────────────────────────────────────────────
+            print('\n\u2500\u2500 Capacitive Sensor Value Distribution Fit \u2500\u2500')
+            print(f'  N sessions:         {_cd_n}')
+            print(f'  N mice:             {len(_cd_per_mouse)}')
+            print(f'  Mean:               {_cd_mean:.6g}')
+            print(f'  Median:             {_cd_median:.6g}')
+            print(f'  SD:                 {_cd_sd:.6g}')
+            print(f'  Skewness:           {_cd_skew:.4f}  (0 = symmetric)')
+            print(f'  Excess kurtosis:    {_cd_kurt:.4f}  (0 = normal)')
+            print(f'  Shapiro-Wilk:       W={_cd_sw_stat:.4f}, p={_cd_sw_p:.6f}')
+            print(f'  Normal    AIC={_nm_aic:.2f}  KS D={_nm_ks:.4f}  '
+                  f'\u0394AIC={_cd_delta_aics["Normal"]:+.2f}')
+            if _ln_ok:
+                print(f'  Log-normal AIC={_ln_aic:.2f}  KS D={_ln_ks:.4f}  '
+                      f'\u0394AIC={_cd_delta_aics["Log-normal"]:+.2f}  '
+                      f's={_ln_s:.4f}')
+            else:
+                print('  Log-normal: unavailable (non-positive values present)')
+            if _gm_ok:
+                print(f'  Gamma     AIC={_gm_aic:.2f}  KS D={_gm_ks:.4f}  '
+                      f'\u0394AIC={_cd_delta_aics["Gamma"]:+.2f}  '
+                      f'a={_gm_a:.4f}')
+            else:
+                print('  Gamma: unavailable (non-positive values present)')
+            print(f'  \u2192 Preferred distribution (lowest AIC): {_cd_best}')
+
+        except Exception as _e:
+            import traceback as _tb_cd
+            print(f'[expl_cap_distfit] Error: {_e}')
+            _tb_cd.print_exc()
+
+    # ── Exploratory: lick count Poisson vs Negative Binomial distribution fit ──
+    # Step 1 before any ANOVA: determine whether the count DV is Poisson-
+    # distributed (mean ≈ variance) or overdispersed (variance >> mean, → NB).
+    # The figure contains four panels:
+    #   [0,0] Hanging rootogram — Poisson fit overlaid on count histogram
+    #   [0,1] Hanging rootogram — NB fit overlaid on count histogram
+    #   [1,0] Mean–variance plot (per-mouse means vs per-mouse variances)
+    #   [1,1] Q-Q plot of counts against Poisson quantiles (pooled data)
+    # Summary text reports: mean, variance, dispersion index (V/M), p-value
+    # from a chi-squared goodness-of-fit for both Poisson and NB, and AIC.
+    expl_lick_distfit_fig = None
+    if 'expl_lick_distfit' in selected_plots:
+        try:
+            from scipy.stats import poisson as _poisson_dist, chi2 as _chi2_dist
+            from scipy.stats import nbinom as _nbinom_dist
+            import warnings as _warnings_df
+
+            # ── Collect integer lick counts ───────────────────────────────────
+            _df_lk_counts = []
+            _df_per_mouse_means = []
+            _df_per_mouse_vars  = []
+            for _r in all_results:
+                _lc = pd.to_numeric(_r['df']['lick_count'], errors='coerce').dropna()
+                _lc_int = _lc[_lc >= 0].values.astype(float)
+                _df_lk_counts.extend(_lc_int.tolist())
+                if len(_lc_int) >= 2:
+                    _df_per_mouse_means.append(float(np.mean(_lc_int)))
+                    _df_per_mouse_vars.append(float(np.var(_lc_int, ddof=1)))
+
+            _df_counts = np.array(_df_lk_counts, dtype=float)
+            _df_n      = len(_df_counts)
+            _df_mean   = float(np.mean(_df_counts))
+            _df_var    = float(np.var(_df_counts, ddof=1))
+            _df_disp   = _df_var / _df_mean if _df_mean > 0 else np.nan  # dispersion index
+
+            # ── MLE for Poisson: λ = sample mean ─────────────────────────────
+            _pois_lam = _df_mean
+
+            # ── MLE for Negative Binomial via statsmodels ─────────────────────
+            # NB parameterisation: mean=μ, dispersion=α → var = μ + α·μ²
+            # statsmodels NB2 gives (params['const'], alpha)
+            _nb_mu    = np.nan
+            _nb_alpha = np.nan
+            _nb_r     = np.nan   # r = 1/alpha  (scipy nbinom uses n=r, p=r/(r+mu))
+            _nb_p_sc  = np.nan
+            try:
+                import statsmodels.api as _sm_nb
+                _nb_endog = _df_counts.astype(int)
+                _nb_exog  = np.ones(len(_nb_endog))
+                with _warnings_df.catch_warnings():
+                    _warnings_df.simplefilter('ignore')
+                    _nb_res = _sm_nb.NegativeBinomial(_nb_endog, _nb_exog).fit(
+                        disp=False, method='nm', maxiter=500,
+                    )
+                _nb_mu    = float(np.exp(_nb_res.params[0]))
+                _nb_alpha = float(_nb_res.params[-1])         # overdispersion α
+                _nb_r     = float(1.0 / _nb_alpha) if _nb_alpha > 0 else np.inf
+                _nb_p_sc  = float(_nb_r / (_nb_r + _nb_mu))  # scipy p parameter
+            except Exception:
+                pass  # NB fit unavailable; panels will show Poisson only
+
+            # ── Bin counts for rootogram & chi-squared GoF ────────────────────
+            _max_bin  = int(np.percentile(_df_counts, 99)) + 1
+            _bins     = np.arange(0, _max_bin + 2)
+            _obs_freq, _ = np.histogram(_df_counts, bins=_bins)
+            _bin_vals    = _bins[:-1]   # 0, 1, 2, …, _max_bin
+
+            # Expected frequencies — Poisson
+            _pois_pmf  = _poisson_dist.pmf(_bin_vals, _pois_lam)
+            _pois_pmf[-1] += (1.0 - _poisson_dist.cdf(_max_bin, _pois_lam))  # right tail
+            _pois_exp  = _pois_pmf * _df_n
+
+            # Expected frequencies — NB
+            if not np.isnan(_nb_r):
+                _nb_pmf    = _nbinom_dist.pmf(_bin_vals, _nb_r, _nb_p_sc)
+                _nb_pmf[-1] += (1.0 - _nbinom_dist.cdf(_max_bin, _nb_r, _nb_p_sc))
+                _nb_exp    = _nb_pmf * _df_n
+            else:
+                _nb_exp = None
+
+            # ── Chi-squared GoF (pool bins with expected < 5) ─────────────────
+            def _chisq_gof(obs, exp):
+                """Pool tail bins until all expected >= 5, return (chi2, df, p)."""
+                obs, exp = np.array(obs, dtype=float), np.array(exp, dtype=float)
+                # Pool from right
+                while len(obs) > 1 and exp[-1] < 5:
+                    obs[-2] += obs[-1];  exp[-2] += exp[-1]
+                    obs = obs[:-1];      exp = exp[:-1]
+                # Pool from left
+                while len(obs) > 1 and exp[0] < 5:
+                    obs[1] += obs[0];   exp[1] += exp[0]
+                    obs = obs[1:];      exp = exp[1:]
+                if len(obs) < 2:
+                    return np.nan, np.nan, np.nan
+                stat = float(np.sum((obs - exp) ** 2 / np.where(exp > 0, exp, np.nan)))
+                df   = len(obs) - 2   # -1 for constraint, -1 for estimated param
+                df   = max(df, 1)
+                p    = float(1.0 - _chi2_dist.cdf(stat, df))
+                return stat, df, p
+
+            _pois_chi2, _pois_df, _pois_p = _chisq_gof(_obs_freq, _pois_exp)
+            if _nb_exp is not None:
+                _nb_chi2, _nb_df, _nb_p = _chisq_gof(_obs_freq, _nb_exp)
+            else:
+                _nb_chi2 = _nb_df = _nb_p = np.nan
+
+            # ── AIC (log-likelihood based) ────────────────────────────────────
+            # Poisson log-likelihood
+            _pois_ll = float(np.sum(_poisson_dist.logpmf(_df_counts.astype(int), _pois_lam)))
+            _pois_aic = 2 * 1 - 2 * _pois_ll   # 1 free param (λ)
+            # NB log-likelihood
+            if not np.isnan(_nb_r):
+                _nb_ll  = float(np.sum(_nbinom_dist.logpmf(
+                    _df_counts.astype(int), _nb_r, _nb_p_sc)))
+                _nb_aic = 2 * 2 - 2 * _nb_ll   # 2 free params (μ, α)
+                _delta_aic = _nb_aic - _pois_aic  # negative = NB preferred
+            else:
+                _nb_ll = _nb_aic = _delta_aic = np.nan
+
+            # ── Build figure: 3 rows × 2 cols (top row = histogram, spans both cols) ──
+            from matplotlib.gridspec import GridSpec as _GridSpec
+            expl_lick_distfit_fig = plt.figure(figsize=(14, 16))
+            _gs = _GridSpec(3, 2, figure=expl_lick_distfit_fig,
+                            hspace=0.42, wspace=0.35)
+            ax_dfhist = expl_lick_distfit_fig.add_subplot(_gs[0, :])   # row 0, both cols
+            ax_dfp    = expl_lick_distfit_fig.add_subplot(_gs[1, 0])   # row 1, col 0
+            ax_dfn    = expl_lick_distfit_fig.add_subplot(_gs[1, 1])   # row 1, col 1
+            ax_dfmv   = expl_lick_distfit_fig.add_subplot(_gs[2, 0])   # row 2, col 0
+            ax_dfqq   = expl_lick_distfit_fig.add_subplot(_gs[2, 1])   # row 2, col 1
+
+            # ── [0, :] Raw lick count histogram with PMF overlays ────────────
+            from scipy.stats import gaussian_kde as _gkde_df
+            ax_dfhist.hist(_df_counts, bins='auto', color='mediumpurple', alpha=0.55,
+                           edgecolor='white', linewidth=0.5, density=True,
+                           label='Observed (density)')
+            # KDE of raw data
+            if len(_df_counts) >= 3:
+                try:
+                    _hist_kde = _gkde_df(_df_counts)
+                    _hist_x = np.linspace(max(0, _df_counts.min()), _df_counts.max(), 500)
+                    ax_dfhist.plot(_hist_x, _hist_kde(_hist_x), color='indigo',
+                                   linewidth=2, label='KDE (observed)')
+                except Exception:
+                    pass
+            # Poisson PMF as stem plot (scaled to density)
+            _hist_pmf_x = np.arange(0, _max_bin + 2)
+            _hist_pois_pmf = _poisson_dist.pmf(_hist_pmf_x, _pois_lam)
+            ax_dfhist.vlines(_hist_pmf_x, 0, _hist_pois_pmf,
+                             color='navy', linewidth=0.8, alpha=0.6)
+            ax_dfhist.plot(_hist_pmf_x, _hist_pois_pmf, 'o', color='navy',
+                           markersize=3, alpha=0.7, label=f'Poisson PMF (λ={_pois_lam:.1f})')
+            # NB PMF
+            if not np.isnan(_nb_r):
+                _hist_nb_pmf = _nbinom_dist.pmf(_hist_pmf_x, _nb_r, _nb_p_sc)
+                ax_dfhist.vlines(_hist_pmf_x, 0, _hist_nb_pmf,
+                                 color='darkgreen', linewidth=0.8, alpha=0.6)
+                ax_dfhist.plot(_hist_pmf_x, _hist_nb_pmf, '^', color='darkgreen',
+                               markersize=3, alpha=0.7,
+                               label=f'NB PMF (μ={_nb_mu:.1f}, α={_nb_alpha:.3f})')
+            ax_dfhist.set_title(
+                f'Raw Lick Count Histogram — all sessions (n={_df_n})  |  '
+                f'mean={_df_mean:.1f}  var={_df_var:.1f}  V/M={_df_disp:.2f}',
+                fontsize=9,
+            )
+            ax_dfhist.set_xlabel('Lick count per session')
+            ax_dfhist.set_ylabel('Density')
+            ax_dfhist.legend(fontsize=8)
+            ax_dfhist.tick_params(axis='both', direction='in')
+            ax_dfhist.spines['top'].set_visible(False)
+            ax_dfhist.spines['right'].set_visible(False)
+
+            # ── [1,0] Hanging rootogram — Poisson ─────────────────────────────
+            # Rootogram: bars show sqrt(observed); curve shows sqrt(expected);
+            # bars are "hung" from the curve so deviations are visible at the base.
+            _bw = 0.8
+            _sqrt_obs_p = np.sqrt(_obs_freq.astype(float))
+            _sqrt_exp_p = np.sqrt(_pois_exp)
+            for _i, (_xv, _so, _se) in enumerate(zip(_bin_vals, _sqrt_obs_p, _sqrt_exp_p)):
+                _bottom = _se - _so
+                _color  = 'crimson' if _bottom < -0.5 else ('gold' if abs(_bottom) < 0.5 else 'steelblue')
+                ax_dfp.bar(_xv, _so, bottom=_bottom, width=_bw,
+                           color=_color, alpha=0.75, edgecolor='white', linewidth=0.4)
+            ax_dfp.axhline(0, color='black', linewidth=1.0, linestyle='-')
+            ax_dfp.step(np.append(_bin_vals, _bin_vals[-1] + 1) - 0.5,
+                        np.append(_sqrt_exp_p, _sqrt_exp_p[-1]),
+                        where='post', color='navy', linewidth=1.8,
+                        label=f'Poisson(\u03bb={_pois_lam:.1f})')
+            _pois_label = (f'\u03c7\u00b2({_pois_df})={_pois_chi2:.2f}, p={_pois_p:.4f}\n'
+                           f'AIC={_pois_aic:.1f}')
+            ax_dfp.text(0.97, 0.97, _pois_label, transform=ax_dfp.transAxes,
+                        fontsize=8, va='top', ha='right',
+                        bbox=dict(boxstyle='round,pad=0.3', facecolor='lightyellow',
+                                  edgecolor='gray', alpha=0.85))
+            ax_dfp.set_title('Hanging Rootogram — Poisson fit\n'
+                             '(crimson=underpredicted, blue=overpredicted, gold=close)')
+            ax_dfp.set_xlabel('Lick count per session')
+            ax_dfp.set_ylabel('\u221aObserved  (hung from \u221aExpected)')
+            ax_dfp.legend(fontsize=8)
+            ax_dfp.tick_params(axis='both', direction='in')
+            ax_dfp.spines['top'].set_visible(False)
+            ax_dfp.spines['right'].set_visible(False)
+
+            # ── [1,1] Hanging rootogram — Negative Binomial ───────────────────
+            if _nb_exp is not None:
+                _sqrt_obs_n = np.sqrt(_obs_freq.astype(float))
+                _sqrt_exp_n = np.sqrt(_nb_exp)
+                for _i, (_xv, _so, _se) in enumerate(zip(_bin_vals, _sqrt_obs_n, _sqrt_exp_n)):
+                    _bottom = _se - _so
+                    _color  = 'crimson' if _bottom < -0.5 else ('gold' if abs(_bottom) < 0.5 else 'steelblue')
+                    ax_dfn.bar(_xv, _so, bottom=_bottom, width=_bw,
+                               color=_color, alpha=0.75, edgecolor='white', linewidth=0.4)
+                ax_dfn.axhline(0, color='black', linewidth=1.0, linestyle='-')
+                ax_dfn.step(np.append(_bin_vals, _bin_vals[-1] + 1) - 0.5,
+                            np.append(_sqrt_exp_n, _sqrt_exp_n[-1]),
+                            where='post', color='darkgreen', linewidth=1.8,
+                            label=f'NB(\u03bc={_nb_mu:.1f}, \u03b1={_nb_alpha:.3f})')
+                _nb_label = (f'\u03c7\u00b2({_nb_df})={_nb_chi2:.2f}, p={_nb_p:.4f}\n'
+                             f'AIC={_nb_aic:.1f}  (\u0394AIC vs Poisson={_delta_aic:+.1f})')
+                ax_dfn.text(0.97, 0.97, _nb_label, transform=ax_dfn.transAxes,
+                            fontsize=8, va='top', ha='right',
+                            bbox=dict(boxstyle='round,pad=0.3', facecolor='lightyellow',
+                                      edgecolor='gray', alpha=0.85))
+                ax_dfn.set_title('Hanging Rootogram — Negative Binomial fit\n'
+                                 '(\u0394AIC < 0 = NB preferred over Poisson)')
+                ax_dfn.set_xlabel('Lick count per session')
+                ax_dfn.set_ylabel('\u221aObserved  (hung from \u221aExpected)')
+                ax_dfn.legend(fontsize=8)
+                ax_dfn.tick_params(axis='both', direction='in')
+                ax_dfn.spines['top'].set_visible(False)
+                ax_dfn.spines['right'].set_visible(False)
+            else:
+                ax_dfn.text(0.5, 0.5, 'NB fit unavailable\n(install statsmodels)',
+                            transform=ax_dfn.transAxes, ha='center', va='center', fontsize=10)
+                ax_dfn.axis('off')
+
+            # ── [2,0] Mean–variance plot ──────────────────────────────────────
+            # Each point = one mouse; Poisson expectation: var = mean (slope 1 line).
+            # NB expectation: var = mean + α·mean² (quadratic curve).
+            _mv_means = np.array(_df_per_mouse_means, dtype=float)
+            _mv_vars  = np.array(_df_per_mouse_vars,  dtype=float)
+            if len(_mv_means) > 0:
+                ax_dfmv.scatter(_mv_means, _mv_vars, color='mediumpurple', s=50,
+                                alpha=0.8, zorder=3, label='Per-mouse')
+                _mv_x = np.linspace(0, max(_mv_means) * 1.1 + 1, 200)
+                ax_dfmv.plot(_mv_x, _mv_x, 'b--', linewidth=1.5,
+                             label='Poisson (var = mean)')
+                if not np.isnan(_nb_alpha):
+                    ax_dfmv.plot(_mv_x, _mv_x + _nb_alpha * _mv_x ** 2, 'g-',
+                                 linewidth=1.5,
+                                 label=f'NB (var = mean + {_nb_alpha:.3f}\u00b7mean\u00b2)')
+                ax_dfmv.set_title('Mean\u2013Variance Relationship\n(per-mouse; Poisson: var=mean)')
+                ax_dfmv.set_xlabel('Per-mouse mean lick count')
+                ax_dfmv.set_ylabel('Per-mouse variance (lick count)')
+                ax_dfmv.legend(fontsize=8)
+                ax_dfmv.tick_params(axis='both', direction='in')
+                ax_dfmv.spines['top'].set_visible(False)
+                ax_dfmv.spines['right'].set_visible(False)
+                # Annotate with dispersion index
+                _disp_text = (f'Dispersion index (pooled)\n'
+                              f'V/M = {_df_disp:.3f}  '
+                              f'(=1 Poisson; >1 overdispersed)')
+                ax_dfmv.text(0.03, 0.97, _disp_text, transform=ax_dfmv.transAxes,
+                             fontsize=8, va='top', ha='left',
+                             bbox=dict(boxstyle='round,pad=0.3', facecolor='#f0f4ff',
+                                       edgecolor='steelblue', alpha=0.88))
+            else:
+                ax_dfmv.text(0.5, 0.5, 'Insufficient data',
+                             transform=ax_dfmv.transAxes, ha='center', va='center')
+                ax_dfmv.axis('off')
+
+            # ── [2,1] Poisson Q-Q plot (pooled counts) ────────────────────────
+            # Sort observed counts; compare to quantiles of fitted Poisson.
+            _qq_obs_sorted = np.sort(_df_counts)
+            _n_pts = len(_qq_obs_sorted)
+            _probs  = (np.arange(1, _n_pts + 1) - 0.5) / _n_pts
+            _pois_qq_theoretical = _poisson_dist.ppf(_probs, _pois_lam)
+            ax_dfqq.scatter(_pois_qq_theoretical, _qq_obs_sorted,
+                            color='steelblue', s=10, alpha=0.5,
+                            label='Poisson Q-Q')
+            if not np.isnan(_nb_r):
+                _nb_qq_theoretical = _nbinom_dist.ppf(_probs, _nb_r, _nb_p_sc)
+                ax_dfqq.scatter(_nb_qq_theoretical, _qq_obs_sorted,
+                                color='darkgreen', s=10, alpha=0.5,
+                                marker='^', label='NB Q-Q')
+            _diag_max = max(float(_pois_qq_theoretical.max()), float(_qq_obs_sorted.max())) * 1.05
+            ax_dfqq.plot([0, _diag_max], [0, _diag_max], 'k--',
+                         linewidth=1.5, label='Perfect fit')
+            ax_dfqq.set_title('Count Q-Q Plot\n(Poisson = blue circles, NB = green triangles)')
+            ax_dfqq.set_xlabel('Theoretical quantiles')
+            ax_dfqq.set_ylabel('Observed quantiles')
+            ax_dfqq.legend(fontsize=8)
+            ax_dfqq.tick_params(axis='both', direction='in')
+            ax_dfqq.spines['top'].set_visible(False)
+            ax_dfqq.spines['right'].set_visible(False)
+
+            # ── Suptitle with key statistics ──────────────────────────────────
+            _preferred = ('Negative Binomial' if (not np.isnan(_delta_aic) and _delta_aic < -2)
+                          else ('Poisson' if (not np.isnan(_delta_aic) and _delta_aic > 2)
+                                else 'Inconclusive (|ΔAIC| ≤ 2)'))
+            _df_summary = (
+                f'Lick Count Distribution Fit  |  n={_df_n} sessions, '
+                f'{len(_mv_means)} mice  |  '
+                f'Mean={_df_mean:.1f}  Var={_df_var:.1f}  '
+                f'Dispersion V/M={_df_disp:.3f}  |  '
+                f'Poisson AIC={_pois_aic:.1f}  '
+                f'NB AIC={_nb_aic:.1f}  \u0394AIC={_delta_aic:+.1f}  '
+                f'\u2192 Preferred: {_preferred}'
+            )
+            expl_lick_distfit_fig.suptitle(_df_summary, fontsize=9, y=1.01, wrap=True)
+
+            # ── Console summary ───────────────────────────────────────────────
+            print('\n\u2500\u2500 Lick Count Distribution Fit \u2500\u2500')
+            print(f'  N sessions:        {_df_n}')
+            print(f'  N mice:            {len(_mv_means)}')
+            print(f'  Mean:              {_df_mean:.4f}')
+            print(f'  Variance:          {_df_var:.4f}')
+            print(f'  Dispersion (V/M):  {_df_disp:.4f}  (1 = Poisson; >1 = overdispersed)')
+            print(f'  Poisson  \u03bb={_pois_lam:.4f}  \u03c7\u00b2({_pois_df})={_pois_chi2:.4f}  p={_pois_p:.6f}  AIC={_pois_aic:.2f}')
+            if not np.isnan(_nb_r):
+                print(f'  NB       \u03bc={_nb_mu:.4f}  \u03b1={_nb_alpha:.4f}  r={_nb_r:.4f}  '
+                      f'\u03c7\u00b2({_nb_df})={_nb_chi2:.4f}  p={_nb_p:.6f}  AIC={_nb_aic:.2f}')
+                print(f'  \u0394AIC (NB \u2212 Poisson) = {_delta_aic:+.4f}  '
+                      f'\u2192 Preferred: {_preferred}')
+            else:
+                print('  NB fit unavailable')
+
+        except ImportError as _e:
+            print(f'[expl_lick_distfit] Missing dependency: {_e}')
+            print('  Install statsmodels: conda install statsmodels')
+        except Exception as _e:
+            import traceback as _tb
+            print(f'[expl_lick_distfit] Error: {_e}')
+            _tb.print_exc()
+
+    # ── Exploratory: raw lick count box-and-whisker ───────────────────────────
+    expl_lick_boxplot_fig = None
+    if 'expl_lick_boxplot' in selected_plots:
+        _lkbx_names = []
+        _lkbx_vals  = []
+        _lkbx_all   = []
+        for _r in all_results:
+            _lc = pd.to_numeric(_r['df']['lick_count'], errors='coerce').dropna()
+            _lc_valid = _lc[_lc >= 0].values.tolist()
+            if _lc_valid:
+                _lkbx_names.append(_r['mouse'])
+                _lkbx_vals.append(_lc_valid)
+                _lkbx_all.extend(_lc_valid)
+
+        n_mice_lkbx = len(_lkbx_names)
+        expl_lick_boxplot_fig, (ax_lkbx1, ax_lkbx2) = plt.subplots(
+            1, 2, figsize=(max(10, n_mice_lkbx * 0.8 + 3), 6),
+            gridspec_kw={'width_ratios': [max(3, n_mice_lkbx), 1]},
+        )
+        ax_lkbx1.boxplot(_lkbx_vals, labels=_lkbx_names,
+                         patch_artist=True,
+                         boxprops=dict(facecolor='mediumpurple', alpha=0.6),
+                         medianprops=dict(color='indigo', linewidth=2),
+                         whiskerprops=dict(color='mediumpurple'),
+                         capprops=dict(color='mediumpurple'),
+                         flierprops=dict(marker='o', markerfacecolor='mediumpurple',
+                                         markersize=4, alpha=0.5, linestyle='none'))
+        ax_lkbx1.set_title('Raw lick count distribution per mouse\n(each session = one data point)')
+        ax_lkbx1.set_xlabel('Mouse')
+        ax_lkbx1.set_ylabel('Raw lick count per session')
+        ax_lkbx1.tick_params(axis='x', rotation=45)
+        ax_lkbx1.tick_params(axis='both', direction='in')
+        ax_lkbx1.spines['top'].set_visible(False)
+        ax_lkbx1.spines['right'].set_visible(False)
+
+        ax_lkbx2.boxplot([_lkbx_all], labels=['All mice'],
+                         patch_artist=True,
+                         boxprops=dict(facecolor='plum', alpha=0.6),
+                         medianprops=dict(color='purple', linewidth=2),
+                         whiskerprops=dict(color='plum'),
+                         capprops=dict(color='plum'),
+                         flierprops=dict(marker='o', markerfacecolor='plum',
+                                         markersize=4, alpha=0.5, linestyle='none'))
+        ax_lkbx2.set_title(f'Overall\n(n={len(_lkbx_all)} sessions)')
+        ax_lkbx2.set_ylabel('Raw lick count per session')
+        ax_lkbx2.tick_params(axis='both', direction='in')
+        ax_lkbx2.spines['top'].set_visible(False)
+        ax_lkbx2.spines['right'].set_visible(False)
+
+        expl_lick_boxplot_fig.suptitle('Raw Lick Count Box-and-Whisker — Exploratory', fontsize=11)
+        expl_lick_boxplot_fig.tight_layout()
+
+    # ── Exploratory: raw lick count RM ANOVA residual diagnostics ─────────────
+    # DV = log(1 + lick_count) — log(1+x) linearises count data for OLS.
+    # The +1 offset avoids log(0) on sessions with zero licks.
+    expl_lick_rm_anova_resid_fig = None
+    if 'expl_lick_rm_anova_resid' in selected_plots:
+        import warnings as _warnings_lk
+        try:
+            import statsmodels.formula.api as _smf_lk
+            from scipy.stats import shapiro as _shapiro_lkr, levene as _levene_lkr
+            from scipy.stats import probplot as _probplot_lkr
+
+            # ── Build long-format DataFrame (log(1+lick_count)) ──────────────
+            _lk_rows = []
+            for _r in all_results:
+                _df_r = _r['df'].copy()
+                _df_r = _df_r.reset_index(drop=True)
+                _df_r['session_num'] = np.arange(1, len(_df_r) + 1, dtype=float)
+                _df_r['mouse']       = _r['mouse']
+                _df_r['condition']   = _r['starting_condition']
+                _raw_lk = pd.to_numeric(_df_r['lick_count'], errors='coerce')
+                # log(1+x): defined for x >= 0; negative / NaN → NaN
+                _df_r['log1p_lick'] = np.where(
+                    (_raw_lk >= 0) & _raw_lk.notna(),
+                    np.log1p(_raw_lk.values.astype(float)),
+                    np.nan,
+                )
+                _lk_rows.append(_df_r[['mouse', 'condition', 'session_num', 'log1p_lick']])
+            _df_lk_long = pd.concat(_lk_rows, ignore_index=True).dropna(subset=['log1p_lick'])
+
+            # ── Fit OLS with mouse as fixed-effect blocking factor ────────────
+            _lk_formula = 'log1p_lick ~ C(condition) + session_num + C(condition):session_num + C(mouse)'
+            with _warnings_lk.catch_warnings():
+                _warnings_lk.simplefilter('ignore')
+                _lk_ols = _smf_lk.ols(_lk_formula, data=_df_lk_long).fit()
+
+            _lk_resid  = _lk_ols.resid.values
+            _lk_fitted = _lk_ols.fittedvalues.values
+            _lk_conds  = _df_lk_long['condition'].values
+            _lk_resid_mean = float(np.mean(_lk_resid))
+            _lk_resid_var  = float(_lk_ols.mse_resid)
+            _lk_resid_sd   = float(np.sqrt(_lk_resid_var))
+            _lk_r2         = float(_lk_ols.rsquared)
+            _lk_r2_adj     = float(_lk_ols.rsquared_adj)
+            _lk_y_var      = float(_df_lk_long['log1p_lick'].var(ddof=1))
+            _lk_y_mean     = float(_df_lk_long['log1p_lick'].mean())
+            _lk_unexplained = 1.0 - _lk_r2
+            _lk_snr         = float(np.mean(_lk_fitted)) / _lk_resid_sd if _lk_resid_sd > 0 else np.nan
+
+            # PRESS / predicted R²
+            try:
+                _lk_influence = _lk_ols.get_influence()
+                _lk_hat       = _lk_influence.hat_matrix_diag
+                _lk_press_r   = _lk_resid / (1.0 - np.clip(_lk_hat, None, 0.9999))
+                _lk_press     = float(np.sum(_lk_press_r ** 2))
+                _lk_ss_total  = float(np.sum((_df_lk_long['log1p_lick'].values - _lk_y_mean) ** 2))
+                _lk_r2_pred   = float(1.0 - _lk_press / _lk_ss_total) if _lk_ss_total > 0 else np.nan
+            except Exception:
+                _lk_press, _lk_r2_pred, _lk_hat = np.nan, np.nan, None
+                _lk_influence = None
+
+            # ── Shapiro-Wilk on residuals ─────────────────────────────────────
+            _lk_sw_stat, _lk_sw_p = (_shapiro_lkr(_lk_resid)
+                                      if len(_lk_resid) >= 3 else (np.nan, np.nan))
+
+            # ── Levene's test across condition groups ─────────────────────────
+            _lk_cond_groups = [_lk_resid[_lk_conds == c] for c in np.unique(_lk_conds)
+                               if np.sum(_lk_conds == c) >= 2]
+            if len(_lk_cond_groups) >= 2:
+                _lk_lev_stat, _lk_lev_p = _levene_lkr(*_lk_cond_groups)
+            else:
+                _lk_lev_stat, _lk_lev_p = np.nan, np.nan
+
+            # ── pingouin mixed ANOVA table (optional) ─────────────────────────
+            _lk_pg_text = ''
+            try:
+                import pingouin as _pg_lk
+                _lk_pg_result = _pg_lk.mixed_anova(
+                    data=_df_lk_long, dv='log1p_lick', within='session_num',
+                    between='condition', subject='mouse',
+                )
+                _lk_pg_lines = ['Mixed ANOVA (pingouin):']
+                for _, _row in _lk_pg_result.iterrows():
+                    _src  = _row.get('Source', '')
+                    _f    = _row.get('F', np.nan)
+                    _pval = _row.get('p-unc', np.nan)
+                    _eta  = _row.get('np2', np.nan)
+                    _lk_pg_lines.append(
+                        f"  {_src:<28} F={_f:.3f}  p={_pval:.4f}  \u03b7\u00b2={_eta:.3f}"
+                    )
+                _lk_pg_text = '\n'.join(_lk_pg_lines)
+            except Exception:
+                _lk_pg_text = 'pingouin not available \u2014 ANOVA table omitted'
+
+            # ── Cook's D and leverage ─────────────────────────────────────────
+            _lk_mice_labels   = _df_lk_long['mouse'].values
+            _lk_sess_nums_lbl = _df_lk_long['session_num'].values.astype(int)
+            _lk_obs_labels    = np.array([f'{m}\nS{s}' for m, s in
+                                          zip(_lk_mice_labels, _lk_sess_nums_lbl)])
+            _lk_obs_index     = np.arange(len(_lk_resid))
+            try:
+                _lk_cooks_d  = _lk_influence.cooks_distance[0]
+                _lk_lev_diag = _lk_hat.copy()
+                _lk_n_params = len(_lk_ols.params)
+                _lk_cooks_thresh = 4.0 / max(len(_lk_resid) - _lk_n_params, 1)
+                _lk_lev_thresh   = 2.0 * _lk_n_params / max(len(_lk_resid), 1)
+                _lk_high_cooks   = np.where(_lk_cooks_d > _lk_cooks_thresh)[0]
+                _lk_high_lev     = np.where(_lk_lev_diag > _lk_lev_thresh)[0]
+            except Exception:
+                _lk_cooks_d = _lk_lev_diag = None
+                _lk_cooks_thresh = _lk_lev_thresh = np.nan
+                _lk_high_cooks = _lk_high_lev = np.array([], dtype=int)
+
+            # ── Build figure: 3 rows × 2 cols ────────────────────────────────
+            expl_lick_rm_anova_resid_fig, _lk_axes = plt.subplots(3, 2, figsize=(13, 15))
+            (ax_lkqq, ax_lkrh), (ax_lkrf, ax_lkrs), (ax_lkcd, ax_lklv) = _lk_axes
+
+            # ── Q-Q plot ──────────────────────────────────────────────────────
+            (_lk_qq_osm, _lk_qq_osr), (_lk_qq_slope, _lk_qq_int, _) = _probplot_lkr(_lk_resid, dist='norm')
+            ax_lkqq.plot(_lk_qq_osm, _lk_qq_osr, 'o', color='mediumpurple',
+                         markersize=4, alpha=0.7, label='Residuals')
+            ax_lkqq.plot(
+                [_lk_qq_osm[0], _lk_qq_osm[-1]],
+                [_lk_qq_slope * _lk_qq_osm[0] + _lk_qq_int,
+                 _lk_qq_slope * _lk_qq_osm[-1] + _lk_qq_int],
+                'r-', linewidth=1.5, label='Normal line',
+            )
+            ax_lkqq.set_title('Normal Q-Q Plot of Residuals')
+            ax_lkqq.set_xlabel('Theoretical quantiles')
+            ax_lkqq.set_ylabel('Sample quantiles')
+            ax_lkqq.tick_params(axis='both', direction='in')
+            ax_lkqq.spines['top'].set_visible(False)
+            ax_lkqq.spines['right'].set_visible(False)
+            ax_lkqq.legend(fontsize=8)
+            _lk_sw_label = (f'Shapiro-Wilk: W={_lk_sw_stat:.3f}, p={_lk_sw_p:.4f}\n'
+                            f'{"Normal (p>0.05)" if _lk_sw_p > 0.05 else "Non-normal (p\u22640.05)"}')
+            ax_lkqq.text(0.03, 0.97, _lk_sw_label, transform=ax_lkqq.transAxes,
+                         fontsize=8, va='top', ha='left',
+                         bbox=dict(boxstyle='round,pad=0.3', facecolor='lightyellow',
+                                   edgecolor='gray', alpha=0.8))
+            _lk_formula_label = (
+                'Error terms: \u03b5\u1d62 = y\u1d62 \u2212 \u0177\u1d62\n'
+                'y\u1d62 = log(1 + lick_count, session i)\n'
+                '\u0177\u1d62 = model fitted value\n'
+                'Model: log(1+lick) ~ condition\n'
+                '       + session + condition\u00d7session\n'
+                '       + mouse  (blocking factor)'
+            )
+            ax_lkqq.text(0.97, 0.03, _lk_formula_label, transform=ax_lkqq.transAxes,
+                         fontsize=7.5, va='bottom', ha='right', family='monospace',
+                         bbox=dict(boxstyle='round,pad=0.35', facecolor='#f5f5f5',
+                                   edgecolor='gray', alpha=0.88))
+
+            # ── Residual histogram ────────────────────────────────────────────
+            from scipy.stats import gaussian_kde as _gkde_lkr
+            ax_lkrh.hist(_lk_resid, bins='auto', color='mediumpurple', alpha=0.65,
+                         edgecolor='white', linewidth=0.5, density=True)
+            if len(_lk_resid) >= 3:
+                _lk_kde_x = np.linspace(_lk_resid.min(), _lk_resid.max(), 300)
+                try:
+                    _lk_kde2 = _gkde_lkr(_lk_resid)
+                    ax_lkrh.plot(_lk_kde_x, _lk_kde2(_lk_kde_x), color='indigo',
+                                 linewidth=2, label='KDE')
+                except Exception:
+                    pass
+            ax_lkrh.axvline(0, color='red', linewidth=1.5, linestyle='--', label='Zero')
+            ax_lkrh.axvline(_lk_resid_mean, color='darkorange', linewidth=1.5,
+                            linestyle=':', label=f'Mean={_lk_resid_mean:.3f}')
+            ax_lkrh.set_title('Histogram of Residuals')
+            ax_lkrh.set_xlabel('Residual \u03b5\u1d62  [log(1+count) units]')
+            ax_lkrh.set_ylabel('Density')
+            ax_lkrh.tick_params(axis='both', direction='in')
+            ax_lkrh.spines['top'].set_visible(False)
+            ax_lkrh.spines['right'].set_visible(False)
+            ax_lkrh.legend(fontsize=8)
+            _lk_r2_pred_str = f'{_lk_r2_pred:.4f}' if not np.isnan(_lk_r2_pred) else 'n/a'
+            _lk_stats_box = (
+                f'E[\u03b5]         = {_lk_resid_mean:+.5f}  (\u22480 by OLS)\n'
+                f'Var(\u03b5)  = MSE = {_lk_resid_var:.5f}\n'
+                f'SD(\u03b5)   = RMSE = {_lk_resid_sd:.5f}\n'
+                f'\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\n'
+                f'Var(Y)         = {_lk_y_var:.5f}\n'
+                f'Var(\u03b5)/Var(Y) = {_lk_unexplained:.4f}  (= 1\u2212R\u00b2)\n'
+                f'R\u00b2             = {_lk_r2:.4f}\n'
+                f'R\u00b2 adj         = {_lk_r2_adj:.4f}\n'
+                f'R\u00b2 pred (PRESS) = {_lk_r2_pred_str}\n'
+                f'SNR (fitted/SD\u03b5) = {_lk_snr:.3f}'
+            )
+            ax_lkrh.text(0.98, 0.98, _lk_stats_box, transform=ax_lkrh.transAxes,
+                         fontsize=7.5, va='top', ha='right', family='monospace',
+                         bbox=dict(boxstyle='round,pad=0.35', facecolor='#f0f4ff',
+                                   edgecolor='steelblue', alpha=0.92))
+
+            # ── Residuals vs Fitted ───────────────────────────────────────────
+            _lk_uniq_conds = np.unique(_lk_conds)
+            _lk_cond_colors = generate_colors(max(len(_lk_uniq_conds), 1))
+            _lk_cond_color  = {c: _lk_cond_colors[i] for i, c in enumerate(_lk_uniq_conds)}
+            for _lkc in _lk_uniq_conds:
+                _lkmask = _lk_conds == _lkc
+                ax_lkrf.scatter(_lk_fitted[_lkmask], _lk_resid[_lkmask],
+                                color=_lk_cond_color[_lkc], alpha=0.5, s=18, label=str(_lkc))
+            ax_lkrf.axhline(0, color='red', linewidth=1.5, linestyle='--')
+            try:
+                from statsmodels.nonparametric.smoothers_lowess import lowess as _lk_lowess
+                _lk_lw = _lk_lowess(_lk_resid, _lk_fitted, frac=0.4)
+                ax_lkrf.plot(_lk_lw[:, 0], _lk_lw[:, 1], color='black',
+                             linewidth=1.5, linestyle='-', label='Lowess')
+            except Exception:
+                pass
+            ax_lkrf.set_title('Residuals vs Fitted Values')
+            ax_lkrf.set_xlabel('Fitted values [log(1+count) units]')
+            ax_lkrf.set_ylabel('Residuals [log(1+count) units]')
+            ax_lkrf.tick_params(axis='both', direction='in')
+            ax_lkrf.spines['top'].set_visible(False)
+            ax_lkrf.spines['right'].set_visible(False)
+            ax_lkrf.legend(fontsize=8, title='Condition')
+
+            # ── Residuals vs session number ───────────────────────────────────
+            _lk_sess_nums = _df_lk_long['session_num'].values
+            ax_lkrs.scatter(_lk_sess_nums, _lk_resid,
+                            color='mediumpurple', alpha=0.4, s=18)
+            ax_lkrs.axhline(0, color='red', linewidth=1.5, linestyle='--')
+            try:
+                _lk_lw2 = _lk_lowess(_lk_resid, _lk_sess_nums, frac=0.4)
+                ax_lkrs.plot(_lk_lw2[:, 0], _lk_lw2[:, 1], color='black',
+                             linewidth=1.5, linestyle='-', label='Lowess')
+                ax_lkrs.legend(fontsize=8)
+            except Exception:
+                pass
+            ax_lkrs.set_title('Residuals vs Session Number\n(check for time-trend)')
+            ax_lkrs.set_xlabel('Session number')
+            ax_lkrs.set_ylabel('Residuals [log(1+count) units]')
+            ax_lkrs.tick_params(axis='both', direction='in')
+            ax_lkrs.spines['top'].set_visible(False)
+            ax_lkrs.spines['right'].set_visible(False)
+
+            # ── Cook's D bar chart ────────────────────────────────────────────
+            if _lk_cooks_d is not None:
+                _lk_cd_colors = np.where(_lk_cooks_d > _lk_cooks_thresh, 'crimson', 'mediumpurple')
+                ax_lkcd.bar(_lk_obs_index, _lk_cooks_d, color=_lk_cd_colors, alpha=0.75, width=0.8)
+                ax_lkcd.axhline(_lk_cooks_thresh, color='crimson', linewidth=1.5,
+                                linestyle='--',
+                                label=f'Threshold 4/(n\u2212p)={_lk_cooks_thresh:.3f}')
+                for _idx in _lk_high_cooks:
+                    ax_lkcd.text(_idx, _lk_cooks_d[_idx] * 1.04, _lk_obs_labels[_idx],
+                                 fontsize=6, ha='center', va='bottom', color='crimson',
+                                 linespacing=1.2)
+                ax_lkcd.set_title(
+                    f"Cook's D per Observation\n"
+                    f"({len(_lk_high_cooks)} flagged > threshold, shown in red)"
+                )
+                ax_lkcd.set_xlabel('Observation index')
+                ax_lkcd.set_ylabel("Cook's D")
+                ax_lkcd.tick_params(axis='both', direction='in')
+                ax_lkcd.spines['top'].set_visible(False)
+                ax_lkcd.spines['right'].set_visible(False)
+                ax_lkcd.legend(fontsize=8)
+            else:
+                ax_lkcd.text(0.5, 0.5, "Cook's D unavailable",
+                             transform=ax_lkcd.transAxes, ha='center', va='center')
+                ax_lkcd.axis('off')
+
+            # ── Leverage vs Cook's D (influence plot) ─────────────────────────
+            if _lk_cooks_d is not None:
+                for _lkc in _lk_uniq_conds:
+                    _lkmask = _lk_conds == _lkc
+                    ax_lklv.scatter(_lk_lev_diag[_lkmask], _lk_cooks_d[_lkmask],
+                                    color=_lk_cond_color[_lkc], alpha=0.6,
+                                    s=20, label=str(_lkc))
+                ax_lklv.axvline(_lk_lev_thresh, color='darkorange', linewidth=1.5,
+                                linestyle='--',
+                                label=f'Leverage 2p/n={_lk_lev_thresh:.3f}')
+                ax_lklv.axhline(_lk_cooks_thresh, color='crimson', linewidth=1.5,
+                                linestyle='--',
+                                label=f"Cook's D 4/(n\u2212p)={_lk_cooks_thresh:.3f}")
+                _lk_both_flag = np.where((_lk_cooks_d > _lk_cooks_thresh) &
+                                         (_lk_lev_diag > _lk_lev_thresh))[0]
+                for _idx in _lk_both_flag:
+                    ax_lklv.annotate(_lk_obs_labels[_idx],
+                                     (_lk_lev_diag[_idx], _lk_cooks_d[_idx]),
+                                     textcoords='offset points', xytext=(4, 4),
+                                     fontsize=6, color='crimson')
+                ax_lklv.set_title(
+                    f'Leverage vs Cook\u2019s D (Influence Plot)\n'
+                    f'High-leverage: {len(_lk_high_lev)} obs  |  '
+                    f'High-influence: {len(_lk_high_cooks)} obs  |  '
+                    f'Both: {len(_lk_both_flag)} obs'
+                )
+                ax_lklv.set_xlabel('Leverage h\u1d62\u1d62')
+                ax_lklv.set_ylabel("Cook's D")
+                ax_lklv.tick_params(axis='both', direction='in')
+                ax_lklv.spines['top'].set_visible(False)
+                ax_lklv.spines['right'].set_visible(False)
+                ax_lklv.legend(fontsize=7, title='Condition', ncol=2)
+            else:
+                ax_lklv.text(0.5, 0.5, 'Leverage unavailable',
+                             transform=ax_lklv.transAxes, ha='center', va='center')
+                ax_lklv.axis('off')
+
+            # ── Suptitle: summary stats ───────────────────────────────────────
+            _lk_n_mice   = _df_lk_long['mouse'].nunique()
+            _lk_n_obs    = len(_df_lk_long)
+            _lk_lev_str  = (f'Levene (across conditions): F={_lk_lev_stat:.3f}, p={_lk_lev_p:.4f}'
+                            if not np.isnan(_lk_lev_p)
+                            else 'Levene: insufficient groups')
+            _lk_summary  = (
+                f'Raw Lick Count RM ANOVA residual diagnostics  |  '
+                f'DV = log(1+lick_count)  |  '
+                f'n={_lk_n_mice} mice, {_lk_n_obs} obs  |  '
+                f'E[\u03b5]={_lk_resid_mean:+.4f} (\u22480)  '
+                f'Var(\u03b5)={_lk_resid_var:.4f}  SD(\u03b5)={_lk_resid_sd:.4f}  '
+                f'Var(\u03b5)/Var(Y)={_lk_unexplained:.3f} (=1\u2212R\u00b2)  '
+                f'R\u00b2={_lk_r2:.3f}  |  {_lk_lev_str}'
+            )
+            expl_lick_rm_anova_resid_fig.suptitle(_lk_summary, fontsize=8.5, y=1.01, wrap=True)
+
+            if _lk_pg_text:
+                expl_lick_rm_anova_resid_fig.text(
+                    0.01, -0.02, _lk_pg_text,
+                    fontsize=7.5, family='monospace', va='top',
+                    transform=expl_lick_rm_anova_resid_fig.transFigure,
+                    bbox=dict(boxstyle='round,pad=0.4', facecolor='#f5f5f5',
+                              edgecolor='gray', alpha=0.9),
+                )
+
+            expl_lick_rm_anova_resid_fig.tight_layout()
+            print('\n\u2500\u2500 Raw Lick Count RM ANOVA Residual Diagnostics \u2500\u2500')
+            print(f'  Formula:          \u03b5\u1d62 = y\u1d62 \u2212 \u0177\u1d62  (observed \u2212 model fitted value)')
+            print(f'  Model DV:         log(1 + lick_count)  [log(1+count) units]')
+            print(f'  N mice:           {_lk_n_mice}')
+            print(f'  N observations:   {_lk_n_obs}')
+            print(f'  E[\u03b5]  (mean):    {_lk_resid_mean:+.6f}  (\u22480 by OLS construction)')
+            print(f'  Var(\u03b5) (MSE):    {_lk_resid_var:.6f}')
+            print(f'  SD(\u03b5)  (RMSE):   {_lk_resid_sd:.6f}')
+            print(f'  Var(Y):           {_lk_y_var:.6f}')
+            print(f'  Var(\u03b5)/Var(Y):   {_lk_unexplained:.4f}  (= 1 \u2212 R\u00b2 = unexplained variance fraction)')
+            print(f'  R\u00b2:              {_lk_r2:.4f}')
+            print(f'  R\u00b2 adj:          {_lk_r2_adj:.4f}')
+            print(f'  R\u00b2 pred (PRESS): {_lk_r2_pred_str}  (leave-one-out; gap vs R\u00b2 indicates overfitting)')
+            print(f'  SNR (\u0177\u0305/SD\u03b5):    {_lk_snr:.4f}')
+            print(f'  Shapiro-Wilk:     W={_lk_sw_stat:.4f}, p={_lk_sw_p:.6f}')
+            print(f'  Levene test:      F={_lk_lev_stat:.4f}, p={_lk_lev_p:.6f}')
+            if _lk_cooks_d is not None:
+                print(f'  Cook\'s D thresh:  {_lk_cooks_thresh:.4f}  (4/(n\u2212p))')
+                print(f'  Leverage thresh:  {_lk_lev_thresh:.4f}  (2p/n)')
+                _lk_flag_strs = [f'{m}(S{s})' for m, s in
+                                 zip(_lk_mice_labels[_lk_high_cooks], _lk_sess_nums_lbl[_lk_high_cooks])]
+                print(f'  High-influence obs (Cook\'s D > thresh): {len(_lk_high_cooks)}'
+                      + (f'  [{", ".join(_lk_flag_strs)}]' if len(_lk_high_cooks) else ''))
+                _lk_lev_strs = [f'{m}(S{s})' for m, s in
+                                zip(_lk_mice_labels[_lk_high_lev], _lk_sess_nums_lbl[_lk_high_lev])]
+                print(f'  High-leverage obs (h\u1d62\u1d62 > thresh):      {len(_lk_high_lev)}'
+                      + (f'  [{", ".join(_lk_lev_strs)}]' if len(_lk_high_lev) else ''))
+            if _lk_pg_text:
+                print(_lk_pg_text)
+
+        except ImportError as _e:
+            print(f'[expl_lick_rm_anova_resid] Missing dependency: {_e}')
+            print('  Install statsmodels: conda install statsmodels')
+        except Exception as _e:
+            print(f'[expl_lick_rm_anova_resid] Error: {_e}')
+
     # Create collapsed condition bar plot for bout count
     condition_bout_count_bar_fig = None
     if 'condition_bout_count_bar' in selected_plots:
@@ -4965,6 +6568,8 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     epoch_punish_cap_sess_sex_per_mouse_fig   = epoch_punish_cap_sess_sex_fig   = None
     epoch_reward_speed_pre_post_fig = None
     epoch_reward_speed_diff_fig = None
+    epoch_reward_cap_pre_post_fig = None
+    epoch_reward_cap_diff_fig = None
     epoch_reward_speed_pre_post_entry_fig = None
     epoch_reward_speed_diff_entry_fig = None
     epoch_reward_speed_pre_post_entry_1s_fig = None
@@ -4975,6 +6580,10 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     epoch_punish_speed_diff_fig = None
     epoch_punish_speed_pre_post_entry_fig = None
     epoch_punish_speed_diff_entry_fig = None
+    epoch_punish_cap_pre_post_fig = None
+    epoch_punish_cap_diff_fig = None
+    epoch_punish_cap_pre_post_entry_fig = None
+    epoch_punish_cap_diff_entry_fig = None
     _epoch_keys = {'epoch_reward_speed', 'epoch_reward_cap',
                    'epoch_reward_speed_sess', 'epoch_reward_cap_sess',
                    'epoch_reward_speed_early_late', 'epoch_reward_cap_early_late',
@@ -4988,6 +6597,8 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                    'epoch_punish_speed_sess_sex', 'epoch_punish_cap_sess_sex',
                    'epoch_reward_speed_pre_post',
                    'epoch_reward_speed_diff',
+                   'epoch_reward_cap_pre_post',
+                   'epoch_reward_cap_diff',
                    'epoch_reward_speed_pre_post_entry',
                    'epoch_reward_speed_diff_entry',
                    'epoch_reward_speed_pre_post_entry_1s',
@@ -4997,7 +6608,11 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                    'epoch_punish_speed_pre_post',
                    'epoch_punish_speed_diff',
                    'epoch_punish_speed_pre_post_entry',
-                   'epoch_punish_speed_diff_entry'}
+                   'epoch_punish_speed_diff_entry',
+                   'epoch_punish_cap_pre_post',
+                   'epoch_punish_cap_diff',
+                   'epoch_punish_cap_pre_post_entry',
+                   'epoch_punish_cap_diff_entry'}
     if _epoch_keys & set(selected_plots):
         _any_speed = any(r.get('speed_epoch_matrix') is not None for r in all_results)
         _any_cap   = any(r.get('cap_epoch_matrix')   is not None for r in all_results)
@@ -5657,6 +7272,374 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                 )
                 epoch_punish_speed_diff_entry_fig.tight_layout()
 
+        # ── Punishment zone: pre/post 0.65 s cutoff capacitive bar chart ─────
+        if 'epoch_punish_cap_pre_post' in selected_plots and _any_punish_cap:
+            _pcp_pre_mask  = (EPOCH_CANONICAL_TIME >= 0.0)  & (EPOCH_CANONICAL_TIME <= 0.65)
+            _pcp_post_mask = (EPOCH_CANONICAL_TIME >  0.65) & (EPOCH_CANONICAL_TIME <= 1.30)
+            _pcp_by_cond: dict = {}
+            for _r in all_results:
+                _sess_mat = _r.get('punish_cap_epoch_session_means')
+                if _sess_mat is None or _sess_mat.shape[0] == 0:
+                    continue
+                _cond = _r['starting_condition']
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    _pre_per_sess  = np.nanmean(_sess_mat[:, _pcp_pre_mask],  axis=1)
+                    _post_per_sess = np.nanmean(_sess_mat[:, _pcp_post_mask], axis=1)
+                    _pre_mean  = float(np.nanmean(_pre_per_sess))
+                    _post_mean = float(np.nanmean(_post_per_sess))
+                _pcp_by_cond.setdefault(_cond, []).append((_r['mouse'], _pre_mean, _post_mean))
+
+            if _pcp_by_cond:
+                _conds_pcp   = sorted(_pcp_by_cond.keys())
+                _n_conds_pcp = len(_conds_pcp)
+                epoch_punish_cap_pre_post_fig, _axs_pcp = plt.subplots(
+                    1, _n_conds_pcp,
+                    figsize=(4 * _n_conds_pcp + 1, 5),
+                    sharey=True, squeeze=False,
+                )
+                _all_pcp_yvals = []
+                for _ci, _cond in enumerate(_conds_pcp):
+                    _ax       = _axs_pcp[0, _ci]
+                    _color    = condition_color_map.get(_cond, 'steelblue')
+                    _entries  = _pcp_by_cond[_cond]
+                    _n_pcp    = len(_entries)
+                    _pre_vals = [e[1] for e in _entries]
+                    _post_vals= [e[2] for e in _entries]
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _mn_pre   = float(np.nanmean(_pre_vals))
+                        _mn_post  = float(np.nanmean(_post_vals))
+                        _sem_pre  = (float(np.nanstd(_pre_vals,  ddof=1) / np.sqrt(_n_pcp))
+                                     if _n_pcp > 1 else 0.0)
+                        _sem_post = (float(np.nanstd(_post_vals, ddof=1) / np.sqrt(_n_pcp))
+                                     if _n_pcp > 1 else 0.0)
+                    _all_pcp_yvals.extend([_mn_pre + _sem_pre, _mn_post + _sem_post,
+                                           _mn_pre - _sem_pre, _mn_post - _sem_post])
+                    _all_pcp_yvals.extend(_pre_vals + _post_vals)
+                    _ax.bar(0, _mn_pre,  width=0.5, color=_color, alpha=0.7,
+                            yerr=_sem_pre,  capsize=7,
+                            error_kw={'elinewidth': 1.5, 'capthick': 1.5})
+                    _ax.bar(1, _mn_post, width=0.5, color=_color, alpha=0.7,
+                            yerr=_sem_post, capsize=7,
+                            error_kw={'elinewidth': 1.5, 'capthick': 1.5})
+                    _rng_pcp = np.random.default_rng(seed=42)
+                    _jitter_pcp = (_rng_pcp.random(_n_pcp) - 0.5) * 0.18
+                    for _j, (_mname, _pv, _qv) in enumerate(_entries):
+                        _xp = 0 + _jitter_pcp[_j]
+                        _xq = 1 + _jitter_pcp[_j]
+                        _ax.plot([_xp, _xq], [_pv, _qv], '-',
+                                 color=_color, linewidth=0.9, alpha=0.5, zorder=2)
+                        _ax.plot(_xp, _pv, 'o', color='white',
+                                 markeredgecolor=_color, markeredgewidth=1.5,
+                                 markersize=7, zorder=3)
+                        _ax.plot(_xq, _qv, 'o', color='white',
+                                 markeredgecolor=_color, markeredgewidth=1.5,
+                                 markersize=7, zorder=3)
+                    _ax.set_xticks([0, 1])
+                    _ax.set_xticklabels(['Pre-cutoff\n(0\u20130.65 s)', 'Post-cutoff\n(0.65\u20131.3 s)'],
+                                        fontsize=9)
+                    _ax.set_title(f'{_cond}\n(n={_n_pcp} mice)', fontsize=10)
+                    _ax.set_ylabel('Capacitive Sensor (z-score)' if _ci == 0 else '', fontsize=9)
+                    _ax.set_xlim(-0.6, 1.6)
+                    _ax.axhline(0, color='black', linewidth=0.8, linestyle='--', zorder=1)
+                    _ax.tick_params(axis='both', direction='in')
+                    _ax.spines['top'].set_visible(False)
+                    _ax.spines['right'].set_visible(False)
+                if _all_pcp_yvals:
+                    _ymax_pcp = float(np.nanmax(_all_pcp_yvals))
+                    _ymin_pcp = float(np.nanmin(_all_pcp_yvals))
+                else:
+                    _ymax_pcp, _ymin_pcp = 1.0, -1.0
+                _pad_pcp = max(abs(_ymax_pcp), abs(_ymin_pcp)) * 0.12 or 0.1
+                _axs_pcp[0, 0].set_ylim(_ymin_pcp - _pad_pcp, _ymax_pcp + _pad_pcp)
+                epoch_punish_cap_pre_post_fig.suptitle(
+                    'Average Capacitive Sensor (z-scored): Pre- vs Post-Cutoff (Punishment Zone)\n'
+                    '(session-averaged punishment zone entry epochs, by condition)',
+                    fontsize=12,
+                )
+                epoch_punish_cap_pre_post_fig.tight_layout()
+
+        # ── Punishment zone: pre-minus-post 0.65 s capacitive difference ─────
+        if 'epoch_punish_cap_diff' in selected_plots and _any_punish_cap:
+            _pcd_pre_mask  = (EPOCH_CANONICAL_TIME >= 0.0)  & (EPOCH_CANONICAL_TIME <= 0.65)
+            _pcd_post_mask = (EPOCH_CANONICAL_TIME >  0.65) & (EPOCH_CANONICAL_TIME <= 1.30)
+            _pcdiff_by_cond: dict = {}
+            for _r in all_results:
+                _sess_mat = _r.get('punish_cap_epoch_session_means')
+                if _sess_mat is None or _sess_mat.shape[0] == 0:
+                    continue
+                _cond = _r['starting_condition']
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    _pre_pcd  = float(np.nanmean(np.nanmean(_sess_mat[:, _pcd_pre_mask],  axis=1)))
+                    _post_pcd = float(np.nanmean(np.nanmean(_sess_mat[:, _pcd_post_mask], axis=1)))
+                _pcdiff_by_cond.setdefault(_cond, []).append((_r['mouse'], _pre_pcd - _post_pcd))
+
+            if _pcdiff_by_cond:
+                _conds_pcd   = sorted(_pcdiff_by_cond.keys())
+                _n_conds_pcd = len(_conds_pcd)
+                epoch_punish_cap_diff_fig, _ax_pcd = plt.subplots(
+                    1, 1, figsize=(max(4, _n_conds_pcd * 1.4 + 1.5), 5)
+                )
+                _all_pcdiff_vals = []
+                _bar_x_pcd = np.arange(_n_conds_pcd)
+                _rng_pcd   = np.random.default_rng(seed=42)
+                for _ci, _cond in enumerate(_conds_pcd):
+                    _color    = condition_color_map.get(_cond, 'steelblue')
+                    _entries  = _pcdiff_by_cond[_cond]
+                    _n_pcd    = len(_entries)
+                    _dvals_pcd = [e[1] for e in _entries]
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _mn_pcd  = float(np.nanmean(_dvals_pcd))
+                        _sem_pcd = (float(np.nanstd(_dvals_pcd, ddof=1) / np.sqrt(_n_pcd))
+                                    if _n_pcd > 1 else 0.0)
+                    _all_pcdiff_vals.extend(_dvals_pcd + [_mn_pcd + _sem_pcd, _mn_pcd - _sem_pcd])
+                    _ax_pcd.bar(_ci, _mn_pcd, width=0.55, color=_color, alpha=0.7,
+                                yerr=_sem_pcd, capsize=7,
+                                error_kw={'elinewidth': 1.5, 'capthick': 1.5})
+                    _jitter_pcd = (_rng_pcd.random(_n_pcd) - 0.5) * 0.22
+                    for _j, (_mname, _dv) in enumerate(_entries):
+                        _ax_pcd.plot(_ci + _jitter_pcd[_j], _dv, 'o',
+                                     color='white', markeredgecolor=_color,
+                                     markeredgewidth=1.5, markersize=7, zorder=3)
+                _ax_pcd.axhline(0, color='black', linewidth=0.9, linestyle='--', zorder=1)
+                _ax_pcd.set_xticks(_bar_x_pcd)
+                _ax_pcd.set_xticklabels(_conds_pcd, fontsize=10)
+                _ax_pcd.set_ylabel('Capacitive difference (z-score)\n[pre-cutoff \u2212 post-cutoff]', fontsize=9)
+                _ax_pcd.set_xlabel('Condition', fontsize=10)
+                if _all_pcdiff_vals:
+                    _ymax_pcd = float(np.nanmax(_all_pcdiff_vals))
+                    _ymin_pcd = float(np.nanmin(_all_pcdiff_vals))
+                    _pad_pcd  = max(abs(_ymax_pcd), abs(_ymin_pcd)) * 0.12 or 0.1
+                    _ax_pcd.set_ylim(_ymin_pcd - _pad_pcd, _ymax_pcd + _pad_pcd)
+                _ax_pcd.tick_params(axis='both', direction='in')
+                _ax_pcd.spines['top'].set_visible(False)
+                _ax_pcd.spines['right'].set_visible(False)
+
+                import itertools as _itertools_pcd
+                _pairs_pcd = list(_itertools_pcd.combinations(range(_n_conds_pcd), 2))
+                _ylim_cur_pcd = list(_ax_pcd.get_ylim())
+                _bracket_step_pcd = (_ylim_cur_pcd[1] - _ylim_cur_pcd[0]) * 0.14
+                _bracket_base_pcd = _ylim_cur_pcd[1]
+                for _pi, (_ia, _ib) in enumerate(_pairs_pcd):
+                    _vals_a_pcd = [e[1] for e in _pcdiff_by_cond[_conds_pcd[_ia]]]
+                    _vals_b_pcd = [e[1] for e in _pcdiff_by_cond[_conds_pcd[_ib]]]
+                    if len(_vals_a_pcd) < 2 or len(_vals_b_pcd) < 2:
+                        continue
+                    _u_pcd, _p_pcd = mannwhitneyu(_vals_a_pcd, _vals_b_pcd, alternative='two-sided')
+                    if _p_pcd < 0.001:
+                        _sig_pcd = f'p = {_p_pcd:.2e}***'
+                    elif _p_pcd < 0.01:
+                        _sig_pcd = f'p = {_p_pcd:.3f}**'
+                    elif _p_pcd < 0.05:
+                        _sig_pcd = f'p = {_p_pcd:.3f}*'
+                    else:
+                        _sig_pcd = f'p = {_p_pcd:.3f} (ns)'
+                    _bh_pcd = _bracket_base_pcd + _bracket_step_pcd * (_pi + 0.6)
+                    _ax_pcd.plot([_ia, _ia, _ib, _ib],
+                                 [_bh_pcd - _bracket_step_pcd * 0.15,
+                                  _bh_pcd, _bh_pcd,
+                                  _bh_pcd - _bracket_step_pcd * 0.15],
+                                 color='black', linewidth=1.0)
+                    _ax_pcd.text((_ia + _ib) / 2, _bh_pcd + _bracket_step_pcd * 0.05,
+                                 _sig_pcd, ha='center', va='bottom', fontsize=8)
+                if _pairs_pcd:
+                    _new_top_pcd = _bracket_base_pcd + _bracket_step_pcd * (len(_pairs_pcd) + 1.5)
+                    _ax_pcd.set_ylim(_ylim_cur_pcd[0], _new_top_pcd)
+
+                epoch_punish_cap_diff_fig.suptitle(
+                    'Pre- vs Post-Cutoff Capacitive (z-scored) Difference by Condition (Punishment Zone)\n'
+                    '(mean \u00b1 SEM across mice; positive = higher licking before 0.65 s cutoff; Mann-Whitney U)',
+                    fontsize=11,
+                )
+                epoch_punish_cap_diff_fig.tight_layout()
+
+        # ── Punishment zone: 1 s pre- vs 1 s post-zone entry cap bar chart ───
+        if 'epoch_punish_cap_pre_post_entry' in selected_plots and _any_punish_cap:
+            _pcpe_pre_mask  = (EPOCH_CANONICAL_TIME >= -1.0) & (EPOCH_CANONICAL_TIME <  0.0)
+            _pcpe_post_mask = (EPOCH_CANONICAL_TIME >= 0.0)  & (EPOCH_CANONICAL_TIME <= 1.0)
+            _pcpe_by_cond: dict = {}
+            for _r in all_results:
+                _sess_mat = _r.get('punish_cap_epoch_session_means')
+                if _sess_mat is None or _sess_mat.shape[0] == 0:
+                    continue
+                _cond = _r['starting_condition']
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    _pre_per_sess  = np.nanmean(_sess_mat[:, _pcpe_pre_mask],  axis=1)
+                    _post_per_sess = np.nanmean(_sess_mat[:, _pcpe_post_mask], axis=1)
+                    _pre_mean  = float(np.nanmean(_pre_per_sess))
+                    _post_mean = float(np.nanmean(_post_per_sess))
+                _pcpe_by_cond.setdefault(_cond, []).append((_r['mouse'], _pre_mean, _post_mean))
+
+            if _pcpe_by_cond:
+                _conds_pcpe   = sorted(_pcpe_by_cond.keys())
+                _n_conds_pcpe = len(_conds_pcpe)
+                epoch_punish_cap_pre_post_entry_fig, _axs_pcpe = plt.subplots(
+                    1, _n_conds_pcpe,
+                    figsize=(4 * _n_conds_pcpe + 1, 5),
+                    sharey=True, squeeze=False,
+                )
+                _all_pcpe_yvals = []
+                for _ci, _cond in enumerate(_conds_pcpe):
+                    _ax       = _axs_pcpe[0, _ci]
+                    _color    = condition_color_map.get(_cond, 'steelblue')
+                    _entries  = _pcpe_by_cond[_cond]
+                    _n_pcpe   = len(_entries)
+                    _pre_vals = [e[1] for e in _entries]
+                    _post_vals= [e[2] for e in _entries]
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _mn_pre   = float(np.nanmean(_pre_vals))
+                        _mn_post  = float(np.nanmean(_post_vals))
+                        _sem_pre  = (float(np.nanstd(_pre_vals,  ddof=1) / np.sqrt(_n_pcpe))
+                                     if _n_pcpe > 1 else 0.0)
+                        _sem_post = (float(np.nanstd(_post_vals, ddof=1) / np.sqrt(_n_pcpe))
+                                     if _n_pcpe > 1 else 0.0)
+                    _all_pcpe_yvals.extend([_mn_pre + _sem_pre, _mn_post + _sem_post,
+                                            _mn_pre - _sem_pre, _mn_post - _sem_post])
+                    _all_pcpe_yvals.extend(_pre_vals + _post_vals)
+                    _ax.bar(0, _mn_pre,  width=0.5, color=_color, alpha=0.7,
+                            yerr=_sem_pre,  capsize=7,
+                            error_kw={'elinewidth': 1.5, 'capthick': 1.5})
+                    _ax.bar(1, _mn_post, width=0.5, color=_color, alpha=0.7,
+                            yerr=_sem_post, capsize=7,
+                            error_kw={'elinewidth': 1.5, 'capthick': 1.5})
+                    _rng_pcpe = np.random.default_rng(seed=42)
+                    _jitter_pcpe = (_rng_pcpe.random(_n_pcpe) - 0.5) * 0.18
+                    for _j, (_mname, _pv, _qv) in enumerate(_entries):
+                        _xp = 0 + _jitter_pcpe[_j]
+                        _xq = 1 + _jitter_pcpe[_j]
+                        _ax.plot([_xp, _xq], [_pv, _qv], '-',
+                                 color=_color, linewidth=0.9, alpha=0.5, zorder=2)
+                        _ax.plot(_xp, _pv, 'o', color='white',
+                                 markeredgecolor=_color, markeredgewidth=1.5,
+                                 markersize=7, zorder=3)
+                        _ax.plot(_xq, _qv, 'o', color='white',
+                                 markeredgecolor=_color, markeredgewidth=1.5,
+                                 markersize=7, zorder=3)
+                    _ax.set_xticks([0, 1])
+                    _ax.set_xticklabels(['Pre-entry\n(\u22121\u20130 s)', 'Post-entry\n(0\u20131 s)'],
+                                        fontsize=9)
+                    _ax.set_title(f'{_cond}\n(n={_n_pcpe} mice)', fontsize=10)
+                    _ax.set_ylabel('Capacitive Sensor (z-score)' if _ci == 0 else '', fontsize=9)
+                    _ax.set_xlim(-0.6, 1.6)
+                    _ax.axhline(0, color='black', linewidth=0.8, linestyle='--', zorder=1)
+                    _ax.tick_params(axis='both', direction='in')
+                    _ax.spines['top'].set_visible(False)
+                    _ax.spines['right'].set_visible(False)
+                if _all_pcpe_yvals:
+                    _ymax_pcpe = float(np.nanmax(_all_pcpe_yvals))
+                    _ymin_pcpe = float(np.nanmin(_all_pcpe_yvals))
+                else:
+                    _ymax_pcpe, _ymin_pcpe = 1.0, -1.0
+                _pad_pcpe = max(abs(_ymax_pcpe), abs(_ymin_pcpe)) * 0.12 or 0.1
+                _axs_pcpe[0, 0].set_ylim(_ymin_pcpe - _pad_pcpe, _ymax_pcpe + _pad_pcpe)
+                epoch_punish_cap_pre_post_entry_fig.suptitle(
+                    'Average Capacitive Sensor (z-scored): 1 s Pre- vs 1 s Post-Zone Entry (Punishment Zone)\n'
+                    '(session-averaged punishment zone entry epochs, by condition)',
+                    fontsize=12,
+                )
+                epoch_punish_cap_pre_post_entry_fig.tight_layout()
+
+        # ── Punishment zone: pre-minus-post zone entry cap difference ─────────
+        if 'epoch_punish_cap_diff_entry' in selected_plots and _any_punish_cap:
+            _pcde_pre_mask  = (EPOCH_CANONICAL_TIME >= -1.0) & (EPOCH_CANONICAL_TIME <  0.0)
+            _pcde_post_mask = (EPOCH_CANONICAL_TIME >= 0.0)  & (EPOCH_CANONICAL_TIME <= 1.0)
+            _pcdentry_by_cond: dict = {}
+            for _r in all_results:
+                _sess_mat = _r.get('punish_cap_epoch_session_means')
+                if _sess_mat is None or _sess_mat.shape[0] == 0:
+                    continue
+                _cond = _r['starting_condition']
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    _pre_pcde  = float(np.nanmean(np.nanmean(_sess_mat[:, _pcde_pre_mask],  axis=1)))
+                    _post_pcde = float(np.nanmean(np.nanmean(_sess_mat[:, _pcde_post_mask], axis=1)))
+                _pcdentry_by_cond.setdefault(_cond, []).append((_r['mouse'], _pre_pcde - _post_pcde))
+
+            if _pcdentry_by_cond:
+                _conds_pcde   = sorted(_pcdentry_by_cond.keys())
+                _n_conds_pcde = len(_conds_pcde)
+                epoch_punish_cap_diff_entry_fig, _ax_pcde = plt.subplots(
+                    1, 1, figsize=(max(4, _n_conds_pcde * 1.4 + 1.5), 5)
+                )
+                _all_pcde_vals = []
+                _bar_x_pcde = np.arange(_n_conds_pcde)
+                _rng_pcde   = np.random.default_rng(seed=42)
+                for _ci, _cond in enumerate(_conds_pcde):
+                    _color    = condition_color_map.get(_cond, 'steelblue')
+                    _entries  = _pcdentry_by_cond[_cond]
+                    _n_pcde   = len(_entries)
+                    _dvals_pcde = [e[1] for e in _entries]
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _mn_pcde  = float(np.nanmean(_dvals_pcde))
+                        _sem_pcde = (float(np.nanstd(_dvals_pcde, ddof=1) / np.sqrt(_n_pcde))
+                                     if _n_pcde > 1 else 0.0)
+                    _all_pcde_vals.extend(_dvals_pcde + [_mn_pcde + _sem_pcde, _mn_pcde - _sem_pcde])
+                    _ax_pcde.bar(_ci, _mn_pcde, width=0.55, color=_color, alpha=0.7,
+                                 yerr=_sem_pcde, capsize=7,
+                                 error_kw={'elinewidth': 1.5, 'capthick': 1.5})
+                    _jitter_pcde = (_rng_pcde.random(_n_pcde) - 0.5) * 0.22
+                    for _j, (_mname, _dv) in enumerate(_entries):
+                        _ax_pcde.plot(_ci + _jitter_pcde[_j], _dv, 'o',
+                                      color='white', markeredgecolor=_color,
+                                      markeredgewidth=1.5, markersize=7, zorder=3)
+                _ax_pcde.axhline(0, color='black', linewidth=0.9, linestyle='--', zorder=1)
+                _ax_pcde.set_xticks(_bar_x_pcde)
+                _ax_pcde.set_xticklabels(_conds_pcde, fontsize=10)
+                _ax_pcde.set_ylabel('Capacitive difference (z-score)\n[pre-entry \u2212 post-entry]', fontsize=9)
+                _ax_pcde.set_xlabel('Condition', fontsize=10)
+                if _all_pcde_vals:
+                    _ymax_pcde = float(np.nanmax(_all_pcde_vals))
+                    _ymin_pcde = float(np.nanmin(_all_pcde_vals))
+                    _pad_pcde  = max(abs(_ymax_pcde), abs(_ymin_pcde)) * 0.12 or 0.1
+                    _ax_pcde.set_ylim(_ymin_pcde - _pad_pcde, _ymax_pcde + _pad_pcde)
+                _ax_pcde.tick_params(axis='both', direction='in')
+                _ax_pcde.spines['top'].set_visible(False)
+                _ax_pcde.spines['right'].set_visible(False)
+
+                import itertools as _itertools_pcde
+                _pairs_pcde = list(_itertools_pcde.combinations(range(_n_conds_pcde), 2))
+                _ylim_cur_pcde = list(_ax_pcde.get_ylim())
+                _bracket_step_pcde = (_ylim_cur_pcde[1] - _ylim_cur_pcde[0]) * 0.14
+                _bracket_base_pcde = _ylim_cur_pcde[1]
+                for _pi, (_ia, _ib) in enumerate(_pairs_pcde):
+                    _vals_a_pcde = [e[1] for e in _pcdentry_by_cond[_conds_pcde[_ia]]]
+                    _vals_b_pcde = [e[1] for e in _pcdentry_by_cond[_conds_pcde[_ib]]]
+                    if len(_vals_a_pcde) < 2 or len(_vals_b_pcde) < 2:
+                        continue
+                    _u_pcde, _p_pcde = mannwhitneyu(_vals_a_pcde, _vals_b_pcde, alternative='two-sided')
+                    if _p_pcde < 0.001:
+                        _sig_pcde = f'p = {_p_pcde:.2e}***'
+                    elif _p_pcde < 0.01:
+                        _sig_pcde = f'p = {_p_pcde:.3f}**'
+                    elif _p_pcde < 0.05:
+                        _sig_pcde = f'p = {_p_pcde:.3f}*'
+                    else:
+                        _sig_pcde = f'p = {_p_pcde:.3f} (ns)'
+                    _bh_pcde = _bracket_base_pcde + _bracket_step_pcde * (_pi + 0.6)
+                    _ax_pcde.plot([_ia, _ia, _ib, _ib],
+                                  [_bh_pcde - _bracket_step_pcde * 0.15,
+                                   _bh_pcde, _bh_pcde,
+                                   _bh_pcde - _bracket_step_pcde * 0.15],
+                                  color='black', linewidth=1.0)
+                    _ax_pcde.text((_ia + _ib) / 2, _bh_pcde + _bracket_step_pcde * 0.05,
+                                  _sig_pcde, ha='center', va='bottom', fontsize=8)
+                if _pairs_pcde:
+                    _new_top_pcde = _bracket_base_pcde + _bracket_step_pcde * (len(_pairs_pcde) + 1.5)
+                    _ax_pcde.set_ylim(_ylim_cur_pcde[0], _new_top_pcde)
+
+                epoch_punish_cap_diff_entry_fig.suptitle(
+                    'Pre- vs Post-Zone Entry Capacitive (z-scored) Difference by Condition (Punishment Zone)\n'
+                    '(mean \u00b1 SEM across mice; positive = higher licking before zone entry; Mann-Whitney U)',
+                    fontsize=11,
+                )
+                epoch_punish_cap_diff_entry_fig.tight_layout()
+
         # ── Pre/post-reward delivery speed bar chart ───────────────────────
         if 'epoch_reward_speed_pre_post' in selected_plots and _any_speed:
             _pre_mask  = (EPOCH_CANONICAL_TIME >= 0.0)  & (EPOCH_CANONICAL_TIME <= 0.65)
@@ -5843,6 +7826,192 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     fontsize=11,
                 )
                 epoch_reward_speed_diff_fig.tight_layout()
+
+        # ── Pre/post-reward delivery capacitive (z-scored) bar chart ──────────
+        if 'epoch_reward_cap_pre_post' in selected_plots and _any_cap:
+            _cap_pre_mask  = (EPOCH_CANONICAL_TIME >= 0.0)  & (EPOCH_CANONICAL_TIME <= 0.65)
+            _cap_post_mask = (EPOCH_CANONICAL_TIME >  0.65) & (EPOCH_CANONICAL_TIME <= 1.30)
+            _cap_pp_by_cond: dict = {}
+            for _r in all_results:
+                _sess_mat = _r.get('cap_epoch_session_means')
+                if _sess_mat is None or _sess_mat.shape[0] == 0:
+                    continue
+                _cond = _r['starting_condition']
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    _pre_per_sess  = np.nanmean(_sess_mat[:, _cap_pre_mask],  axis=1)
+                    _post_per_sess = np.nanmean(_sess_mat[:, _cap_post_mask], axis=1)
+                    _pre_mean  = float(np.nanmean(_pre_per_sess))
+                    _post_mean = float(np.nanmean(_post_per_sess))
+                _cap_pp_by_cond.setdefault(_cond, []).append((_r['mouse'], _pre_mean, _post_mean))
+
+            if _cap_pp_by_cond:
+                _conds_cap_pp   = sorted(_cap_pp_by_cond.keys())
+                _n_conds_cap_pp = len(_conds_cap_pp)
+                epoch_reward_cap_pre_post_fig, _axs_cap_pp = plt.subplots(
+                    1, _n_conds_cap_pp,
+                    figsize=(4 * _n_conds_cap_pp + 1, 5),
+                    sharey=True, squeeze=False,
+                )
+                _all_cap_pp_yvals = []
+                for _ci, _cond in enumerate(_conds_cap_pp):
+                    _ax      = _axs_cap_pp[0, _ci]
+                    _color   = condition_color_map.get(_cond, 'steelblue')
+                    _entries = _cap_pp_by_cond[_cond]
+                    _n_cap_pp = len(_entries)
+                    _pre_vals  = [e[1] for e in _entries]
+                    _post_vals = [e[2] for e in _entries]
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _mn_pre   = float(np.nanmean(_pre_vals))
+                        _mn_post  = float(np.nanmean(_post_vals))
+                        _sem_pre  = (float(np.nanstd(_pre_vals,  ddof=1) / np.sqrt(_n_cap_pp))
+                                     if _n_cap_pp > 1 else 0.0)
+                        _sem_post = (float(np.nanstd(_post_vals, ddof=1) / np.sqrt(_n_cap_pp))
+                                     if _n_cap_pp > 1 else 0.0)
+                    _all_cap_pp_yvals.extend([_mn_pre + _sem_pre, _mn_post + _sem_post,
+                                              _mn_pre - _sem_pre, _mn_post - _sem_post])
+                    _all_cap_pp_yvals.extend(_pre_vals + _post_vals)
+                    _ax.bar(0, _mn_pre,  width=0.5, color=_color, alpha=0.7,
+                            yerr=_sem_pre,  capsize=7,
+                            error_kw={'elinewidth': 1.5, 'capthick': 1.5})
+                    _ax.bar(1, _mn_post, width=0.5, color=_color, alpha=0.7,
+                            yerr=_sem_post, capsize=7,
+                            error_kw={'elinewidth': 1.5, 'capthick': 1.5})
+                    _rng_cap_pp = np.random.default_rng(seed=42)
+                    _jitter_cap_pp = (_rng_cap_pp.random(_n_cap_pp) - 0.5) * 0.18
+                    for _j, (_mname, _pv, _qv) in enumerate(_entries):
+                        _xp = 0 + _jitter_cap_pp[_j]
+                        _xq = 1 + _jitter_cap_pp[_j]
+                        _ax.plot([_xp, _xq], [_pv, _qv], '-',
+                                 color=_color, linewidth=0.9, alpha=0.5, zorder=2)
+                        _ax.plot(_xp, _pv, 'o', color='white',
+                                 markeredgecolor=_color, markeredgewidth=1.5,
+                                 markersize=7, zorder=3)
+                        _ax.plot(_xq, _qv, 'o', color='white',
+                                 markeredgecolor=_color, markeredgewidth=1.5,
+                                 markersize=7, zorder=3)
+                    _ax.set_xticks([0, 1])
+                    _ax.set_xticklabels(['Pre-reward\n(0\u20130.65 s)', 'Post-reward\n(0.65\u20131.3 s)'],
+                                        fontsize=9)
+                    _ax.set_title(f'{_cond}\n(n={_n_cap_pp} mice)', fontsize=10)
+                    _ax.set_ylabel('Capacitive Sensor (z-score)' if _ci == 0 else '', fontsize=9)
+                    _ax.set_xlim(-0.6, 1.6)
+                    _ax.axhline(0, color='black', linewidth=0.8, linestyle='--', zorder=1)
+                    _ax.tick_params(axis='both', direction='in')
+                    _ax.spines['top'].set_visible(False)
+                    _ax.spines['right'].set_visible(False)
+                if _all_cap_pp_yvals:
+                    _ymax_cap_pp = float(np.nanmax(_all_cap_pp_yvals))
+                    _ymin_cap_pp = float(np.nanmin(_all_cap_pp_yvals))
+                else:
+                    _ymax_cap_pp, _ymin_cap_pp = 1.0, -1.0
+                _pad_cap_pp = max(abs(_ymax_cap_pp), abs(_ymin_cap_pp)) * 0.12 or 0.1
+                _axs_cap_pp[0, 0].set_ylim(_ymin_cap_pp - _pad_cap_pp, _ymax_cap_pp + _pad_cap_pp)
+                epoch_reward_cap_pre_post_fig.suptitle(
+                    'Average Capacitive Sensor (z-scored): Pre- vs Post-Reward Delivery\n'
+                    '(session-averaged reward zone entry epochs, by condition)',
+                    fontsize=12,
+                )
+                epoch_reward_cap_pre_post_fig.tight_layout()
+
+        # ── Pre-minus-post reward capacitive difference bar chart (Mann-Whitney U) ──
+        if 'epoch_reward_cap_diff' in selected_plots and _any_cap:
+            _cap_pre_mask_d  = (EPOCH_CANONICAL_TIME >= 0.0)  & (EPOCH_CANONICAL_TIME <= 0.65)
+            _cap_post_mask_d = (EPOCH_CANONICAL_TIME >  0.65) & (EPOCH_CANONICAL_TIME <= 1.30)
+            _cap_diff_by_cond: dict = {}
+            for _r in all_results:
+                _sess_mat = _r.get('cap_epoch_session_means')
+                if _sess_mat is None or _sess_mat.shape[0] == 0:
+                    continue
+                _cond = _r['starting_condition']
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    _pre_d  = float(np.nanmean(np.nanmean(_sess_mat[:, _cap_pre_mask_d],  axis=1)))
+                    _post_d = float(np.nanmean(np.nanmean(_sess_mat[:, _cap_post_mask_d], axis=1)))
+                _cap_diff_by_cond.setdefault(_cond, []).append((_r['mouse'], _pre_d - _post_d))
+
+            if _cap_diff_by_cond:
+                _conds_cap_d   = sorted(_cap_diff_by_cond.keys())
+                _n_conds_cap_d = len(_conds_cap_d)
+                epoch_reward_cap_diff_fig, _ax_cap_d = plt.subplots(
+                    1, 1, figsize=(max(4, _n_conds_cap_d * 1.4 + 1.5), 5)
+                )
+                _all_cap_diff_vals = []
+                _bar_x_cap = np.arange(_n_conds_cap_d)
+                _rng_cap_d = np.random.default_rng(seed=42)
+                for _ci, _cond in enumerate(_conds_cap_d):
+                    _color   = condition_color_map.get(_cond, 'steelblue')
+                    _entries = _cap_diff_by_cond[_cond]
+                    _n_cap_d = len(_entries)
+                    _dvals   = [e[1] for e in _entries]
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _mn_cap_d  = float(np.nanmean(_dvals))
+                        _sem_cap_d = (float(np.nanstd(_dvals, ddof=1) / np.sqrt(_n_cap_d))
+                                      if _n_cap_d > 1 else 0.0)
+                    _all_cap_diff_vals.extend(_dvals + [_mn_cap_d + _sem_cap_d, _mn_cap_d - _sem_cap_d])
+                    _ax_cap_d.bar(_ci, _mn_cap_d, width=0.55, color=_color, alpha=0.7,
+                                  yerr=_sem_cap_d, capsize=7,
+                                  error_kw={'elinewidth': 1.5, 'capthick': 1.5})
+                    _jitter_cap_d = (_rng_cap_d.random(_n_cap_d) - 0.5) * 0.22
+                    for _j, (_mname, _dv) in enumerate(_entries):
+                        _ax_cap_d.plot(_ci + _jitter_cap_d[_j], _dv, 'o',
+                                       color='white', markeredgecolor=_color,
+                                       markeredgewidth=1.5, markersize=7, zorder=3)
+                _ax_cap_d.axhline(0, color='black', linewidth=0.9, linestyle='--', zorder=1)
+                _ax_cap_d.set_xticks(_bar_x_cap)
+                _ax_cap_d.set_xticklabels(_conds_cap_d, fontsize=10)
+                _ax_cap_d.set_ylabel('Capacitive difference (z-score)\n[pre-reward \u2212 post-reward]', fontsize=9)
+                _ax_cap_d.set_xlabel('Condition', fontsize=10)
+                if _all_cap_diff_vals:
+                    _ymax_cap_d = float(np.nanmax(_all_cap_diff_vals))
+                    _ymin_cap_d = float(np.nanmin(_all_cap_diff_vals))
+                    _pad_cap_d  = max(abs(_ymax_cap_d), abs(_ymin_cap_d)) * 0.12 or 0.1
+                    _ax_cap_d.set_ylim(_ymin_cap_d - _pad_cap_d, _ymax_cap_d + _pad_cap_d)
+                _ax_cap_d.tick_params(axis='both', direction='in')
+                _ax_cap_d.spines['top'].set_visible(False)
+                _ax_cap_d.spines['right'].set_visible(False)
+
+                # ── Mann-Whitney U tests for all condition pairs ──────────────
+                import itertools as _itertools_cap_d
+                _pairs_cap_d = list(_itertools_cap_d.combinations(range(_n_conds_cap_d), 2))
+                _ylim_cur_cap = list(_ax_cap_d.get_ylim())
+                _bracket_step_cap = (_ylim_cur_cap[1] - _ylim_cur_cap[0]) * 0.14
+                _bracket_base_cap = _ylim_cur_cap[1]
+                for _pi, (_ia, _ib) in enumerate(_pairs_cap_d):
+                    _vals_a = [e[1] for e in _cap_diff_by_cond[_conds_cap_d[_ia]]]
+                    _vals_b = [e[1] for e in _cap_diff_by_cond[_conds_cap_d[_ib]]]
+                    if len(_vals_a) < 2 or len(_vals_b) < 2:
+                        continue
+                    _u_stat_cap, _p_val_cap = mannwhitneyu(_vals_a, _vals_b, alternative='two-sided')
+                    if _p_val_cap < 0.001:
+                        _sig_str_cap = f'p = {_p_val_cap:.2e}***'
+                    elif _p_val_cap < 0.01:
+                        _sig_str_cap = f'p = {_p_val_cap:.3f}**'
+                    elif _p_val_cap < 0.05:
+                        _sig_str_cap = f'p = {_p_val_cap:.3f}*'
+                    else:
+                        _sig_str_cap = f'p = {_p_val_cap:.3f} (ns)'
+                    _bh_cap = _bracket_base_cap + _bracket_step_cap * (_pi + 0.6)
+                    _ax_cap_d.plot([_ia, _ia, _ib, _ib],
+                                   [_bh_cap - _bracket_step_cap * 0.15,
+                                    _bh_cap,
+                                    _bh_cap,
+                                    _bh_cap - _bracket_step_cap * 0.15],
+                                   color='black', linewidth=1.0)
+                    _ax_cap_d.text((_ia + _ib) / 2, _bh_cap + _bracket_step_cap * 0.05,
+                                   _sig_str_cap, ha='center', va='bottom', fontsize=8)
+                if _pairs_cap_d:
+                    _new_top_cap = _bracket_base_cap + _bracket_step_cap * (len(_pairs_cap_d) + 1.5)
+                    _ax_cap_d.set_ylim(_ylim_cur_cap[0], _new_top_cap)
+
+                epoch_reward_cap_diff_fig.suptitle(
+                    'Pre- vs Post-Reward Capacitive (z-scored) Difference by Condition\n'
+                    '(mean \u00b1 SEM across mice; positive = higher licking before reward delivery)',
+                    fontsize=11,
+                )
+                epoch_reward_cap_diff_fig.tight_layout()
 
         # ── Reward zone: 0.65 s pre- vs 0.65 s post-zone entry bar chart ─────
         if 'epoch_reward_speed_pre_post_entry' in selected_plots and _any_speed:
@@ -6295,7 +8464,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         f.write(report_text + "\n")
     print(f"\nMissing data report saved to: {report_path}")
 
-    return speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, avg_sex_speed_fig, distance_fig, bout_count_fig, avg_bout_count_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_bar_fig, condition_speed_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, epoch_speed_per_mouse_fig, epoch_speed_cond_fig, epoch_cap_per_mouse_fig, epoch_cap_cond_fig, epoch_speed_sess_per_mouse_fig, epoch_speed_sess_cond_fig, epoch_cap_sess_per_mouse_fig, epoch_cap_sess_cond_fig, epoch_speed_early_per_mouse_fig, epoch_speed_late_per_mouse_fig, epoch_speed_early_cond_fig, epoch_speed_late_cond_fig, epoch_cap_early_per_mouse_fig, epoch_cap_late_per_mouse_fig, epoch_cap_early_cond_fig, epoch_cap_late_cond_fig, epoch_speed_early_ev_per_mouse_fig, epoch_speed_late_ev_per_mouse_fig, epoch_speed_early_ev_cond_fig, epoch_speed_late_ev_cond_fig, epoch_cap_early_ev_per_mouse_fig, epoch_cap_late_ev_per_mouse_fig, epoch_cap_early_ev_cond_fig, epoch_cap_late_ev_cond_fig, epoch_speed_sess_cond_clean_fig, epoch_cap_sess_cond_clean_fig, epoch_speed_early_cond_clean_fig, epoch_speed_late_cond_clean_fig, epoch_cap_early_cond_clean_fig, epoch_cap_late_cond_clean_fig, punish_speed_per_mouse_fig, punish_speed_cond_fig, punish_cap_per_mouse_fig, punish_cap_cond_fig, punish_speed_sess_per_mouse_fig, punish_speed_sess_cond_fig, punish_cap_sess_per_mouse_fig, punish_cap_sess_cond_fig, punish_speed_sess_cond_clean_fig, punish_cap_sess_cond_clean_fig, sex_speed_fig, sex_distance_indiv_fig, sex_reward_indiv_fig, epoch_speed_sess_sex_per_mouse_fig, epoch_speed_sess_sex_fig, epoch_cap_sess_sex_per_mouse_fig, epoch_cap_sess_sex_fig, epoch_punish_speed_sess_sex_per_mouse_fig, epoch_punish_speed_sess_sex_fig, epoch_punish_cap_sess_sex_per_mouse_fig, epoch_punish_cap_sess_sex_fig, epoch_reward_speed_pre_post_fig, epoch_reward_speed_diff_fig, epoch_reward_speed_pre_post_entry_fig, epoch_reward_speed_diff_entry_fig, epoch_reward_speed_pre_post_entry_1s_fig, epoch_reward_speed_diff_entry_1s_fig, epoch_reward_lick_count_sess_per_mouse_fig, epoch_reward_lick_count_sess_cond_fig, epoch_punish_lick_count_sess_per_mouse_fig, epoch_punish_lick_count_sess_cond_fig, epoch_punish_speed_pre_post_fig, epoch_punish_speed_diff_fig, epoch_punish_speed_pre_post_entry_fig, epoch_punish_speed_diff_entry_fig, expl_speed_histogram_fig, expl_speed_boxplot_fig, expl_speed_rm_anova_resid_fig, all_results, _level_stats_data
+    return speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, avg_sex_speed_fig, distance_fig, bout_count_fig, avg_bout_count_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_bar_fig, condition_speed_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, epoch_speed_per_mouse_fig, epoch_speed_cond_fig, epoch_cap_per_mouse_fig, epoch_cap_cond_fig, epoch_speed_sess_per_mouse_fig, epoch_speed_sess_cond_fig, epoch_cap_sess_per_mouse_fig, epoch_cap_sess_cond_fig, epoch_speed_early_per_mouse_fig, epoch_speed_late_per_mouse_fig, epoch_speed_early_cond_fig, epoch_speed_late_cond_fig, epoch_cap_early_per_mouse_fig, epoch_cap_late_per_mouse_fig, epoch_cap_early_cond_fig, epoch_cap_late_cond_fig, epoch_speed_early_ev_per_mouse_fig, epoch_speed_late_ev_per_mouse_fig, epoch_speed_early_ev_cond_fig, epoch_speed_late_ev_cond_fig, epoch_cap_early_ev_per_mouse_fig, epoch_cap_late_ev_per_mouse_fig, epoch_cap_early_ev_cond_fig, epoch_cap_late_ev_cond_fig, epoch_speed_sess_cond_clean_fig, epoch_cap_sess_cond_clean_fig, epoch_speed_early_cond_clean_fig, epoch_speed_late_cond_clean_fig, epoch_cap_early_cond_clean_fig, epoch_cap_late_cond_clean_fig, punish_speed_per_mouse_fig, punish_speed_cond_fig, punish_cap_per_mouse_fig, punish_cap_cond_fig, punish_speed_sess_per_mouse_fig, punish_speed_sess_cond_fig, punish_cap_sess_per_mouse_fig, punish_cap_sess_cond_fig, punish_speed_sess_cond_clean_fig, punish_cap_sess_cond_clean_fig, sex_speed_fig, sex_distance_indiv_fig, sex_reward_indiv_fig, epoch_speed_sess_sex_per_mouse_fig, epoch_speed_sess_sex_fig, epoch_cap_sess_sex_per_mouse_fig, epoch_cap_sess_sex_fig, epoch_punish_speed_sess_sex_per_mouse_fig, epoch_punish_speed_sess_sex_fig, epoch_punish_cap_sess_sex_per_mouse_fig, epoch_punish_cap_sess_sex_fig, epoch_reward_speed_pre_post_fig, epoch_reward_speed_diff_fig, epoch_reward_cap_pre_post_fig, epoch_reward_cap_diff_fig, epoch_reward_speed_pre_post_entry_fig, epoch_reward_speed_diff_entry_fig, epoch_reward_speed_pre_post_entry_1s_fig, epoch_reward_speed_diff_entry_1s_fig, epoch_reward_lick_count_sess_per_mouse_fig, epoch_reward_lick_count_sess_cond_fig, epoch_punish_lick_count_sess_per_mouse_fig, epoch_punish_lick_count_sess_cond_fig, epoch_punish_speed_pre_post_fig, epoch_punish_speed_diff_fig, epoch_punish_speed_pre_post_entry_fig, epoch_punish_speed_diff_entry_fig, epoch_punish_cap_pre_post_fig, epoch_punish_cap_diff_fig, epoch_punish_cap_pre_post_entry_fig, epoch_punish_cap_diff_entry_fig, expl_speed_histogram_fig, expl_speed_boxplot_fig, expl_speed_rm_anova_resid_fig, expl_cap_histogram_fig, expl_cap_boxplot_fig, expl_cap_rm_anova_resid_fig, expl_cap_distfit_fig, expl_lick_distfit_fig, expl_lick_boxplot_fig, expl_lick_rm_anova_resid_fig, all_results, _level_stats_data
 
 def _ask_mode(root):
     """Ask whether to generate plots or run the descriptive stats report.
@@ -6451,7 +8620,7 @@ def main():
             print("No transitions CSV selected — level plot will be empty.")
 
     # Analyze data and plot results
-    speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, avg_sex_speed_fig, distance_fig, bout_count_fig, avg_bout_count_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_bar_fig, condition_speed_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, epoch_speed_per_mouse_fig, epoch_speed_cond_fig, epoch_cap_per_mouse_fig, epoch_cap_cond_fig, epoch_speed_sess_per_mouse_fig, epoch_speed_sess_cond_fig, epoch_cap_sess_per_mouse_fig, epoch_cap_sess_cond_fig, epoch_speed_early_per_mouse_fig, epoch_speed_late_per_mouse_fig, epoch_speed_early_cond_fig, epoch_speed_late_cond_fig, epoch_cap_early_per_mouse_fig, epoch_cap_late_per_mouse_fig, epoch_cap_early_cond_fig, epoch_cap_late_cond_fig, epoch_speed_early_ev_per_mouse_fig, epoch_speed_late_ev_per_mouse_fig, epoch_speed_early_ev_cond_fig, epoch_speed_late_ev_cond_fig, epoch_cap_early_ev_per_mouse_fig, epoch_cap_late_ev_per_mouse_fig, epoch_cap_early_ev_cond_fig, epoch_cap_late_ev_cond_fig, epoch_speed_sess_cond_clean_fig, epoch_cap_sess_cond_clean_fig, epoch_speed_early_cond_clean_fig, epoch_speed_late_cond_clean_fig, epoch_cap_early_cond_clean_fig, epoch_cap_late_cond_clean_fig, punish_speed_per_mouse_fig, punish_speed_cond_fig, punish_cap_per_mouse_fig, punish_cap_cond_fig, punish_speed_sess_per_mouse_fig, punish_speed_sess_cond_fig, punish_cap_sess_per_mouse_fig, punish_cap_sess_cond_fig, punish_speed_sess_cond_clean_fig, punish_cap_sess_cond_clean_fig, sex_speed_fig, sex_distance_indiv_fig, sex_reward_indiv_fig, epoch_speed_sess_sex_per_mouse_fig, epoch_speed_sess_sex_fig, epoch_cap_sess_sex_per_mouse_fig, epoch_cap_sess_sex_fig, epoch_punish_speed_sess_sex_per_mouse_fig, epoch_punish_speed_sess_sex_fig, epoch_punish_cap_sess_sex_per_mouse_fig, epoch_punish_cap_sess_sex_fig, epoch_reward_speed_pre_post_fig, epoch_reward_speed_diff_fig, epoch_reward_speed_pre_post_entry_fig, epoch_reward_speed_diff_entry_fig, epoch_reward_speed_pre_post_entry_1s_fig, epoch_reward_speed_diff_entry_1s_fig, epoch_reward_lick_count_sess_per_mouse_fig, epoch_reward_lick_count_sess_cond_fig, epoch_punish_lick_count_sess_per_mouse_fig, epoch_punish_lick_count_sess_cond_fig, epoch_punish_speed_pre_post_fig, epoch_punish_speed_diff_fig, epoch_punish_speed_pre_post_entry_fig, epoch_punish_speed_diff_entry_fig, expl_speed_histogram_fig, expl_speed_boxplot_fig, expl_speed_rm_anova_resid_fig, all_results, _level_stats_data = analyze_mouse_data(
+    speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, avg_sex_speed_fig, distance_fig, bout_count_fig, avg_bout_count_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_bar_fig, condition_speed_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, epoch_speed_per_mouse_fig, epoch_speed_cond_fig, epoch_cap_per_mouse_fig, epoch_cap_cond_fig, epoch_speed_sess_per_mouse_fig, epoch_speed_sess_cond_fig, epoch_cap_sess_per_mouse_fig, epoch_cap_sess_cond_fig, epoch_speed_early_per_mouse_fig, epoch_speed_late_per_mouse_fig, epoch_speed_early_cond_fig, epoch_speed_late_cond_fig, epoch_cap_early_per_mouse_fig, epoch_cap_late_per_mouse_fig, epoch_cap_early_cond_fig, epoch_cap_late_cond_fig, epoch_speed_early_ev_per_mouse_fig, epoch_speed_late_ev_per_mouse_fig, epoch_speed_early_ev_cond_fig, epoch_speed_late_ev_cond_fig, epoch_cap_early_ev_per_mouse_fig, epoch_cap_late_ev_per_mouse_fig, epoch_cap_early_ev_cond_fig, epoch_cap_late_ev_cond_fig, epoch_speed_sess_cond_clean_fig, epoch_cap_sess_cond_clean_fig, epoch_speed_early_cond_clean_fig, epoch_speed_late_cond_clean_fig, epoch_cap_early_cond_clean_fig, epoch_cap_late_cond_clean_fig, punish_speed_per_mouse_fig, punish_speed_cond_fig, punish_cap_per_mouse_fig, punish_cap_cond_fig, punish_speed_sess_per_mouse_fig, punish_speed_sess_cond_fig, punish_cap_sess_per_mouse_fig, punish_cap_sess_cond_fig, punish_speed_sess_cond_clean_fig, punish_cap_sess_cond_clean_fig, sex_speed_fig, sex_distance_indiv_fig, sex_reward_indiv_fig, epoch_speed_sess_sex_per_mouse_fig, epoch_speed_sess_sex_fig, epoch_cap_sess_sex_per_mouse_fig, epoch_cap_sess_sex_fig, epoch_punish_speed_sess_sex_per_mouse_fig, epoch_punish_speed_sess_sex_fig, epoch_punish_cap_sess_sex_per_mouse_fig, epoch_punish_cap_sess_sex_fig, epoch_reward_speed_pre_post_fig, epoch_reward_speed_diff_fig, epoch_reward_cap_pre_post_fig, epoch_reward_cap_diff_fig, epoch_reward_speed_pre_post_entry_fig, epoch_reward_speed_diff_entry_fig, epoch_reward_speed_pre_post_entry_1s_fig, epoch_reward_speed_diff_entry_1s_fig, epoch_reward_lick_count_sess_per_mouse_fig, epoch_reward_lick_count_sess_cond_fig, epoch_punish_lick_count_sess_per_mouse_fig, epoch_punish_lick_count_sess_cond_fig, epoch_punish_speed_pre_post_fig, epoch_punish_speed_diff_fig, epoch_punish_speed_pre_post_entry_fig, epoch_punish_speed_diff_entry_fig, epoch_punish_cap_pre_post_fig, epoch_punish_cap_diff_fig, epoch_punish_cap_pre_post_entry_fig, epoch_punish_cap_diff_entry_fig, expl_speed_histogram_fig, expl_speed_boxplot_fig, expl_speed_rm_anova_resid_fig, expl_cap_histogram_fig, expl_cap_boxplot_fig, expl_cap_rm_anova_resid_fig, expl_cap_distfit_fig, expl_lick_distfit_fig, expl_lick_boxplot_fig, expl_lick_rm_anova_resid_fig, all_results, _level_stats_data = analyze_mouse_data(
         file_paths, markers, starting_conditions,
         transitions_csv_path=transitions_csv_path,
         selected_plots=selected_plots,
@@ -6501,6 +8670,8 @@ def main():
         epoch_punish_cap_sess_sex_per_mouse_fig, epoch_punish_cap_sess_sex_fig,
         epoch_reward_speed_pre_post_fig,
         epoch_reward_speed_diff_fig,
+        epoch_reward_cap_pre_post_fig,
+        epoch_reward_cap_diff_fig,
         epoch_reward_speed_pre_post_entry_fig,
         epoch_reward_speed_diff_entry_fig,
         epoch_reward_speed_pre_post_entry_1s_fig,
@@ -6513,9 +8684,19 @@ def main():
         epoch_punish_speed_diff_fig,
         epoch_punish_speed_pre_post_entry_fig,
         epoch_punish_speed_diff_entry_fig,
+        epoch_punish_cap_pre_post_fig,
+        epoch_punish_cap_diff_fig,
+        epoch_punish_cap_pre_post_entry_fig,
+        epoch_punish_cap_diff_entry_fig,
         expl_speed_histogram_fig,
         expl_speed_boxplot_fig,
         expl_speed_rm_anova_resid_fig,
+        expl_cap_histogram_fig,
+        expl_cap_boxplot_fig,
+        expl_cap_rm_anova_resid_fig,
+        expl_lick_distfit_fig,
+        expl_lick_boxplot_fig,
+        expl_lick_rm_anova_resid_fig,
     ] if f is not None]
 
     # Configure all figures (add legend only when labeled artists exist, then tight layout)
@@ -6644,6 +8825,8 @@ def main():
         (epoch_punish_cap_sess_sex_fig,             'epoch_punish_cap_sess_sex',             'Capacitive epoch (session, punish zone) — by sex'),
         (epoch_reward_speed_pre_post_fig,            'epoch_reward_speed_pre_post',            'Pre/post-reward speed bar chart by condition'),
         (epoch_reward_speed_diff_fig,                'epoch_reward_speed_diff',                'Pre-minus-post-reward speed difference by condition'),
+        (epoch_reward_cap_pre_post_fig,              'epoch_reward_cap_pre_post',              'Pre/post-reward capacitive (z-scored) bar chart by condition'),
+        (epoch_reward_cap_diff_fig,                  'epoch_reward_cap_diff',                  'Pre-minus-post-reward capacitive difference by condition (Mann-Whitney U)'),
         (epoch_reward_speed_pre_post_entry_fig,      'epoch_reward_speed_pre_post_entry',      'Pre/post-entry reward zone speed bar chart by condition (0.65 s windows)'),
         (epoch_reward_speed_diff_entry_fig,          'epoch_reward_speed_diff_entry',          'Pre-minus-post-entry reward zone speed difference by condition (0.65 s windows)'),
         (epoch_reward_speed_pre_post_entry_1s_fig,   'epoch_reward_speed_pre_post_entry_1s',   'Pre/post-entry reward zone speed bar chart by condition (1 s windows)'),
@@ -6656,9 +8839,20 @@ def main():
         (epoch_punish_speed_diff_fig,                'epoch_punish_speed_diff',                'Pre-minus-post-cutoff punishment zone speed difference by condition'),
         (epoch_punish_speed_pre_post_entry_fig,      'epoch_punish_speed_pre_post_entry',      'Pre/post-entry punishment zone speed bar chart by condition (1 s windows)'),
         (epoch_punish_speed_diff_entry_fig,          'epoch_punish_speed_diff_entry',          'Pre-minus-post-entry punishment zone speed difference by condition (1 s windows)'),
+        (epoch_punish_cap_pre_post_fig,              'epoch_punish_cap_pre_post',              'Pre/post-cutoff punishment zone capacitive (z-scored) bar chart by condition (0.65 s windows)'),
+        (epoch_punish_cap_diff_fig,                  'epoch_punish_cap_diff',                  'Pre-minus-post-cutoff punishment zone capacitive difference by condition (Mann-Whitney U)'),
+        (epoch_punish_cap_pre_post_entry_fig,        'epoch_punish_cap_pre_post_entry',        'Pre/post-entry punishment zone capacitive (z-scored) bar chart by condition (1 s windows)'),
+        (epoch_punish_cap_diff_entry_fig,            'epoch_punish_cap_diff_entry',            'Pre-minus-post-entry punishment zone capacitive difference by condition (Mann-Whitney U)'),
         (expl_speed_histogram_fig,                   'expl_speed_histogram',                   'Exploratory: speed histogram (all sessions + per-mouse means)'),
         (expl_speed_boxplot_fig,                     'expl_speed_boxplot',                     'Exploratory: speed box-and-whisker (per-mouse + overall)'),
         (expl_speed_rm_anova_resid_fig,              'expl_speed_rm_anova_resid',               'Exploratory: RM ANOVA residual diagnostics'),
+        (expl_cap_histogram_fig,                     'expl_cap_histogram',                     'Exploratory: z-scored mean cap value histogram'),
+        (expl_cap_boxplot_fig,                       'expl_cap_boxplot',                       'Exploratory: z-scored mean cap value box-and-whisker'),
+        (expl_cap_rm_anova_resid_fig,                'expl_cap_rm_anova_resid',                'Exploratory: Capacitive RM ANOVA residual diagnostics'),
+        (expl_cap_distfit_fig,                       'expl_cap_distfit',                       'Exploratory: Capacitive sensor value distribution fit (Normal, Log-normal, Gamma)'),
+        (expl_lick_distfit_fig,                      'expl_lick_distfit',                      'Exploratory: Lick count Poisson vs NB distribution fit'),  
+        (expl_lick_boxplot_fig,                      'expl_lick_boxplot',                      'Exploratory: raw lick count box-and-whisker'),
+        (expl_lick_rm_anova_resid_fig,               'expl_lick_rm_anova_resid',               'Exploratory: Raw lick count RM ANOVA residual diagnostics'),
     ]
 
     for fig, name, title in plot_configs:
