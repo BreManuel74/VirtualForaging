@@ -556,6 +556,7 @@ _ALL_PLOT_KEYS = {
     'epoch_reward_speed_sess', 'epoch_reward_cap_sess',
     'epoch_reward_speed_early_late', 'epoch_reward_cap_early_late',
     'epoch_reward_speed_early_late_ev', 'epoch_reward_cap_early_late_ev',
+    'epoch_reward_speed_early_late_ev_clean', 'epoch_reward_cap_early_late_ev_clean',
     'epoch_reward_speed_sess_clean', 'epoch_reward_cap_sess_clean',
     'epoch_reward_speed_early_late_clean', 'epoch_reward_cap_early_late_clean',
     'epoch_punish_speed', 'epoch_punish_cap',
@@ -587,6 +588,7 @@ _ALL_PLOT_KEYS = {
     'condition_lick_reward_ratio_bar',
     'expl_lick_reward_ratio_distfit',
     'expl_speed_histogram',
+    'expl_speed_distfit',
     'expl_speed_boxplot',
     'expl_speed_rm_anova_resid',
     'expl_cap_histogram',
@@ -596,6 +598,7 @@ _ALL_PLOT_KEYS = {
     'expl_lick_distfit',
     'expl_lick_boxplot',
     'expl_lick_rm_anova_resid',
+    'expl_lick_rate_distfit',
 }
 
 _PLOT_LABELS = [
@@ -606,7 +609,6 @@ _PLOT_LABELS = [
     ('lick_reward_ratio',       'Individual: Lick count / Reward count ratio over time'),
     ('condition_lick_reward_ratio', 'Condition: Lick count / Reward count ratio over time by starting condition'),
     ('condition_lick_reward_ratio_bar', 'Condition: Lick count / Reward count ratio — collapsed bar chart (one avg per mouse)'),
-    ('expl_lick_reward_ratio_distfit',  'Exploratory: Per-mouse mean lick/reward ratio — KDE + Shapiro-Wilk normality test + Q-Q plot'),
 
     ('false_alarms',        'Individual: False alarms over time'),
     ('correct_rejections',  'Individual: Correct rejections over time'),
@@ -661,6 +663,8 @@ _PLOT_LABELS = [
     ('epoch_reward_cap_early_late',      'Epoch: Capacitive value — early vs late sessions, session-averaged, aligned to reward zone entry (per-mouse + condition)'),
     ('epoch_reward_speed_early_late_ev', 'Epoch: Treadmill speed — early vs late sessions, event-averaged, aligned to reward zone entry (per-mouse + condition)'),
     ('epoch_reward_cap_early_late_ev',   'Epoch: Capacitive value — early vs late sessions, event-averaged, aligned to reward zone entry (per-mouse + condition)'),
+    ('epoch_reward_speed_early_late_ev_clean', 'Epoch: Treadmill speed — early vs late sessions, event-averaged, by condition only (no individual traces)'),
+    ('epoch_reward_cap_early_late_ev_clean',   'Epoch: Capacitive value — early vs late sessions, event-averaged, by condition only (no individual traces)'),
     ('epoch_reward_speed_sess_clean',        'Epoch: Treadmill speed — session-averaged, by condition only (no individual traces)'),
     ('epoch_reward_cap_sess_clean',          'Epoch: Capacitive value — session-averaged, by condition only (no individual traces)'),
     ('epoch_reward_speed_early_late_clean',  'Epoch: Treadmill speed — early vs late sessions, session-averaged, by condition only (no individual traces)'),
@@ -696,24 +700,29 @@ _PLOT_LABELS = [
     ('epoch_punish_cap_diff',        'Epoch: Punishment zone capacitive (z-scored) — post-minus-pre 0.65 s cutoff difference bar chart, by condition (Mann-Whitney U)'),
     ('epoch_punish_cap_pre_post_entry', 'Epoch: Punishment zone capacitive (z-scored) — 1 s pre- vs 1 s post-zone entry bar chart, by condition'),
     ('epoch_punish_cap_diff_entry',     'Epoch: Punishment zone capacitive (z-scored) — post-minus-pre zone entry difference bar chart (1 s windows), by condition (Mann-Whitney U)'),
+]
+
+_EXPL_PLOT_LABELS = [
+    ('expl_lick_reward_ratio_distfit',  'Exploratory: Per-mouse mean lick/reward ratio — KDE + Shapiro-Wilk normality test + Q-Q plot'),
     ('expl_speed_histogram',       'Exploratory: Speed distribution — histogram (all session speeds + per-mouse means, Shapiro-Wilk)'),
+    ('expl_speed_distfit',         'Exploratory: Average speed distribution fit — Normal, Log-normal, Gamma (histogram + Q-Q + AIC comparison)'),
     ('expl_speed_boxplot',         'Exploratory: Speed distribution — box and whisker (per-mouse + overall)'),
     ('expl_speed_rm_anova_resid',  'Exploratory: Repeated-measures ANOVA residuals — Q-Q plot, histogram, residuals vs fitted (condition × session)'),
     ('expl_cap_histogram',         'Exploratory: Z-scored mean capacitive sensor value distribution — histogram (all session values + per-mouse means, Shapiro-Wilk)'),
     ('expl_cap_boxplot',           'Exploratory: Z-scored mean capacitive sensor value distribution — box and whisker (per-mouse + overall)'),
-
     ('expl_cap_rm_anova_resid',    'Exploratory: Capacitive RM ANOVA residuals — Q-Q plot, histogram, residuals vs fitted (condition × session)'),
     ('expl_cap_distfit',           'Exploratory: Capacitive sensor value distribution fit — Normal, Log-normal, Gamma (histogram + Q-Q + AIC comparison)'),
     ('expl_lick_distfit',          'Exploratory: Lick count Poisson vs Negative Binomial distribution fit — rootogram, Q-Q, mean–variance, AIC/χ² comparison'),
     ('expl_lick_boxplot',          'Exploratory: Raw lick count distribution — box and whisker (per-mouse + overall)'),
     ('expl_lick_rm_anova_resid',   'Exploratory: Raw lick count RM ANOVA residuals — Q-Q plot, histogram, residuals vs fitted (DV = log(1+count), condition × session)'),
+    ('expl_lick_rate_distfit',     'Exploratory: Average lick rate distribution fit — Normal, Log-normal, Gamma (histogram + Q-Q + AIC comparison)'),
 ]
 
 
-def _ask_plot_selection(root):
+def _ask_plot_selection(root, labels=None, title='Select Plots to Generate'):
     """Show a scrollable checkbox dialog and return the frozenset of selected plot keys."""
     dialog = tk.Toplevel(root)
-    dialog.title('Select Plots to Generate')
+    dialog.title(title)
     dialog.resizable(True, True)
     dialog.grab_set()
 
@@ -761,8 +770,10 @@ def _ask_plot_selection(root):
     inner.bind('<Button-5>',    _on_mousewheel)
 
     # ── Checkboxes ────────────────────────────────────────────────────────────
+    if labels is None:
+        labels = _PLOT_LABELS
     vars_ = {}
-    for key, label in _PLOT_LABELS:
+    for key, label in labels:
         var = tk.BooleanVar(value=True)
         vars_[key] = var
         cb = tk.Checkbutton(inner, text=label, variable=var, anchor='w')
@@ -4253,15 +4264,15 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax_lrrbar.spines['top'].set_visible(False)
         ax_lrrbar.spines['right'].set_visible(False)
 
-        # ── Welch's t-test: pairwise significance brackets ────────────────────
-        from scipy.stats import ttest_ind as _ttest_lrrbar
+        # ── Mann-Whitney U test: pairwise significance brackets ─────────────
+        from scipy.stats import mannwhitneyu as _mwu_lrrbar
         import itertools as _it_lrrbar
         _lrrbar_results = []
         for (_bc1, _bc2) in _it_lrrbar.combinations(conditions_sorted_lrrbar, 2):
             _v1 = np.array([v for _, v in condition_mouse_lrr[_bc1]])
             _v2 = np.array([v for _, v in condition_mouse_lrr[_bc2]])
             if len(_v1) >= 2 and len(_v2) >= 2:
-                _bt_stat, _bt_p = _ttest_lrrbar(_v1, _v2, equal_var=False)
+                _bt_stat, _bt_p = _mwu_lrrbar(_v1, _v2, alternative='two-sided')
                 _lrrbar_results.append((_bc1, _bc2, float(_bt_stat), float(_bt_p)))
 
         if _lrrbar_results:
@@ -4299,7 +4310,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                 top=_lrrbar_y_max + _lrrbar_step * (len(_lrrbar_results) + 1.8),
             )
 
-        ax_lrrbar.set_title('Average Lick Count / Reward Count Ratio by Starting Condition\n(collapsed across all sessions; Welch\'s t-test)')
+        ax_lrrbar.set_title('Average Lick Count / Reward Count Ratio by Starting Condition\n(collapsed across all sessions; Mann-Whitney U test)')
         condition_lick_reward_ratio_bar_fig.tight_layout()
 
     # Create collapsed condition bar plot (one average rpm per mouse, collapsed across all days)
@@ -4453,6 +4464,289 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             fontsize=10,
         )
         expl_speed_histogram_fig.tight_layout()
+
+    # ── Exploratory: average speed distribution fit (per-mouse means by cohort) ─
+    # One mean per mouse; grouped by starting_condition.
+    # Goal: assess normality per cohort to decide whether a t-test is appropriate.
+    expl_speed_distfit_fig = None
+    if 'expl_speed_distfit' in selected_plots:
+        try:
+            from scipy.stats import (norm as _norm_sd, probplot as _probplot_sd,
+                                     shapiro as _sw_sd, beta as _beta_sd)
+            from matplotlib.gridspec import GridSpec as _GridSpec_sd
+            import warnings as _warnings_sd
+
+            # ── One mean per mouse, grouped by starting_condition ─────────────
+            _sd_groups = {}
+            for _r in all_results:
+                _sv = pd.to_numeric(
+                    _r['df']['average_speed'], errors='coerce'
+                ).dropna().values
+                _sv = _sv[_sv > 0]
+                if len(_sv) > 0:
+                    _cond_sd = _r.get('starting_condition', 'Unknown')
+                    _sd_groups.setdefault(_cond_sd, []).append(float(np.mean(_sv)))
+
+            _sd_cond_names = sorted(_sd_groups.keys())
+            _n_cg_sd = len(_sd_cond_names)
+            if _n_cg_sd == 0:
+                raise ValueError('No valid speed data found')
+
+            # ── Shapiro-Wilk per cohort ────────────────────────────────────────
+            _sd_sw = {}
+            for _cn in _sd_cond_names:
+                _arr = np.array(_sd_groups[_cn])
+                if len(_arr) >= 3:
+                    _w, _p = _sw_sd(_arr)
+                    _sd_sw[_cn] = (float(_w), float(_p), len(_arr))
+                else:
+                    _sd_sw[_cn] = (np.nan, np.nan, len(_arr))
+
+            # ── Figure layout ─────────────────────────────────────────────────
+            # Row 0 (full width): overlaid histograms + Normal fit + rug marks
+            # Rows 1.._n_qq_rows: per-cohort Normal Q-Q plots (2-column grid)
+            # Last row (full width): summary normality table
+            _n_qq_rows_sd = (_n_cg_sd + 1) // 2
+            _n_rows_sd = 1 + 1 + _n_qq_rows_sd + 1  # +1 row for box plot
+            _coh_pal_sd = [plt.cm.tab10(i / max(_n_cg_sd - 1, 1))
+                           for i in range(_n_cg_sd)]
+
+            expl_speed_distfit_fig = plt.figure(figsize=(13, 4.5 * _n_rows_sd))
+            _gs_sd = _GridSpec_sd(_n_rows_sd, 2, figure=expl_speed_distfit_fig,
+                                  hspace=0.60, wspace=0.38)
+            ax_sdhist = expl_speed_distfit_fig.add_subplot(_gs_sd[0, :])
+
+            # [row 0] Overlaid histograms + Normal fit + rug marks
+            _sd_rng = np.random.default_rng(42)
+            for _ci, _cn in enumerate(_sd_cond_names):
+                _arr = np.array(_sd_groups[_cn])
+                _col_sd = _coh_pal_sd[_ci]
+                _sw_lbl = (f'SW p={_sd_sw[_cn][1]:.3f}'
+                           if not np.isnan(_sd_sw[_cn][1]) else 'SW: n<3')
+                _nbins_sd = max(4, len(_arr) // 2 + 1)
+                ax_sdhist.hist(_arr, bins=_nbins_sd, alpha=0.40, color=_col_sd,
+                               density=True, edgecolor='white', linewidth=0.5,
+                               label=f'{_cn}  (n={len(_arr)}, {_sw_lbl})')
+                if len(_arr) >= 3:
+                    _mn_sd = float(np.mean(_arr))
+                    _sdv_sd = float(np.std(_arr, ddof=1))
+                    _xfit_sd = np.linspace(_mn_sd - 4 * _sdv_sd,
+                                           _mn_sd + 4 * _sdv_sd, 300)
+                    ax_sdhist.plot(_xfit_sd, _norm_sd.pdf(_xfit_sd, _mn_sd, _sdv_sd),
+                                   color=_col_sd, linewidth=2.0, linestyle='--')
+                _jit_sd = _sd_rng.uniform(-0.003, 0.003, len(_arr))
+                ax_sdhist.plot(_arr, _jit_sd, '|', color=_col_sd,
+                               markersize=14, markeredgewidth=2.5, alpha=0.75)
+
+            ax_sdhist.set_xlabel('Per-mouse mean average speed (cm/s)', fontsize=10)
+            ax_sdhist.set_ylabel('Density', fontsize=10)
+            ax_sdhist.set_title(
+                'Per-mouse mean average speed — distribution by cohort\n'
+                '(each point = one mouse; dashed lines = Normal fit; '
+                'tick marks = individual mice)',
+                fontsize=10,
+            )
+            ax_sdhist.legend(fontsize=8)
+            ax_sdhist.spines['top'].set_visible(False)
+            ax_sdhist.spines['right'].set_visible(False)
+            ax_sdhist.tick_params(axis='both', direction='in')
+
+            # [row 1] Box-and-whisker with 1.5×IQR outlier highlighting
+            ax_sdbox = expl_speed_distfit_fig.add_subplot(_gs_sd[1, :])
+            _bp_data_sd = [np.array(_sd_groups[_cn]) for _cn in _sd_cond_names]
+            _bplot_sd = ax_sdbox.boxplot(
+                _bp_data_sd, labels=_sd_cond_names, patch_artist=True,
+                showfliers=False, widths=0.50,
+                boxprops=dict(linewidth=1.4),
+                whiskerprops=dict(linewidth=1.2, linestyle='--'),
+                capprops=dict(linewidth=1.4),
+                medianprops=dict(color='black', linewidth=2.0),
+            )
+            for _bi, _bpatch in enumerate(_bplot_sd['boxes']):
+                _bc = _coh_pal_sd[_bi]
+                _bpatch.set_facecolor([*_bc[:3], 0.35])
+                _bpatch.set_edgecolor(_bc)
+            _rng_box_sd = np.random.default_rng(1)
+            _outlier_legend_added_sd = False
+            for _bi, _cn in enumerate(_sd_cond_names):
+                _arr_bx = np.array(_sd_groups[_cn])
+                _q1_sd  = float(np.percentile(_arr_bx, 25))
+                _q3_sd  = float(np.percentile(_arr_bx, 75))
+                _iqr_sd = _q3_sd - _q1_sd
+                _lo_sd  = _q1_sd - 1.5 * _iqr_sd
+                _hi_sd  = _q3_sd + 1.5 * _iqr_sd
+                _out_sd = (_arr_bx < _lo_sd) | (_arr_bx > _hi_sd)
+                _jit_sd = _rng_box_sd.uniform(-0.15, 0.15, len(_arr_bx))
+                ax_sdbox.scatter(
+                    np.full(int(np.sum(~_out_sd)), _bi + 1) + _jit_sd[~_out_sd],
+                    _arr_bx[~_out_sd], color=_coh_pal_sd[_bi],
+                    s=40, alpha=0.70, zorder=3,
+                )
+                if _out_sd.any():
+                    ax_sdbox.scatter(
+                        np.full(int(np.sum(_out_sd)), _bi + 1) + _jit_sd[_out_sd],
+                        _arr_bx[_out_sd], color='red', s=80, alpha=0.90,
+                        zorder=4, edgecolors='darkred', linewidths=1.5, marker='D',
+                        label='Outlier (1.5\u00d7IQR)' if not _outlier_legend_added_sd else '',
+                    )
+                    _outlier_legend_added_sd = True
+                    for _ov in _arr_bx[_out_sd]:
+                        ax_sdbox.annotate(
+                            f'{_ov:.3g}', xy=(_bi + 1, _ov),
+                            xytext=(8, 0), textcoords='offset points',
+                            fontsize=7, color='darkred', va='center',
+                        )
+            ax_sdbox.set_xlabel('Cohort', fontsize=10)
+            ax_sdbox.set_ylabel('Per-mouse mean (cm/s)', fontsize=10)
+            ax_sdbox.set_title(
+                'Box-and-whisker \u2014 per-mouse mean average speed by cohort\n'
+                '(whiskers extend to 1.5\u00d7IQR; \u25c6 red diamonds = outliers beyond fence)',
+                fontsize=10,
+            )
+            _handles_sd, _labels_sd = ax_sdbox.get_legend_handles_labels()
+            if _handles_sd:
+                ax_sdbox.legend(fontsize=8)
+            ax_sdbox.spines['top'].set_visible(False)
+            ax_sdbox.spines['right'].set_visible(False)
+            ax_sdbox.tick_params(axis='both', direction='in')
+
+            # [rows 2+] Per-cohort Normal Q-Q with 95% CI
+            for _ci, _cn in enumerate(_sd_cond_names):
+                _arr = np.array(_sd_groups[_cn])
+                _row_qq = 2 + _ci // 2
+                _col_qq = _ci % 2
+                _ax_qq = expl_speed_distfit_fig.add_subplot(_gs_sd[_row_qq, _col_qq])
+                _col_sd = _coh_pal_sd[_ci]
+                if len(_arr) >= 3:
+                    (_osm_sd, _osr_sd), (_sl_sd, _int_sd, _) = _probplot_sd(
+                        _arr, dist='norm',
+                    )
+                    _n_qq_sd = len(_arr)
+                    with _warnings_sd.catch_warnings():
+                        _warnings_sd.simplefilter('ignore')
+                        _ci_lo_sd = np.array([
+                            _norm_sd.ppf(_beta_sd.ppf(0.025, _i + 1, _n_qq_sd - _i))
+                            for _i in range(_n_qq_sd)
+                        ])
+                        _ci_hi_sd = np.array([
+                            _norm_sd.ppf(_beta_sd.ppf(0.975, _i + 1, _n_qq_sd - _i))
+                            for _i in range(_n_qq_sd)
+                        ])
+                    _ax_qq.fill_between(
+                        _osm_sd,
+                        _sl_sd * _ci_lo_sd + _int_sd,
+                        _sl_sd * _ci_hi_sd + _int_sd,
+                        color=_col_sd, alpha=0.18, label='95% CI',
+                    )
+                    _ax_qq.plot(_osm_sd, _osr_sd, 'o', color=_col_sd,
+                                markersize=7, alpha=0.85, label='Mouse mean')
+                    _ax_qq.plot(
+                        [_osm_sd[0], _osm_sd[-1]],
+                        [_sl_sd * _osm_sd[0] + _int_sd,
+                         _sl_sd * _osm_sd[-1] + _int_sd],
+                        'k-', linewidth=1.4, label='Reference line',
+                    )
+                    _w_sd, _p_sd = _sd_sw[_cn][:2]
+                    _verdict_sd = ('Normal (p>0.05) — t-test OK \u2713'
+                                   if _p_sd > 0.05
+                                   else 'Non-normal (p\u22640.05) — consider Mann-Whitney')
+                    _ax_qq.text(
+                        0.04, 0.96,
+                        f'SW: W={_w_sd:.4f}, p={_p_sd:.4f}\n{_verdict_sd}',
+                        transform=_ax_qq.transAxes, fontsize=8, va='top',
+                        bbox=dict(boxstyle='round,pad=0.3',
+                                  facecolor='#e6ffe6' if _p_sd > 0.05 else '#ffe6e6',
+                                  edgecolor=_col_sd, alpha=0.90),
+                    )
+                else:
+                    _ax_qq.text(
+                        0.5, 0.5,
+                        f'n={len(_arr)} — need \u22653\nfor Shapiro-Wilk / Q-Q',
+                        transform=_ax_qq.transAxes,
+                        ha='center', va='center', fontsize=10,
+                    )
+                _ax_qq.set_title(f'{_cn} — Normal Q-Q  (n={len(_arr)} mice)', fontsize=9)
+                _ax_qq.set_xlabel('Theoretical quantiles (Normal)', fontsize=8)
+                _ax_qq.set_ylabel('Observed quantiles', fontsize=8)
+                _ax_qq.legend(fontsize=7)
+                _ax_qq.spines['top'].set_visible(False)
+                _ax_qq.spines['right'].set_visible(False)
+                _ax_qq.tick_params(axis='both', direction='in')
+
+            # Hide unused Q-Q cell when odd cohort count
+            if _n_cg_sd % 2 == 1:
+                _ax_empty_sd = expl_speed_distfit_fig.add_subplot(
+                    _gs_sd[2 + (_n_cg_sd - 1) // 2, 1])
+                _ax_empty_sd.axis('off')
+
+            # [last row] Summary table
+            ax_sdtbl = expl_speed_distfit_fig.add_subplot(_gs_sd[_n_rows_sd - 1, :])
+            ax_sdtbl.axis('off')
+            _tbl_cols_sd = ['Cohort', 'N mice', 'Mean (cm/s)', 'SD', 'SW W', 'SW p',
+                            'T-test normality OK?']
+            _tbl_rows_sd = []
+            for _cn in _sd_cond_names:
+                _arr = np.array(_sd_groups[_cn])
+                _w_sd, _p_sd, _nn_sd = _sd_sw[_cn]
+                _mn_sd = float(np.mean(_arr))
+                _sdv_str = (f'{np.std(_arr, ddof=1):.4g}'
+                            if _nn_sd >= 2 else 'n/a')
+                _ok_sd = ('Yes' if (not np.isnan(_p_sd) and _p_sd > 0.05)
+                          else ('Insufficient n (need \u22653)'
+                                if np.isnan(_p_sd)
+                                else 'No \u2014 consider Mann-Whitney U'))
+                _tbl_rows_sd.append([
+                    _cn, str(_nn_sd), f'{_mn_sd:.4g}', _sdv_str,
+                    f'{_w_sd:.4f}' if not np.isnan(_w_sd) else 'n/a',
+                    f'{_p_sd:.4f}' if not np.isnan(_p_sd) else 'n/a',
+                    _ok_sd,
+                ])
+            _tbl_sd = ax_sdtbl.table(
+                cellText=_tbl_rows_sd, colLabels=_tbl_cols_sd,
+                cellLoc='center', loc='center', bbox=[0, 0, 1, 1],
+            )
+            _tbl_sd.auto_set_font_size(False)
+            _tbl_sd.set_fontsize(9)
+            for (_ri, _ci2), _cell in _tbl_sd.get_celld().items():
+                if _ri == 0:
+                    _cell.set_facecolor('#d0d8e8')
+                    _cell.set_text_props(fontweight='bold')
+                elif _ci2 == 6 and _ri > 0:
+                    _txt2 = _tbl_rows_sd[_ri - 1][6]
+                    _cell.set_facecolor(
+                        '#e6ffe6' if 'Yes' in _txt2
+                        else '#ffe6e6' if 'No' in _txt2
+                        else '#fffff0'
+                    )
+            ax_sdtbl.set_title(
+                'Normality summary — one mean per mouse per cohort '
+                '(Shapiro-Wilk, \u03b1=0.05)',
+                fontsize=9, pad=6,
+            )
+
+            expl_speed_distfit_fig.suptitle(
+                'Average Speed — Per-Mouse Means by Cohort\n'
+                '(N=1 value per mouse = mean across all sessions; '
+                'goal: assess normality for between-cohort t-test)',
+                fontsize=11, y=1.01,
+            )
+            expl_speed_distfit_fig.tight_layout()
+
+            print('\n\u2500\u2500 Average Speed \u2014 Per-Mouse Means by Cohort \u2500\u2500')
+            for _cn in _sd_cond_names:
+                _arr = np.array(_sd_groups[_cn])
+                _w_sd, _p_sd, _nn_sd = _sd_sw[_cn]
+                _sdv_str = f'{np.std(_arr, ddof=1):.4g}' if _nn_sd >= 2 else 'n/a'
+                _w_str   = f'{_w_sd:.4f}' if not np.isnan(_w_sd) else 'n/a'
+                _p_str   = f'{_p_sd:.4f}' if not np.isnan(_p_sd) else 'n/a'
+                print(f'  {_cn}: n={_nn_sd}, mean={np.mean(_arr):.4g}, '
+                      f'SD={_sdv_str}, SW W={_w_str}, p={_p_str}')
+
+        except Exception as _e:
+            import traceback as _tb_sd
+            print(f'[expl_speed_distfit] Error: {_e}')
+            _tb_sd.print_exc()
+            expl_speed_distfit_fig = None
 
     # ── Exploratory: speed box-and-whisker ────────────────────────────────────
     expl_speed_boxplot_fig = None
@@ -5409,306 +5703,281 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     expl_cap_distfit_fig = None
     if 'expl_cap_distfit' in selected_plots:
         try:
-            from scipy.stats import (norm as _norm_d, lognorm as _lognorm_d,
-                                     gamma as _gamma_d, probplot as _probplot_cd,
-                                     shapiro as _sw_cd, kstest as _kstest_cd)
-            from scipy.stats import gaussian_kde as _gkde_cd
+            from scipy.stats import (norm as _norm_cd, probplot as _probplot_cd,
+                                     shapiro as _sw_cd, beta as _beta_cd)
             from matplotlib.gridspec import GridSpec as _GridSpec_cd
             import warnings as _warnings_cd
 
-            # ── Collect per-session avg_cap values ────────────────────────────
-            _cd_all = []
-            _cd_per_mouse = []
+            # ── One mean per mouse, grouped by starting_condition ─────────────
+            _cd_groups = {}
             for _r in all_results:
                 _cv = pd.to_numeric(
                     _r['df'].get('avg_cap', pd.Series(dtype=float)), errors='coerce'
                 ).dropna().values
-                _cd_all.extend(_cv.tolist())
                 if len(_cv) > 0:
-                    _cd_per_mouse.append(float(np.mean(_cv)))
+                    _cond_cd = _r.get('starting_condition', 'Unknown')
+                    _cd_groups.setdefault(_cond_cd, []).append(float(np.mean(_cv)))
 
-            _cd_arr = np.array(_cd_all, dtype=float)
-            _cd_n   = len(_cd_arr)
-            _cd_mean   = float(np.mean(_cd_arr))
-            _cd_median = float(np.median(_cd_arr))
-            _cd_sd     = float(np.std(_cd_arr, ddof=1))
-            _cd_skew   = float(pd.Series(_cd_arr).skew())
-            _cd_kurt   = float(pd.Series(_cd_arr).kurt())  # excess kurtosis
+            _cd_cond_names = sorted(_cd_groups.keys())
+            _n_cg_cd = len(_cd_cond_names)
+            if _n_cg_cd == 0:
+                raise ValueError('No valid capacitance data found')
 
-            # Shapiro-Wilk on raw values
-            _cd_sw_stat, _cd_sw_p = _sw_cd(_cd_arr) if _cd_n >= 3 else (np.nan, np.nan)
+            # ── Shapiro-Wilk per cohort ────────────────────────────────────────
+            _cd_sw = {}
+            for _cn in _cd_cond_names:
+                _arr = np.array(_cd_groups[_cn])
+                if len(_arr) >= 3:
+                    _w, _p = _sw_cd(_arr)
+                    _cd_sw[_cn] = (float(_w), float(_p), len(_arr))
+                else:
+                    _cd_sw[_cn] = (np.nan, np.nan, len(_arr))
 
-            # ── MLE fits via scipy ────────────────────────────────────────────
-            # Normal
-            with _warnings_cd.catch_warnings():
-                _warnings_cd.simplefilter('ignore')
-                _nm_loc, _nm_scale = _norm_d.fit(_cd_arr)
-                _nm_ll  = float(np.sum(_norm_d.logpdf(_cd_arr, _nm_loc, _nm_scale)))
-                _nm_aic = 2 * 2 - 2 * _nm_ll   # 2 params: μ, σ
-                _nm_ks  = float(_kstest_cd(_cd_arr, 'norm',
-                                           args=(_nm_loc, _nm_scale)).statistic)
+            # ── Figure layout ─────────────────────────────────────────────────
+            # Row 0 (full width): overlaid histograms + Normal fit + rug marks
+            # Rows 1.._n_qq_rows: per-cohort Normal Q-Q plots (2-column grid)
+            # Last row (full width): summary normality table
+            _n_qq_rows_cd = (_n_cg_cd + 1) // 2
+            _n_rows_cd = 1 + 1 + _n_qq_rows_cd + 1  # +1 row for box plot
+            _coh_pal_cd = [plt.cm.tab10(i / max(_n_cg_cd - 1, 1))
+                           for i in range(_n_cg_cd)]
 
-            # Log-normal (requires positive values)
-            _cd_pos = _cd_arr[_cd_arr > 0]
-            _ln_ok  = len(_cd_pos) >= 5
-            if _ln_ok:
-                with _warnings_cd.catch_warnings():
-                    _warnings_cd.simplefilter('ignore')
-                    _ln_s, _ln_loc, _ln_scale = _lognorm_d.fit(_cd_pos, floc=0)
-                    _ln_ll  = float(np.sum(_lognorm_d.logpdf(_cd_pos, _ln_s, _ln_loc, _ln_scale)))
-                    _ln_aic = 2 * 2 - 2 * _ln_ll   # 2 free params (s, scale; loc fixed at 0)
-                    _ln_ks  = float(_kstest_cd(_cd_pos, 'lognorm',
-                                               args=(_ln_s, _ln_loc, _ln_scale)).statistic)
-            else:
-                _ln_s = _ln_loc = _ln_scale = _ln_ll = _ln_aic = _ln_ks = np.nan
+            expl_cap_distfit_fig = plt.figure(figsize=(13, 4.5 * _n_rows_cd))
+            _gs_cd = _GridSpec_cd(_n_rows_cd, 2, figure=expl_cap_distfit_fig,
+                                  hspace=0.60, wspace=0.38)
+            ax_cdhist = expl_cap_distfit_fig.add_subplot(_gs_cd[0, :])
 
-            # Gamma (requires positive values)
-            _gm_ok = len(_cd_pos) >= 5
-            if _gm_ok:
-                with _warnings_cd.catch_warnings():
-                    _warnings_cd.simplefilter('ignore')
-                    _gm_a, _gm_loc, _gm_scale = _gamma_d.fit(_cd_pos, floc=0)
-                    _gm_ll  = float(np.sum(_gamma_d.logpdf(_cd_pos, _gm_a, _gm_loc, _gm_scale)))
-                    _gm_aic = 2 * 2 - 2 * _gm_ll   # 2 free params (a, scale; loc fixed at 0)
-                    _gm_ks  = float(_kstest_cd(_cd_pos, 'gamma',
-                                               args=(_gm_a, _gm_loc, _gm_scale)).statistic)
-            else:
-                _gm_a = _gm_loc = _gm_scale = _gm_ll = _gm_aic = _gm_ks = np.nan
+            # [row 0] Overlaid histograms + Normal fit + rug marks
+            _cd_rng = np.random.default_rng(42)
+            for _ci, _cn in enumerate(_cd_cond_names):
+                _arr = np.array(_cd_groups[_cn])
+                _col_cd = _coh_pal_cd[_ci]
+                _sw_lbl = (f'SW p={_cd_sw[_cn][1]:.3f}'
+                           if not np.isnan(_cd_sw[_cn][1]) else 'SW: n<3')
+                _nbins_cd = max(4, len(_arr) // 2 + 1)
+                ax_cdhist.hist(_arr, bins=_nbins_cd, alpha=0.40, color=_col_cd,
+                               density=True, edgecolor='white', linewidth=0.5,
+                               label=f'{_cn}  (n={len(_arr)}, {_sw_lbl})')
+                if len(_arr) >= 3:
+                    _mn_cd = float(np.mean(_arr))
+                    _sdv_cd = float(np.std(_arr, ddof=1))
+                    _xfit_cd = np.linspace(_mn_cd - 4 * _sdv_cd,
+                                           _mn_cd + 4 * _sdv_cd, 300)
+                    ax_cdhist.plot(_xfit_cd, _norm_cd.pdf(_xfit_cd, _mn_cd, _sdv_cd),
+                                   color=_col_cd, linewidth=2.0, linestyle='--')
+                _jit_cd = _cd_rng.uniform(-0.003, 0.003, len(_arr))
+                ax_cdhist.plot(_arr, _jit_cd, '|', color=_col_cd,
+                               markersize=14, markeredgewidth=2.5, alpha=0.75)
 
-            # ── Determine preferred distribution ──────────────────────────────
-            _cd_aics = {'Normal': _nm_aic}
-            if _ln_ok:
-                _cd_aics['Log-normal'] = _ln_aic
-            if _gm_ok:
-                _cd_aics['Gamma'] = _gm_aic
-            _cd_best = min(_cd_aics, key=_cd_aics.get)
-            _cd_delta_aics = {k: v - _cd_aics[_cd_best] for k, v in _cd_aics.items()}
-
-            # ── Build figure ──────────────────────────────────────────────────
-            expl_cap_distfit_fig = plt.figure(figsize=(14, 16))
-            _gs_cd = _GridSpec_cd(3, 2, figure=expl_cap_distfit_fig,
-                                  hspace=0.42, wspace=0.38)
-            ax_cdhist = expl_cap_distfit_fig.add_subplot(_gs_cd[0, :])   # full-width histogram
-            ax_cdnm   = expl_cap_distfit_fig.add_subplot(_gs_cd[1, 0])   # Normal Q-Q
-            ax_cdln   = expl_cap_distfit_fig.add_subplot(_gs_cd[1, 1])   # Log-normal Q-Q
-            ax_cdgm   = expl_cap_distfit_fig.add_subplot(_gs_cd[2, 0])   # Gamma Q-Q
-            ax_cdaic  = expl_cap_distfit_fig.add_subplot(_gs_cd[2, 1])   # AIC comparison
-
-            # ── [0, :] Raw histogram + fitted PDFs + KDE ──────────────────────
-            _cd_plot_arr = _cd_pos if (not _ln_ok or _cd_arr.min() <= 0) else _cd_arr
-            ax_cdhist.hist(_cd_plot_arr, bins='auto', color='steelblue', alpha=0.50,
-                           edgecolor='white', linewidth=0.5, density=True,
-                           label='Observed (density)')
-            # KDE
-            if _cd_n >= 3:
-                try:
-                    _cd_kde_fn = _gkde_cd(_cd_plot_arr)
-                    _cd_x = np.linspace(_cd_plot_arr.min(), _cd_plot_arr.max(), 500)
-                    ax_cdhist.plot(_cd_x, _cd_kde_fn(_cd_x), color='navy',
-                                   linewidth=2.2, label='KDE (observed)')
-                except Exception:
-                    pass
-            # Normal PDF
-            _cd_x_all = np.linspace(_nm_loc - 4 * _nm_scale,
-                                    _nm_loc + 4 * _nm_scale, 500)
-            ax_cdhist.plot(_cd_x_all, _norm_d.pdf(_cd_x_all, _nm_loc, _nm_scale),
-                           color='crimson', linewidth=1.8, linestyle='-',
-                           label=f'Normal (\u03bc={_nm_loc:.3g}, \u03c3={_nm_scale:.3g})')
-            # Log-normal PDF
-            if _ln_ok:
-                _cd_x_pos = np.linspace(_cd_pos.min() * 0.5, _cd_pos.max() * 1.2, 500)
-                ax_cdhist.plot(_cd_x_pos,
-                               _lognorm_d.pdf(_cd_x_pos, _ln_s, _ln_loc, _ln_scale),
-                               color='darkorange', linewidth=1.8, linestyle='--',
-                               label=f'Log-normal (s={_ln_s:.3g})')
-            # Gamma PDF
-            if _gm_ok:
-                ax_cdhist.plot(_cd_x_pos,
-                               _gamma_d.pdf(_cd_x_pos, _gm_a, _gm_loc, _gm_scale),
-                               color='darkgreen', linewidth=1.8, linestyle=':',
-                               label=f'Gamma (a={_gm_a:.3g})')
+            ax_cdhist.set_xlabel('Per-mouse mean z-scored capacitive sensor value', fontsize=10)
+            ax_cdhist.set_ylabel('Density', fontsize=10)
             ax_cdhist.set_title(
-                f'Raw Capacitive Sensor Value Histogram — all sessions (n={_cd_n})  |  '
-                f'mean={_cd_mean:.4g}  median={_cd_median:.4g}  '
-                f'SD={_cd_sd:.4g}  skew={_cd_skew:.3f}  excess kurt={_cd_kurt:.3f}',
-                fontsize=9,
+                'Per-mouse mean capacitive sensor value — distribution by cohort\n'
+                '(each point = one mouse; dashed lines = Normal fit; '
+                'tick marks = individual mice)',
+                fontsize=10,
             )
-            ax_cdhist.set_xlabel('Mean capacitive sensor value per session (raw units)')
-            ax_cdhist.set_ylabel('Density')
             ax_cdhist.legend(fontsize=8)
-            ax_cdhist.tick_params(axis='both', direction='in')
             ax_cdhist.spines['top'].set_visible(False)
             ax_cdhist.spines['right'].set_visible(False)
-            _sw_label_hist = (f'Shapiro-Wilk (raw): W={_cd_sw_stat:.4f}, p={_cd_sw_p:.4f}\n'
-                              f'{"Normal (p>0.05)" if _cd_sw_p > 0.05 else "Non-normal (p\u22640.05)"}')
-            ax_cdhist.text(0.98, 0.98, _sw_label_hist, transform=ax_cdhist.transAxes,
-                           fontsize=8, va='top', ha='right',
-                           bbox=dict(boxstyle='round,pad=0.3', facecolor='lightyellow',
-                                     edgecolor='gray', alpha=0.85))
+            ax_cdhist.tick_params(axis='both', direction='in')
 
-            # ── [1, 0] Normal Q-Q ─────────────────────────────────────────────
-            (_cd_nm_osm, _cd_nm_osr), (_cd_nm_sl, _cd_nm_int, _) = _probplot_cd(
-                _cd_arr, dist='norm', sparams=(_nm_loc, _nm_scale),
+            # [row 1] Box-and-whisker with 1.5×IQR outlier highlighting
+            ax_cdbox = expl_cap_distfit_fig.add_subplot(_gs_cd[1, :])
+            _bp_data_cd = [np.array(_cd_groups[_cn]) for _cn in _cd_cond_names]
+            _bplot_cd = ax_cdbox.boxplot(
+                _bp_data_cd, labels=_cd_cond_names, patch_artist=True,
+                showfliers=False, widths=0.50,
+                boxprops=dict(linewidth=1.4),
+                whiskerprops=dict(linewidth=1.2, linestyle='--'),
+                capprops=dict(linewidth=1.4),
+                medianprops=dict(color='black', linewidth=2.0),
             )
-            ax_cdnm.plot(_cd_nm_osm, _cd_nm_osr, 'o', color='crimson',
-                         markersize=4, alpha=0.6, label='Data')
-            ax_cdnm.plot([_cd_nm_osm[0], _cd_nm_osm[-1]],
-                         [_cd_nm_sl * _cd_nm_osm[0] + _cd_nm_int,
-                          _cd_nm_sl * _cd_nm_osm[-1] + _cd_nm_int],
-                         'k-', linewidth=1.5, label='Reference line')
-            ax_cdnm.set_title('Normal Q-Q')
-            ax_cdnm.set_xlabel('Theoretical quantiles (Normal)')
-            ax_cdnm.set_ylabel('Observed quantiles')
-            ax_cdnm.legend(fontsize=8)
-            ax_cdnm.tick_params(axis='both', direction='in')
-            ax_cdnm.spines['top'].set_visible(False)
-            ax_cdnm.spines['right'].set_visible(False)
-            ax_cdnm.text(0.03, 0.97,
-                         f'AIC={_nm_aic:.2f}\nKS D={_nm_ks:.4f}\n'
-                         f'SW p={_cd_sw_p:.4f}',
-                         transform=ax_cdnm.transAxes, fontsize=8, va='top',
-                         bbox=dict(boxstyle='round,pad=0.3', facecolor='#fff0f0',
-                                   edgecolor='crimson', alpha=0.85))
-
-            # ── [1, 1] Log-normal Q-Q ─────────────────────────────────────────
-            if _ln_ok:
-                (_cd_ln_osm, _cd_ln_osr), (_cd_ln_sl, _cd_ln_int, _) = _probplot_cd(
-                    _cd_pos, dist='lognorm', sparams=(_ln_s, _ln_loc, _ln_scale),
+            for _bi, _bpatch in enumerate(_bplot_cd['boxes']):
+                _bc = _coh_pal_cd[_bi]
+                _bpatch.set_facecolor([*_bc[:3], 0.35])
+                _bpatch.set_edgecolor(_bc)
+            _rng_box_cd = np.random.default_rng(1)
+            _outlier_legend_added_cd = False
+            for _bi, _cn in enumerate(_cd_cond_names):
+                _arr_bx = np.array(_cd_groups[_cn])
+                _q1_cd  = float(np.percentile(_arr_bx, 25))
+                _q3_cd  = float(np.percentile(_arr_bx, 75))
+                _iqr_cd = _q3_cd - _q1_cd
+                _lo_cd  = _q1_cd - 1.5 * _iqr_cd
+                _hi_cd  = _q3_cd + 1.5 * _iqr_cd
+                _out_cd = (_arr_bx < _lo_cd) | (_arr_bx > _hi_cd)
+                _jit_cd = _rng_box_cd.uniform(-0.15, 0.15, len(_arr_bx))
+                ax_cdbox.scatter(
+                    np.full(int(np.sum(~_out_cd)), _bi + 1) + _jit_cd[~_out_cd],
+                    _arr_bx[~_out_cd], color=_coh_pal_cd[_bi],
+                    s=40, alpha=0.70, zorder=3,
                 )
-                ax_cdln.plot(_cd_ln_osm, _cd_ln_osr, 'o', color='darkorange',
-                             markersize=4, alpha=0.6, label='Data')
-                ax_cdln.plot([_cd_ln_osm[0], _cd_ln_osm[-1]],
-                             [_cd_ln_sl * _cd_ln_osm[0] + _cd_ln_int,
-                              _cd_ln_sl * _cd_ln_osm[-1] + _cd_ln_int],
-                             'k-', linewidth=1.5, label='Reference line')
-                ax_cdln.set_title('Log-normal Q-Q')
-                ax_cdln.set_xlabel('Theoretical quantiles (Log-normal)')
-                ax_cdln.set_ylabel('Observed quantiles')
-                ax_cdln.legend(fontsize=8)
-                ax_cdln.tick_params(axis='both', direction='in')
-                ax_cdln.spines['top'].set_visible(False)
-                ax_cdln.spines['right'].set_visible(False)
-                ax_cdln.text(0.03, 0.97,
-                             f'AIC={_ln_aic:.2f}\nKS D={_ln_ks:.4f}',
-                             transform=ax_cdln.transAxes, fontsize=8, va='top',
-                             bbox=dict(boxstyle='round,pad=0.3', facecolor='#fff5e0',
-                                       edgecolor='darkorange', alpha=0.85))
-            else:
-                ax_cdln.text(0.5, 0.5, 'Log-normal fit unavailable\n(requires positive values)',
-                             transform=ax_cdln.transAxes, ha='center', va='center', fontsize=10)
-                ax_cdln.axis('off')
-
-            # ── [2, 0] Gamma Q-Q ──────────────────────────────────────────────
-            if _gm_ok:
-                (_cd_gm_osm, _cd_gm_osr), (_cd_gm_sl, _cd_gm_int, _) = _probplot_cd(
-                    _cd_pos, dist='gamma', sparams=(_gm_a, _gm_loc, _gm_scale),
-                )
-                ax_cdgm.plot(_cd_gm_osm, _cd_gm_osr, 'o', color='darkgreen',
-                             markersize=4, alpha=0.6, label='Data')
-                ax_cdgm.plot([_cd_gm_osm[0], _cd_gm_osm[-1]],
-                             [_cd_gm_sl * _cd_gm_osm[0] + _cd_gm_int,
-                              _cd_gm_sl * _cd_gm_osm[-1] + _cd_gm_int],
-                             'k-', linewidth=1.5, label='Reference line')
-                ax_cdgm.set_title('Gamma Q-Q')
-                ax_cdgm.set_xlabel('Theoretical quantiles (Gamma)')
-                ax_cdgm.set_ylabel('Observed quantiles')
-                ax_cdgm.legend(fontsize=8)
-                ax_cdgm.tick_params(axis='both', direction='in')
-                ax_cdgm.spines['top'].set_visible(False)
-                ax_cdgm.spines['right'].set_visible(False)
-                ax_cdgm.text(0.03, 0.97,
-                             f'AIC={_gm_aic:.2f}\nKS D={_gm_ks:.4f}',
-                             transform=ax_cdgm.transAxes, fontsize=8, va='top',
-                             bbox=dict(boxstyle='round,pad=0.3', facecolor='#f0fff0',
-                                       edgecolor='darkgreen', alpha=0.85))
-            else:
-                ax_cdgm.text(0.5, 0.5, 'Gamma fit unavailable\n(requires positive values)',
-                             transform=ax_cdgm.transAxes, ha='center', va='center', fontsize=10)
-                ax_cdgm.axis('off')
-
-            # ── [2, 1] AIC comparison bar chart ───────────────────────────────
-            _aic_names  = list(_cd_aics.keys())
-            _aic_vals   = [_cd_aics[k] for k in _aic_names]
-            _aic_deltas = [_cd_delta_aics[k] for k in _aic_names]
-            _aic_colors = ['crimson' if k == 'Normal'
-                           else 'darkorange' if k == 'Log-normal'
-                           else 'darkgreen'
-                           for k in _aic_names]
-            _aic_hatches = ['//' if k == _cd_best else '' for k in _aic_names]
-            _aic_bars = ax_cdaic.bar(_aic_names, _aic_vals,
-                                     color=_aic_colors, alpha=0.70,
-                                     edgecolor='black', linewidth=0.8)
-            for _bar, _hatch in zip(_aic_bars, _aic_hatches):
-                _bar.set_hatch(_hatch)
-            # Annotate bars with ΔAIC
-            for _bar, _daic in zip(_aic_bars, _aic_deltas):
-                _xc = _bar.get_x() + _bar.get_width() / 2
-                _yc = _bar.get_height()
-                ax_cdaic.text(_xc, _yc * 1.005,
-                              f'\u0394AIC={_daic:+.1f}',
-                              ha='center', va='bottom', fontsize=8)
-            ax_cdaic.set_title(
-                f'AIC Comparison\n(hatched = preferred: {_cd_best}  |  lower AIC = better fit)',
-                fontsize=9,
+                if _out_cd.any():
+                    ax_cdbox.scatter(
+                        np.full(int(np.sum(_out_cd)), _bi + 1) + _jit_cd[_out_cd],
+                        _arr_bx[_out_cd], color='red', s=80, alpha=0.90,
+                        zorder=4, edgecolors='darkred', linewidths=1.5, marker='D',
+                        label='Outlier (1.5\u00d7IQR)' if not _outlier_legend_added_cd else '',
+                    )
+                    _outlier_legend_added_cd = True
+                    for _ov in _arr_bx[_out_cd]:
+                        ax_cdbox.annotate(
+                            f'{_ov:.3g}', xy=(_bi + 1, _ov),
+                            xytext=(8, 0), textcoords='offset points',
+                            fontsize=7, color='darkred', va='center',
+                        )
+            ax_cdbox.set_xlabel('Cohort', fontsize=10)
+            ax_cdbox.set_ylabel('Per-mouse mean (z-score)', fontsize=10)
+            ax_cdbox.set_title(
+                'Box-and-whisker \u2014 per-mouse mean z-scored capacitive value by cohort\n'
+                '(whiskers extend to 1.5\u00d7IQR; \u25c6 red diamonds = outliers beyond fence)',
+                fontsize=10,
             )
-            ax_cdaic.set_ylabel('AIC')
-            ax_cdaic.tick_params(axis='both', direction='in')
-            ax_cdaic.spines['top'].set_visible(False)
-            ax_cdaic.spines['right'].set_visible(False)
-            # KS D table inside the panel
-            _ks_lines = ['KS statistic D (lower = better):']
-            for _kn, _kd in [('Normal', _nm_ks),
-                              ('Log-normal', _ln_ks if _ln_ok else float('nan')),
-                              ('Gamma', _gm_ks if _gm_ok else float('nan'))]:
-                _ks_lines.append(f'  {_kn:<12}: {_kd:.4f}')
-            ax_cdaic.text(0.02, 0.04, '\n'.join(_ks_lines),
-                          transform=ax_cdaic.transAxes, fontsize=7.5,
-                          va='bottom', ha='left', family='monospace',
-                          bbox=dict(boxstyle='round,pad=0.35', facecolor='#f5f5f5',
-                                    edgecolor='gray', alpha=0.88))
+            _handles_cd, _labels_cd = ax_cdbox.get_legend_handles_labels()
+            if _handles_cd:
+                ax_cdbox.legend(fontsize=8)
+            ax_cdbox.spines['top'].set_visible(False)
+            ax_cdbox.spines['right'].set_visible(False)
+            ax_cdbox.tick_params(axis='both', direction='in')
 
-            # ── Suptitle ──────────────────────────────────────────────────────
-            _cd_summary = (
-                f'Capacitive Sensor Value Distribution Fit  |  '
-                f'n={_cd_n} sessions, {len(_cd_per_mouse)} mice  |  '
-                f'mean={_cd_mean:.4g}  SD={_cd_sd:.4g}  '
-                f'skew={_cd_skew:.3f}  kurt={_cd_kurt:.3f}  |  '
-                f'SW p={_cd_sw_p:.4f}  |  '
-                f'Best fit (AIC): {_cd_best}'
+            # [rows 2+] Per-cohort Normal Q-Q with 95% CI
+            for _ci, _cn in enumerate(_cd_cond_names):
+                _arr = np.array(_cd_groups[_cn])
+                _row_qq = 2 + _ci // 2
+                _col_qq = _ci % 2
+                _ax_qq = expl_cap_distfit_fig.add_subplot(_gs_cd[_row_qq, _col_qq])
+                _col_cd = _coh_pal_cd[_ci]
+                if len(_arr) >= 3:
+                    (_osm_cd, _osr_cd), (_sl_cd, _int_cd, _) = _probplot_cd(
+                        _arr, dist='norm',
+                    )
+                    _n_qq_cd = len(_arr)
+                    with _warnings_cd.catch_warnings():
+                        _warnings_cd.simplefilter('ignore')
+                        _ci_lo_cd = np.array([
+                            _norm_cd.ppf(_beta_cd.ppf(0.025, _i + 1, _n_qq_cd - _i))
+                            for _i in range(_n_qq_cd)
+                        ])
+                        _ci_hi_cd = np.array([
+                            _norm_cd.ppf(_beta_cd.ppf(0.975, _i + 1, _n_qq_cd - _i))
+                            for _i in range(_n_qq_cd)
+                        ])
+                    _ax_qq.fill_between(
+                        _osm_cd,
+                        _sl_cd * _ci_lo_cd + _int_cd,
+                        _sl_cd * _ci_hi_cd + _int_cd,
+                        color=_col_cd, alpha=0.18, label='95% CI',
+                    )
+                    _ax_qq.plot(_osm_cd, _osr_cd, 'o', color=_col_cd,
+                                markersize=7, alpha=0.85, label='Mouse mean')
+                    _ax_qq.plot(
+                        [_osm_cd[0], _osm_cd[-1]],
+                        [_sl_cd * _osm_cd[0] + _int_cd,
+                         _sl_cd * _osm_cd[-1] + _int_cd],
+                        'k-', linewidth=1.4, label='Reference line',
+                    )
+                    _w_cd, _p_cd = _cd_sw[_cn][:2]
+                    _verdict_cd = ('Normal (p>0.05) \u2014 t-test OK \u2713'
+                                   if _p_cd > 0.05
+                                   else 'Non-normal (p\u22640.05) \u2014 consider Mann-Whitney')
+                    _ax_qq.text(
+                        0.04, 0.96,
+                        f'SW: W={_w_cd:.4f}, p={_p_cd:.4f}\n{_verdict_cd}',
+                        transform=_ax_qq.transAxes, fontsize=8, va='top',
+                        bbox=dict(boxstyle='round,pad=0.3',
+                                  facecolor='#e6ffe6' if _p_cd > 0.05 else '#ffe6e6',
+                                  edgecolor=_col_cd, alpha=0.90),
+                    )
+                else:
+                    _ax_qq.text(
+                        0.5, 0.5,
+                        f'n={len(_arr)} \u2014 need \u22653\nfor Shapiro-Wilk / Q-Q',
+                        transform=_ax_qq.transAxes,
+                        ha='center', va='center', fontsize=10,
+                    )
+                _ax_qq.set_title(f'{_cn} \u2014 Normal Q-Q  (n={len(_arr)} mice)', fontsize=9)
+                _ax_qq.set_xlabel('Theoretical quantiles (Normal)', fontsize=8)
+                _ax_qq.set_ylabel('Observed quantiles', fontsize=8)
+                _ax_qq.legend(fontsize=7)
+                _ax_qq.spines['top'].set_visible(False)
+                _ax_qq.spines['right'].set_visible(False)
+                _ax_qq.tick_params(axis='both', direction='in')
+
+            # Hide unused Q-Q cell when odd cohort count
+            if _n_cg_cd % 2 == 1:
+                _ax_empty_cd = expl_cap_distfit_fig.add_subplot(
+                    _gs_cd[2 + (_n_cg_cd - 1) // 2, 1])
+                _ax_empty_cd.axis('off')
+
+            # [last row] Summary table
+            ax_cdtbl = expl_cap_distfit_fig.add_subplot(_gs_cd[_n_rows_cd - 1, :])
+            ax_cdtbl.axis('off')
+            _tbl_cols_cd = ['Cohort', 'N mice', 'Mean (z-score)', 'SD',
+                            'SW W', 'SW p', 'T-test normality OK?']
+            _tbl_rows_cd = []
+            for _cn in _cd_cond_names:
+                _arr = np.array(_cd_groups[_cn])
+                _w_cd, _p_cd, _nn_cd = _cd_sw[_cn]
+                _mn_cd = float(np.mean(_arr))
+                _sdv_str = (f'{np.std(_arr, ddof=1):.4g}'
+                            if _nn_cd >= 2 else 'n/a')
+                _ok_cd = ('Yes' if (not np.isnan(_p_cd) and _p_cd > 0.05)
+                          else ('Insufficient n (need \u22653)'
+                                if np.isnan(_p_cd)
+                                else 'No \u2014 consider Mann-Whitney U'))
+                _tbl_rows_cd.append([
+                    _cn, str(_nn_cd), f'{_mn_cd:.4g}', _sdv_str,
+                    f'{_w_cd:.4f}' if not np.isnan(_w_cd) else 'n/a',
+                    f'{_p_cd:.4f}' if not np.isnan(_p_cd) else 'n/a',
+                    _ok_cd,
+                ])
+            _tbl_cd = ax_cdtbl.table(
+                cellText=_tbl_rows_cd, colLabels=_tbl_cols_cd,
+                cellLoc='center', loc='center', bbox=[0, 0, 1, 1],
             )
-            expl_cap_distfit_fig.suptitle(_cd_summary, fontsize=9, y=1.01, wrap=True)
+            _tbl_cd.auto_set_font_size(False)
+            _tbl_cd.set_fontsize(9)
+            for (_ri, _ci2), _cell in _tbl_cd.get_celld().items():
+                if _ri == 0:
+                    _cell.set_facecolor('#d0d8e8')
+                    _cell.set_text_props(fontweight='bold')
+                elif _ci2 == 6 and _ri > 0:
+                    _txt2 = _tbl_rows_cd[_ri - 1][6]
+                    _cell.set_facecolor(
+                        '#e6ffe6' if 'Yes' in _txt2
+                        else '#ffe6e6' if 'No' in _txt2
+                        else '#fffff0'
+                    )
+            ax_cdtbl.set_title(
+                'Normality summary \u2014 one mean per mouse per cohort '
+                '(Shapiro-Wilk, \u03b1=0.05)',
+                fontsize=9, pad=6,
+            )
+
+            expl_cap_distfit_fig.suptitle(
+                'Z-Scored Capacitive Sensor Value \u2014 Per-Mouse Means by Cohort\n'
+                '(N=1 value per mouse = mean across all sessions; '
+                'goal: assess normality for between-cohort t-test)',
+                fontsize=11, y=1.01,
+            )
             expl_cap_distfit_fig.tight_layout()
 
-            # ── Console summary ───────────────────────────────────────────────
-            print('\n\u2500\u2500 Capacitive Sensor Value Distribution Fit \u2500\u2500')
-            print(f'  N sessions:         {_cd_n}')
-            print(f'  N mice:             {len(_cd_per_mouse)}')
-            print(f'  Mean:               {_cd_mean:.6g}')
-            print(f'  Median:             {_cd_median:.6g}')
-            print(f'  SD:                 {_cd_sd:.6g}')
-            print(f'  Skewness:           {_cd_skew:.4f}  (0 = symmetric)')
-            print(f'  Excess kurtosis:    {_cd_kurt:.4f}  (0 = normal)')
-            print(f'  Shapiro-Wilk:       W={_cd_sw_stat:.4f}, p={_cd_sw_p:.6f}')
-            print(f'  Normal    AIC={_nm_aic:.2f}  KS D={_nm_ks:.4f}  '
-                  f'\u0394AIC={_cd_delta_aics["Normal"]:+.2f}')
-            if _ln_ok:
-                print(f'  Log-normal AIC={_ln_aic:.2f}  KS D={_ln_ks:.4f}  '
-                      f'\u0394AIC={_cd_delta_aics["Log-normal"]:+.2f}  '
-                      f's={_ln_s:.4f}')
-            else:
-                print('  Log-normal: unavailable (non-positive values present)')
-            if _gm_ok:
-                print(f'  Gamma     AIC={_gm_aic:.2f}  KS D={_gm_ks:.4f}  '
-                      f'\u0394AIC={_cd_delta_aics["Gamma"]:+.2f}  '
-                      f'a={_gm_a:.4f}')
-            else:
-                print('  Gamma: unavailable (non-positive values present)')
-            print(f'  \u2192 Preferred distribution (lowest AIC): {_cd_best}')
+            print('\n\u2500\u2500 Capacitive Sensor Value \u2014 Per-Mouse Means by Cohort \u2500\u2500')
+            for _cn in _cd_cond_names:
+                _arr = np.array(_cd_groups[_cn])
+                _w_cd, _p_cd, _nn_cd = _cd_sw[_cn]
+                _sdv_str = f'{np.std(_arr, ddof=1):.4g}' if _nn_cd >= 2 else 'n/a'
+                _w_str   = f'{_w_cd:.4f}' if not np.isnan(_w_cd) else 'n/a'
+                _p_str   = f'{_p_cd:.4f}' if not np.isnan(_p_cd) else 'n/a'
+                print(f'  {_cn}: n={_nn_cd}, mean={np.mean(_arr):.4g}, '
+                      f'SD={_sdv_str}, SW W={_w_str}, p={_p_str}')
 
         except Exception as _e:
             import traceback as _tb_cd
             print(f'[expl_cap_distfit] Error: {_e}')
             _tb_cd.print_exc()
+            expl_cap_distfit_fig = None
 
     # ── Exploratory: lick count Poisson vs Negative Binomial distribution fit ──
     # Step 1 before any ANOVA: determine whether the count DV is Poisson-
@@ -6457,209 +6726,571 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         except Exception as _e:
             print(f'[expl_lick_rm_anova_resid] Error: {_e}')
 
+    # ── Exploratory: average lick rate distribution fit (per-mouse means by cohort) ─
+    # One mean per mouse; grouped by starting_condition.
+    # Goal: assess normality per cohort to decide whether a t-test is appropriate.
+    expl_lick_rate_distfit_fig = None
+    if 'expl_lick_rate_distfit' in selected_plots:
+        try:
+            from scipy.stats import (norm as _norm_lr, probplot as _probplot_lr,
+                                     shapiro as _sw_lr, beta as _beta_lr)
+            from matplotlib.gridspec import GridSpec as _GridSpec_lr
+            import warnings as _warnings_lr
+
+            # ── One mean per mouse, grouped by starting_condition ─────────────
+            _lr_groups = {}
+            for _r in all_results:
+                _df_lr = _r['df']
+                _lc = pd.to_numeric(_df_lr['lick_count'], errors='coerce')
+                _sl = pd.to_numeric(_df_lr['session_length'], errors='coerce')
+                _valid_lr = (_lc >= 0) & (_sl > 0) & _lc.notna() & _sl.notna()
+                _lrv = (_lc[_valid_lr] / _sl[_valid_lr]).values
+                if len(_lrv) > 0:
+                    _cond_lr = _r.get('starting_condition', 'Unknown')
+                    _lr_groups.setdefault(_cond_lr, []).append(float(np.mean(_lrv)))
+
+            _lr_cond_names = sorted(_lr_groups.keys())
+            _n_cg_lr = len(_lr_cond_names)
+            if _n_cg_lr == 0:
+                raise ValueError('No valid lick rate data found')
+
+            # ── Shapiro-Wilk per cohort ────────────────────────────────────────
+            _lr_sw = {}
+            for _cn in _lr_cond_names:
+                _arr = np.array(_lr_groups[_cn])
+                if len(_arr) >= 3:
+                    _w, _p = _sw_lr(_arr)
+                    _lr_sw[_cn] = (float(_w), float(_p), len(_arr))
+                else:
+                    _lr_sw[_cn] = (np.nan, np.nan, len(_arr))
+
+            # ── Figure layout ─────────────────────────────────────────────────
+            _n_qq_rows_lr = (_n_cg_lr + 1) // 2
+            _n_rows_lr = 1 + 1 + _n_qq_rows_lr + 1  # +1 row for box plot
+            _coh_pal_lr = [plt.cm.tab10(i / max(_n_cg_lr - 1, 1))
+                           for i in range(_n_cg_lr)]
+
+            expl_lick_rate_distfit_fig = plt.figure(figsize=(13, 4.5 * _n_rows_lr))
+            _gs_lr = _GridSpec_lr(_n_rows_lr, 2, figure=expl_lick_rate_distfit_fig,
+                                  hspace=0.60, wspace=0.38)
+            ax_lrhist = expl_lick_rate_distfit_fig.add_subplot(_gs_lr[0, :])
+
+            # [row 0] Overlaid histograms + Normal fit + rug marks
+            _lr_rng = np.random.default_rng(42)
+            for _ci, _cn in enumerate(_lr_cond_names):
+                _arr = np.array(_lr_groups[_cn])
+                _col_lr = _coh_pal_lr[_ci]
+                _sw_lbl_lr = (f'SW p={_lr_sw[_cn][1]:.3f}'
+                              if not np.isnan(_lr_sw[_cn][1]) else 'SW: n<3')
+                _nbins_lr = max(4, len(_arr) // 2 + 1)
+                ax_lrhist.hist(_arr, bins=_nbins_lr, alpha=0.40, color=_col_lr,
+                               density=True, edgecolor='white', linewidth=0.5,
+                               label=f'{_cn}  (n={len(_arr)}, {_sw_lbl_lr})')
+                if len(_arr) >= 3:
+                    _mn_lr = float(np.mean(_arr))
+                    _sdv_lr = float(np.std(_arr, ddof=1))
+                    _xfit_lr = np.linspace(_mn_lr - 4 * _sdv_lr,
+                                           _mn_lr + 4 * _sdv_lr, 300)
+                    ax_lrhist.plot(_xfit_lr, _norm_lr.pdf(_xfit_lr, _mn_lr, _sdv_lr),
+                                   color=_col_lr, linewidth=2.0, linestyle='--')
+                _jit_lr = _lr_rng.uniform(-0.003, 0.003, len(_arr))
+                ax_lrhist.plot(_arr, _jit_lr, '|', color=_col_lr,
+                               markersize=14, markeredgewidth=2.5, alpha=0.75)
+
+            ax_lrhist.set_xlabel('Per-mouse mean lick rate (licks/min)', fontsize=10)
+            ax_lrhist.set_ylabel('Density', fontsize=10)
+            ax_lrhist.set_title(
+                'Per-mouse mean lick rate — distribution by cohort\n'
+                '(each point = one mouse; dashed lines = Normal fit; '
+                'tick marks = individual mice)',
+                fontsize=10,
+            )
+            ax_lrhist.legend(fontsize=8)
+            ax_lrhist.spines['top'].set_visible(False)
+            ax_lrhist.spines['right'].set_visible(False)
+            ax_lrhist.tick_params(axis='both', direction='in')
+
+            # [row 1] Box-and-whisker with 1.5×IQR outlier highlighting
+            ax_lrbox = expl_lick_rate_distfit_fig.add_subplot(_gs_lr[1, :])
+            _bp_data_lr = [np.array(_lr_groups[_cn]) for _cn in _lr_cond_names]
+            _bplot_lr = ax_lrbox.boxplot(
+                _bp_data_lr, labels=_lr_cond_names, patch_artist=True,
+                showfliers=False, widths=0.50,
+                boxprops=dict(linewidth=1.4),
+                whiskerprops=dict(linewidth=1.2, linestyle='--'),
+                capprops=dict(linewidth=1.4),
+                medianprops=dict(color='black', linewidth=2.0),
+            )
+            for _bi, _bpatch in enumerate(_bplot_lr['boxes']):
+                _bc = _coh_pal_lr[_bi]
+                _bpatch.set_facecolor([*_bc[:3], 0.35])
+                _bpatch.set_edgecolor(_bc)
+            _rng_box_lr = np.random.default_rng(1)
+            _outlier_legend_added_lr = False
+            for _bi, _cn in enumerate(_lr_cond_names):
+                _arr_bx = np.array(_lr_groups[_cn])
+                _q1_lr  = float(np.percentile(_arr_bx, 25))
+                _q3_lr  = float(np.percentile(_arr_bx, 75))
+                _iqr_lr = _q3_lr - _q1_lr
+                _lo_lr  = _q1_lr - 1.5 * _iqr_lr
+                _hi_lr  = _q3_lr + 1.5 * _iqr_lr
+                _out_lr = (_arr_bx < _lo_lr) | (_arr_bx > _hi_lr)
+                _jit_lr = _rng_box_lr.uniform(-0.15, 0.15, len(_arr_bx))
+                ax_lrbox.scatter(
+                    np.full(int(np.sum(~_out_lr)), _bi + 1) + _jit_lr[~_out_lr],
+                    _arr_bx[~_out_lr], color=_coh_pal_lr[_bi],
+                    s=40, alpha=0.70, zorder=3,
+                )
+                if _out_lr.any():
+                    ax_lrbox.scatter(
+                        np.full(int(np.sum(_out_lr)), _bi + 1) + _jit_lr[_out_lr],
+                        _arr_bx[_out_lr], color='red', s=80, alpha=0.90,
+                        zorder=4, edgecolors='darkred', linewidths=1.5, marker='D',
+                        label='Outlier (1.5\u00d7IQR)' if not _outlier_legend_added_lr else '',
+                    )
+                    _outlier_legend_added_lr = True
+                    for _ov in _arr_bx[_out_lr]:
+                        ax_lrbox.annotate(
+                            f'{_ov:.3g}', xy=(_bi + 1, _ov),
+                            xytext=(8, 0), textcoords='offset points',
+                            fontsize=7, color='darkred', va='center',
+                        )
+            ax_lrbox.set_xlabel('Cohort', fontsize=10)
+            ax_lrbox.set_ylabel('Per-mouse mean (licks/min)', fontsize=10)
+            ax_lrbox.set_title(
+                'Box-and-whisker \u2014 per-mouse mean lick rate by cohort\n'
+                '(whiskers extend to 1.5\u00d7IQR; \u25c6 red diamonds = outliers beyond fence)',
+                fontsize=10,
+            )
+            _handles_lr, _labels_lr = ax_lrbox.get_legend_handles_labels()
+            if _handles_lr:
+                ax_lrbox.legend(fontsize=8)
+            ax_lrbox.spines['top'].set_visible(False)
+            ax_lrbox.spines['right'].set_visible(False)
+            ax_lrbox.tick_params(axis='both', direction='in')
+
+            # [rows 2+] Per-cohort Normal Q-Q with 95% CI
+            for _ci, _cn in enumerate(_lr_cond_names):
+                _arr = np.array(_lr_groups[_cn])
+                _row_qq_lr = 2 + _ci // 2
+                _col_qq_lr = _ci % 2
+                _ax_qq_lr = expl_lick_rate_distfit_fig.add_subplot(
+                    _gs_lr[_row_qq_lr, _col_qq_lr])
+                _col_lr = _coh_pal_lr[_ci]
+                if len(_arr) >= 3:
+                    (_osm_lr, _osr_lr), (_sl_lr, _int_lr, _) = _probplot_lr(
+                        _arr, dist='norm',
+                    )
+                    _n_qq_lr = len(_arr)
+                    with _warnings_lr.catch_warnings():
+                        _warnings_lr.simplefilter('ignore')
+                        _ci_lo_lr = np.array([
+                            _norm_lr.ppf(_beta_lr.ppf(0.025, _i + 1, _n_qq_lr - _i))
+                            for _i in range(_n_qq_lr)
+                        ])
+                        _ci_hi_lr = np.array([
+                            _norm_lr.ppf(_beta_lr.ppf(0.975, _i + 1, _n_qq_lr - _i))
+                            for _i in range(_n_qq_lr)
+                        ])
+                    _ax_qq_lr.fill_between(
+                        _osm_lr,
+                        _sl_lr * _ci_lo_lr + _int_lr,
+                        _sl_lr * _ci_hi_lr + _int_lr,
+                        color=_col_lr, alpha=0.18, label='95% CI',
+                    )
+                    _ax_qq_lr.plot(_osm_lr, _osr_lr, 'o', color=_col_lr,
+                                   markersize=7, alpha=0.85, label='Mouse mean')
+                    _ax_qq_lr.plot(
+                        [_osm_lr[0], _osm_lr[-1]],
+                        [_sl_lr * _osm_lr[0] + _int_lr,
+                         _sl_lr * _osm_lr[-1] + _int_lr],
+                        'k-', linewidth=1.4, label='Reference line',
+                    )
+                    _w_lr, _p_lr = _lr_sw[_cn][:2]
+                    _verdict_lr = ('Normal (p>0.05) — t-test OK \u2713'
+                                   if _p_lr > 0.05
+                                   else 'Non-normal (p\u22640.05) — consider Mann-Whitney')
+                    _ax_qq_lr.text(
+                        0.04, 0.96,
+                        f'SW: W={_w_lr:.4f}, p={_p_lr:.4f}\n{_verdict_lr}',
+                        transform=_ax_qq_lr.transAxes, fontsize=8, va='top',
+                        bbox=dict(boxstyle='round,pad=0.3',
+                                  facecolor='#e6ffe6' if _p_lr > 0.05 else '#ffe6e6',
+                                  edgecolor=_col_lr, alpha=0.90),
+                    )
+                else:
+                    _ax_qq_lr.text(
+                        0.5, 0.5,
+                        f'n={len(_arr)} — need \u22653\nfor Shapiro-Wilk / Q-Q',
+                        transform=_ax_qq_lr.transAxes,
+                        ha='center', va='center', fontsize=10,
+                    )
+                _ax_qq_lr.set_title(f'{_cn} — Normal Q-Q  (n={len(_arr)} mice)', fontsize=9)
+                _ax_qq_lr.set_xlabel('Theoretical quantiles (Normal)', fontsize=8)
+                _ax_qq_lr.set_ylabel('Observed quantiles', fontsize=8)
+                _ax_qq_lr.legend(fontsize=7)
+                _ax_qq_lr.spines['top'].set_visible(False)
+                _ax_qq_lr.spines['right'].set_visible(False)
+                _ax_qq_lr.tick_params(axis='both', direction='in')
+
+            # Hide unused Q-Q cell when odd cohort count
+            if _n_cg_lr % 2 == 1:
+                _ax_empty_lr = expl_lick_rate_distfit_fig.add_subplot(
+                    _gs_lr[2 + (_n_cg_lr - 1) // 2, 1])
+                _ax_empty_lr.axis('off')
+
+            # [last row] Summary table
+            ax_lrtbl = expl_lick_rate_distfit_fig.add_subplot(_gs_lr[_n_rows_lr - 1, :])
+            ax_lrtbl.axis('off')
+            _tbl_cols_lr = ['Cohort', 'N mice', 'Mean (licks/min)', 'SD', 'SW W', 'SW p',
+                            'T-test normality OK?']
+            _tbl_rows_lr = []
+            for _cn in _lr_cond_names:
+                _arr = np.array(_lr_groups[_cn])
+                _w_lr, _p_lr, _nn_lr = _lr_sw[_cn]
+                _mn_lr = float(np.mean(_arr))
+                _sdv_str_lr = (f'{np.std(_arr, ddof=1):.4g}'
+                               if _nn_lr >= 2 else 'n/a')
+                _ok_lr = ('Yes' if (not np.isnan(_p_lr) and _p_lr > 0.05)
+                          else ('Insufficient n (need \u22653)'
+                                if np.isnan(_p_lr)
+                                else 'No \u2014 consider Mann-Whitney U'))
+                _tbl_rows_lr.append([
+                    _cn, str(_nn_lr), f'{_mn_lr:.4g}', _sdv_str_lr,
+                    f'{_w_lr:.4f}' if not np.isnan(_w_lr) else 'n/a',
+                    f'{_p_lr:.4f}' if not np.isnan(_p_lr) else 'n/a',
+                    _ok_lr,
+                ])
+            _tbl_lr = ax_lrtbl.table(
+                cellText=_tbl_rows_lr, colLabels=_tbl_cols_lr,
+                cellLoc='center', loc='center', bbox=[0, 0, 1, 1],
+            )
+            _tbl_lr.auto_set_font_size(False)
+            _tbl_lr.set_fontsize(9)
+            for (_ri, _ci2), _cell in _tbl_lr.get_celld().items():
+                if _ri == 0:
+                    _cell.set_facecolor('#d0d8e8')
+                    _cell.set_text_props(fontweight='bold')
+                elif _ci2 == 6 and _ri > 0:
+                    _txt2 = _tbl_rows_lr[_ri - 1][6]
+                    _cell.set_facecolor(
+                        '#e6ffe6' if 'Yes' in _txt2
+                        else '#ffe6e6' if 'No' in _txt2
+                        else '#fffff0'
+                    )
+            ax_lrtbl.set_title(
+                'Normality summary — one mean per mouse per cohort '
+                '(Shapiro-Wilk, \u03b1=0.05)',
+                fontsize=9, pad=6,
+            )
+
+            expl_lick_rate_distfit_fig.suptitle(
+                'Average Lick Rate — Per-Mouse Means by Cohort\n'
+                '(N=1 value per mouse = mean across all sessions; '
+                'goal: assess normality for between-cohort t-test)',
+                fontsize=11, y=1.01,
+            )
+            expl_lick_rate_distfit_fig.tight_layout()
+
+            print('\n\u2500\u2500 Average Lick Rate \u2014 Per-Mouse Means by Cohort \u2500\u2500')
+            for _cn in _lr_cond_names:
+                _arr = np.array(_lr_groups[_cn])
+                _w_lr, _p_lr, _nn_lr = _lr_sw[_cn]
+                _sdv_str_lr = f'{np.std(_arr, ddof=1):.4g}' if _nn_lr >= 2 else 'n/a'
+                _w_str_lr   = f'{_w_lr:.4f}' if not np.isnan(_w_lr) else 'n/a'
+                _p_str_lr   = f'{_p_lr:.4f}' if not np.isnan(_p_lr) else 'n/a'
+                print(f'  {_cn}: n={_nn_lr}, mean={np.mean(_arr):.4g}, '
+                      f'SD={_sdv_str_lr}, SW W={_w_str_lr}, p={_p_str_lr}')
+
+        except Exception as _e:
+            import traceback as _tb_lr
+            print(f'[expl_lick_rate_distfit] Error: {_e}')
+            _tb_lr.print_exc()
+            expl_lick_rate_distfit_fig = None
+
     # ── Exploratory: lick/reward ratio distribution — KDE + normality ────────
     expl_lick_reward_ratio_distfit_fig = None
     if 'expl_lick_reward_ratio_distfit' in selected_plots:
-        from scipy.stats import shapiro as _shapiro_lrr, probplot as _probplot_lrr
-        from scipy.stats import gaussian_kde as _gkde_lrr
+        try:
+            from scipy.stats import (norm as _norm_lrr, probplot as _probplot_lrr,
+                                     shapiro as _sw_lrr, beta as _beta_lrr)
+            from matplotlib.gridspec import GridSpec as _GridSpec_lrr
+            import warnings as _warnings_lrr
 
-        # Collect per-mouse mean lick/reward ratio (same logic as bar plot)
-        _lrr_per_mouse   = []   # (mouse, condition, mean_ratio)
-        _lrr_cond_values = {}   # condition -> [mean_ratio, ...]
-        for _r in all_results:
-            _df_r = _r['df']
-            _sess_ratios = []
-            for _, _row in _df_r.iterrows():
-                _h = pd.to_numeric(_row.get('hits',       np.nan), errors='coerce')
-                _l = pd.to_numeric(_row.get('lick_count', np.nan), errors='coerce')
-                if pd.notna(_h) and _h > 0 and pd.notna(_l):
-                    _sess_ratios.append(_l / _h)
-            if _sess_ratios:
-                _mean_r = float(np.mean(_sess_ratios))
-                _cond   = _r['starting_condition']
-                _lrr_per_mouse.append((_r['mouse'], _cond, _mean_r))
-                _lrr_cond_values.setdefault(_cond, []).append(_mean_r)
+            # ── One mean per mouse, grouped by starting_condition ─────────────
+            _lrr_groups = {}
+            for _r in all_results:
+                _df_r = _r['df']
+                _sess_ratios = []
+                for _, _row in _df_r.iterrows():
+                    _h = pd.to_numeric(_row.get('hits',       np.nan), errors='coerce')
+                    _l = pd.to_numeric(_row.get('lick_count', np.nan), errors='coerce')
+                    if pd.notna(_h) and _h > 0 and pd.notna(_l):
+                        _sess_ratios.append(_l / _h)
+                if _sess_ratios:
+                    _cond_lrr = _r.get('starting_condition', 'Unknown')
+                    _lrr_groups.setdefault(_cond_lrr, []).append(float(np.mean(_sess_ratios)))
 
-        _lrr_all_means = np.array([v for _, _, v in _lrr_per_mouse], dtype=float)
-        _lrr_n = len(_lrr_all_means)
+            _lrr_cond_names = sorted(_lrr_groups.keys())
+            _n_cg_lrr = len(_lrr_cond_names)
+            if _n_cg_lrr == 0:
+                raise ValueError('No valid lick/reward ratio data found')
 
-        if _lrr_n >= 3:
-            # ── Figure: 1×3 — histogram+KDE | Q-Q | per-condition strip ──────
-            expl_lick_reward_ratio_distfit_fig, (_ax_lrr_hist, _ax_lrr_qq, _ax_lrr_strip) = \
-                plt.subplots(1, 3, figsize=(16, 5))
+            # ── Shapiro-Wilk per cohort ────────────────────────────────────────
+            _lrr_sw = {}
+            for _cn in _lrr_cond_names:
+                _arr = np.array(_lrr_groups[_cn])
+                if len(_arr) >= 3:
+                    _w, _p = _sw_lrr(_arr)
+                    _lrr_sw[_cn] = (float(_w), float(_p), len(_arr))
+                else:
+                    _lrr_sw[_cn] = (np.nan, np.nan, len(_arr))
 
-            # ── Panel 1: histogram + KDE ──────────────────────────────────────
-            _ax_lrr_hist.hist(_lrr_all_means, bins='auto', color='steelblue', alpha=0.65,
-                              edgecolor='white', linewidth=0.5, density=True)
-            _lrr_kde_x = np.linspace(_lrr_all_means.min(), _lrr_all_means.max(), 300)
-            try:
-                _kde_lrr = _gkde_lrr(_lrr_all_means)
-                _ax_lrr_hist.plot(_lrr_kde_x, _kde_lrr(_lrr_kde_x),
-                                  color='navy', linewidth=2, label='KDE')
-                _ax_lrr_hist.legend(frameon=False)
-            except Exception:
-                pass
-            # Shapiro-Wilk
-            _lrr_sw_stat, _lrr_sw_p = _shapiro_lrr(_lrr_all_means)
-            _lrr_normal = _lrr_sw_p > 0.05
-            _lrr_sw_text = (
-                f'Shapiro-Wilk\nW = {_lrr_sw_stat:.3f},  p = {_lrr_sw_p:.4f}\n'
-                f'{"Normal (p > 0.05)" if _lrr_normal else "Non-normal (p \u2264 0.05)"}\n\n'
-                f't-test {"appropriate" if _lrr_normal else "NOT recommended"}'
+            # ── Figure layout ─────────────────────────────────────────────────
+            # Row 0 (full width): overlaid histograms + Normal fit + rug marks
+            # Rows 1.._n_qq_rows: per-cohort Normal Q-Q plots (2-column grid)
+            # Last row (full width): summary normality table
+            _n_qq_rows_lrr = (_n_cg_lrr + 1) // 2
+            _n_rows_lrr = 1 + 1 + _n_qq_rows_lrr + 1  # +1 row for box plot
+            _coh_pal_lrr = [plt.cm.tab10(i / max(_n_cg_lrr - 1, 1))
+                            for i in range(_n_cg_lrr)]
+
+            expl_lick_reward_ratio_distfit_fig = plt.figure(figsize=(13, 4.5 * _n_rows_lrr))
+            _gs_lrr = _GridSpec_lrr(_n_rows_lrr, 2, figure=expl_lick_reward_ratio_distfit_fig,
+                                    hspace=0.60, wspace=0.38)
+            ax_lrrhist = expl_lick_reward_ratio_distfit_fig.add_subplot(_gs_lrr[0, :])
+
+            # [row 0] Overlaid histograms + Normal fit + rug marks
+            _lrr_rng = np.random.default_rng(42)
+            for _ci, _cn in enumerate(_lrr_cond_names):
+                _arr = np.array(_lrr_groups[_cn])
+                _col_lrr = _coh_pal_lrr[_ci]
+                _sw_lbl_lrr = (f'SW p={_lrr_sw[_cn][1]:.3f}'
+                               if not np.isnan(_lrr_sw[_cn][1]) else 'SW: n<3')
+                _nbins_lrr = max(4, len(_arr) // 2 + 1)
+                ax_lrrhist.hist(_arr, bins=_nbins_lrr, alpha=0.40, color=_col_lrr,
+                                density=True, edgecolor='white', linewidth=0.5,
+                                label=f'{_cn}  (n={len(_arr)}, {_sw_lbl_lrr})')
+                if len(_arr) >= 3:
+                    _mn_lrr = float(np.mean(_arr))
+                    _sdv_lrr = float(np.std(_arr, ddof=1))
+                    _xfit_lrr = np.linspace(_mn_lrr - 4 * _sdv_lrr,
+                                            _mn_lrr + 4 * _sdv_lrr, 300)
+                    ax_lrrhist.plot(_xfit_lrr, _norm_lrr.pdf(_xfit_lrr, _mn_lrr, _sdv_lrr),
+                                    color=_col_lrr, linewidth=2.0, linestyle='--')
+                _jit_lrr = _lrr_rng.uniform(-0.003, 0.003, len(_arr))
+                ax_lrrhist.plot(_arr, _jit_lrr, '|', color=_col_lrr,
+                                markersize=14, markeredgewidth=2.5, alpha=0.75)
+
+            ax_lrrhist.set_xlabel('Per-mouse mean lick / reward ratio', fontsize=10)
+            ax_lrrhist.set_ylabel('Density', fontsize=10)
+            ax_lrrhist.set_title(
+                'Per-mouse mean lick/reward ratio — distribution by cohort\n'
+                '(each point = one mouse; dashed lines = Normal fit; '
+                'tick marks = individual mice)',
+                fontsize=10,
             )
-            _ax_lrr_hist.text(0.97, 0.97, _lrr_sw_text, transform=_ax_lrr_hist.transAxes,
-                              fontsize=8.5, va='top', ha='right',
-                              bbox=dict(boxstyle='round,pad=0.4',
-                                        facecolor='#d4edda' if _lrr_normal else '#f8d7da',
-                                        edgecolor='gray', alpha=0.9))
-            _ax_lrr_hist.set_title(f'Per-mouse mean lick/reward ratio\n(n = {_lrr_n} mice)')
-            _ax_lrr_hist.set_xlabel('Mean licks per reward')
-            _ax_lrr_hist.set_ylabel('Density')
-            _ax_lrr_hist.tick_params(axis='both', direction='in')
-            _ax_lrr_hist.spines['top'].set_visible(False)
-            _ax_lrr_hist.spines['right'].set_visible(False)
+            ax_lrrhist.legend(fontsize=8)
+            ax_lrrhist.spines['top'].set_visible(False)
+            ax_lrrhist.spines['right'].set_visible(False)
+            ax_lrrhist.tick_params(axis='both', direction='in')
 
-            # ── Panel 2: Q-Q plot ─────────────────────────────────────────────
-            (_lrr_qq_osm, _lrr_qq_osr), (_lrr_qq_slope, _lrr_qq_int, _) = \
-                _probplot_lrr(_lrr_all_means, dist='norm')
-            # 95% pointwise CI via order-statistic Beta CDF
-            from scipy.stats import beta as _beta_qqci, norm as _norm_qqci
-            _n_qq = len(_lrr_all_means)
-            _lrr_ci_lo = np.array([
-                _norm_qqci.ppf(_beta_qqci.ppf(0.025, _i + 1, _n_qq - _i))
-                for _i in range(_n_qq)
-            ])
-            _lrr_ci_hi = np.array([
-                _norm_qqci.ppf(_beta_qqci.ppf(0.975, _i + 1, _n_qq - _i))
-                for _i in range(_n_qq)
-            ])
-            _ax_lrr_qq.fill_between(
-                _lrr_qq_osm,
-                _lrr_qq_slope * _lrr_ci_lo + _lrr_qq_int,
-                _lrr_qq_slope * _lrr_ci_hi + _lrr_qq_int,
-                color='red', alpha=0.12, label='95% CI',
+            # [row 1] Box-and-whisker with 1.5×IQR outlier highlighting
+            ax_lrrbox = expl_lick_reward_ratio_distfit_fig.add_subplot(_gs_lrr[1, :])
+            _bp_data_lrr = [np.array(_lrr_groups[_cn]) for _cn in _lrr_cond_names]
+            _bplot_lrr = ax_lrrbox.boxplot(
+                _bp_data_lrr, labels=_lrr_cond_names, patch_artist=True,
+                showfliers=False, widths=0.50,
+                boxprops=dict(linewidth=1.4),
+                whiskerprops=dict(linewidth=1.2, linestyle='--'),
+                capprops=dict(linewidth=1.4),
+                medianprops=dict(color='black', linewidth=2.0),
             )
-            _ax_lrr_qq.plot(_lrr_qq_osm, _lrr_qq_osr, 'o',
-                            color='steelblue', markersize=6, alpha=0.8, label='Data')
-            _ax_lrr_qq.plot(_lrr_qq_osm,
-                            _lrr_qq_slope * np.array(_lrr_qq_osm) + _lrr_qq_int,
-                            'r--', linewidth=1.5, label='Normal line')
-            _ax_lrr_qq.set_title('Normal Q-Q Plot\n(per-mouse mean lick/reward ratio)')
-            _ax_lrr_qq.set_xlabel('Theoretical quantiles')
-            _ax_lrr_qq.set_ylabel('Sample quantiles')
-            _ax_lrr_qq.legend(frameon=False, fontsize=8)
-            _ax_lrr_qq.tick_params(axis='both', direction='in')
-            _ax_lrr_qq.spines['top'].set_visible(False)
-            _ax_lrr_qq.spines['right'].set_visible(False)
-
-            # ── Panel 3: per-condition strip chart ────────────────────────────
-            _lrr_conds_sorted = sorted(_lrr_cond_values.keys())
-            _rng_lrr = np.random.default_rng(seed=42)
-            for _ci, _cond in enumerate(_lrr_conds_sorted):
-                _vals = np.array(_lrr_cond_values[_cond])
-                _col  = condition_color_map.get(_cond, 'gray')
-                _jit  = (_rng_lrr.random(len(_vals)) - 0.5) * 0.22
-                _ax_lrr_strip.plot(np.full(len(_vals), _ci) + _jit, _vals, 'o',
-                                   color=_col, markersize=7, alpha=0.8)
-                # Per-condition Shapiro-Wilk (if n >= 3)
-                if len(_vals) >= 3:
-                    _sc_w, _sc_p = _shapiro_lrr(_vals)
-                    _ax_lrr_strip.text(_ci, _ax_lrr_strip.get_ylim()[0] if _ci == 0 else 0,
-                                       f'W={_sc_w:.2f}\np={_sc_p:.3f}',
-                                       ha='center', va='bottom', fontsize=7.5,
-                                       color='black')
-                # Mean ± SEM bar
-                _m = float(np.mean(_vals))
-                _s = float(np.std(_vals, ddof=1) / np.sqrt(len(_vals))) if len(_vals) > 1 else 0.0
-                _ax_lrr_strip.errorbar(_ci, _m, yerr=_s, fmt='_', color='black',
-                                       markersize=18, markeredgewidth=2,
-                                       capsize=6, elinewidth=1.5, zorder=5)
-
-            _ax_lrr_strip.set_xticks(np.arange(len(_lrr_conds_sorted)))
-            _ax_lrr_strip.set_xticklabels(_lrr_conds_sorted)
-            _ax_lrr_strip.set_title('Per-mouse mean lick/reward ratio\nby starting condition')
-            _ax_lrr_strip.set_xlabel('Starting Condition')
-            _ax_lrr_strip.set_ylabel('Mean licks per reward')
-            _ax_lrr_strip.set_ylim(bottom=0)
-            _ax_lrr_strip.tick_params(axis='both', direction='in')
-            _ax_lrr_strip.spines['top'].set_visible(False)
-            _ax_lrr_strip.spines['right'].set_visible(False)
-
-            # ── Welch's t-test: pairwise between all conditions ───────────────
-            from scipy.stats import ttest_ind as _ttest_lrr
-            import itertools as _it_lrr
-            _lrr_ttest_results = []
-            for (_c1, _c2) in _it_lrr.combinations(_lrr_conds_sorted, 2):
-                _v1 = np.array(_lrr_cond_values[_c1])
-                _v2 = np.array(_lrr_cond_values[_c2])
-                if len(_v1) >= 2 and len(_v2) >= 2:
-                    _tt_stat, _tt_p = _ttest_lrr(_v1, _v2, equal_var=False)
-                    _lrr_ttest_results.append((_c1, _c2, float(_tt_stat), float(_tt_p)))
-
-            # Significance brackets above strip chart
-            if _lrr_ttest_results:
-                _lrr_y_max = max(
-                    max(float(np.max(np.array(v))) for v in _lrr_cond_values.values()),
-                    float(_ax_lrr_strip.get_ylim()[1]),
+            for _bi, _bpatch in enumerate(_bplot_lrr['boxes']):
+                _bc = _coh_pal_lrr[_bi]
+                _bpatch.set_facecolor([*_bc[:3], 0.35])
+                _bpatch.set_edgecolor(_bc)
+            _rng_box_lrr = np.random.default_rng(1)
+            _outlier_legend_added_lrr = False
+            for _bi, _cn in enumerate(_lrr_cond_names):
+                _arr_bx = np.array(_lrr_groups[_cn])
+                _q1_lrr  = float(np.percentile(_arr_bx, 25))
+                _q3_lrr  = float(np.percentile(_arr_bx, 75))
+                _iqr_lrr = _q3_lrr - _q1_lrr
+                _lo_lrr  = _q1_lrr - 1.5 * _iqr_lrr
+                _hi_lrr  = _q3_lrr + 1.5 * _iqr_lrr
+                _out_lrr = (_arr_bx < _lo_lrr) | (_arr_bx > _hi_lrr)
+                _jit_lrr = _rng_box_lrr.uniform(-0.15, 0.15, len(_arr_bx))
+                ax_lrrbox.scatter(
+                    np.full(int(np.sum(~_out_lrr)), _bi + 1) + _jit_lrr[~_out_lrr],
+                    _arr_bx[~_out_lrr], color=_coh_pal_lrr[_bi],
+                    s=40, alpha=0.70, zorder=3,
                 )
-                _lrr_bracket_step = _lrr_y_max * 0.12
-                for _bk_idx, (_bc1, _bc2, _bt_stat, _bt_p) in enumerate(_lrr_ttest_results):
-                    _bx1 = _lrr_conds_sorted.index(_bc1)
-                    _bx2 = _lrr_conds_sorted.index(_bc2)
-                    _bk_y = _lrr_y_max + _lrr_bracket_step * (_bk_idx + 1)
-                    _ax_lrr_strip.plot(
-                        [_bx1, _bx1, _bx2, _bx2],
-                        [_bk_y - _lrr_bracket_step * 0.2, _bk_y,
-                         _bk_y, _bk_y - _lrr_bracket_step * 0.2],
-                        color='black', linewidth=1.2,
+                if _out_lrr.any():
+                    ax_lrrbox.scatter(
+                        np.full(int(np.sum(_out_lrr)), _bi + 1) + _jit_lrr[_out_lrr],
+                        _arr_bx[_out_lrr], color='red', s=80, alpha=0.90,
+                        zorder=4, edgecolors='darkred', linewidths=1.5, marker='D',
+                        label='Outlier (1.5\u00d7IQR)' if not _outlier_legend_added_lrr else '',
                     )
-                    if _bt_p < 0.001:
-                        _bsig = '***'
-                    elif _bt_p < 0.01:
-                        _bsig = '**'
-                    elif _bt_p < 0.05:
-                        _bsig = '*'
-                    else:
-                        _bsig = f'ns  p={_bt_p:.3f}'
-                    _ax_lrr_strip.text(
-                        (_bx1 + _bx2) / 2.0,
-                        _bk_y + _lrr_bracket_step * 0.05,
-                        _bsig, ha='center', va='bottom', fontsize=9,
+                    _outlier_legend_added_lrr = True
+                    for _ov in _arr_bx[_out_lrr]:
+                        ax_lrrbox.annotate(
+                            f'{_ov:.3g}', xy=(_bi + 1, _ov),
+                            xytext=(8, 0), textcoords='offset points',
+                            fontsize=7, color='darkred', va='center',
+                        )
+            ax_lrrbox.set_xlabel('Cohort', fontsize=10)
+            ax_lrrbox.set_ylabel('Per-mouse mean (licks/reward)', fontsize=10)
+            ax_lrrbox.set_title(
+                'Box-and-whisker \u2014 per-mouse mean lick/reward ratio by cohort\n'
+                '(whiskers extend to 1.5\u00d7IQR; \u25c6 red diamonds = outliers beyond fence)',
+                fontsize=10,
+            )
+            _handles_lrr, _labels_lrr = ax_lrrbox.get_legend_handles_labels()
+            if _handles_lrr:
+                ax_lrrbox.legend(fontsize=8)
+            ax_lrrbox.spines['top'].set_visible(False)
+            ax_lrrbox.spines['right'].set_visible(False)
+            ax_lrrbox.tick_params(axis='both', direction='in')
+
+            # [rows 2+] Per-cohort Normal Q-Q with 95% CI
+            for _ci, _cn in enumerate(_lrr_cond_names):
+                _arr = np.array(_lrr_groups[_cn])
+                _row_qq = 2 + _ci // 2
+                _col_qq = _ci % 2
+                _ax_qq = expl_lick_reward_ratio_distfit_fig.add_subplot(_gs_lrr[_row_qq, _col_qq])
+                _col_lrr = _coh_pal_lrr[_ci]
+                if len(_arr) >= 3:
+                    (_osm_lrr, _osr_lrr), (_sl_lrr, _int_lrr, _) = _probplot_lrr(
+                        _arr, dist='norm',
                     )
-                _ax_lrr_strip.set_ylim(
-                    top=_lrr_y_max + _lrr_bracket_step * (len(_lrr_ttest_results) + 1.8)
-                )
+                    _n_qq_lrr = len(_arr)
+                    with _warnings_lrr.catch_warnings():
+                        _warnings_lrr.simplefilter('ignore')
+                        _ci_lo_lrr = np.array([
+                            _norm_lrr.ppf(_beta_lrr.ppf(0.025, _i + 1, _n_qq_lrr - _i))
+                            for _i in range(_n_qq_lrr)
+                        ])
+                        _ci_hi_lrr = np.array([
+                            _norm_lrr.ppf(_beta_lrr.ppf(0.975, _i + 1, _n_qq_lrr - _i))
+                            for _i in range(_n_qq_lrr)
+                        ])
+                    _ax_qq.fill_between(
+                        _osm_lrr,
+                        _sl_lrr * _ci_lo_lrr + _int_lrr,
+                        _sl_lrr * _ci_hi_lrr + _int_lrr,
+                        color=_col_lrr, alpha=0.18, label='95% CI',
+                    )
+                    _ax_qq.plot(_osm_lrr, _osr_lrr, 'o', color=_col_lrr,
+                                markersize=7, alpha=0.85, label='Mouse mean')
+                    _ax_qq.plot(
+                        [_osm_lrr[0], _osm_lrr[-1]],
+                        [_sl_lrr * _osm_lrr[0] + _int_lrr,
+                         _sl_lrr * _osm_lrr[-1] + _int_lrr],
+                        'k-', linewidth=1.4, label='Reference line',
+                    )
+                    _w_lrr, _p_lrr = _lrr_sw[_cn][:2]
+                    _verdict_lrr = ('Normal (p>0.05) \u2014 t-test OK \u2713'
+                                    if _p_lrr > 0.05
+                                    else 'Non-normal (p\u22640.05) \u2014 consider Mann-Whitney')
+                    _ax_qq.text(
+                        0.04, 0.96,
+                        f'SW: W={_w_lrr:.4f}, p={_p_lrr:.4f}\n{_verdict_lrr}',
+                        transform=_ax_qq.transAxes, fontsize=8, va='top',
+                        bbox=dict(boxstyle='round,pad=0.3',
+                                  facecolor='#e6ffe6' if _p_lrr > 0.05 else '#ffe6e6',
+                                  edgecolor=_col_lrr, alpha=0.90),
+                    )
+                else:
+                    _ax_qq.text(
+                        0.5, 0.5,
+                        f'n={len(_arr)} \u2014 need \u22653\nfor Shapiro-Wilk / Q-Q',
+                        transform=_ax_qq.transAxes,
+                        ha='center', va='center', fontsize=10,
+                    )
+                _ax_qq.set_title(f'{_cn} \u2014 Normal Q-Q  (n={len(_arr)} mice)', fontsize=9)
+                _ax_qq.set_xlabel('Theoretical quantiles (Normal)', fontsize=8)
+                _ax_qq.set_ylabel('Observed quantiles', fontsize=8)
+                _ax_qq.legend(fontsize=7)
+                _ax_qq.spines['top'].set_visible(False)
+                _ax_qq.spines['right'].set_visible(False)
+                _ax_qq.tick_params(axis='both', direction='in')
+
+            # Hide unused Q-Q cell when odd cohort count
+            if _n_cg_lrr % 2 == 1:
+                _ax_empty_lrr = expl_lick_reward_ratio_distfit_fig.add_subplot(
+                    _gs_lrr[2 + (_n_cg_lrr - 1) // 2, 1])
+                _ax_empty_lrr.axis('off')
+
+            # [last row] Summary table
+            ax_lrrtbl = expl_lick_reward_ratio_distfit_fig.add_subplot(_gs_lrr[_n_rows_lrr - 1, :])
+            ax_lrrtbl.axis('off')
+            _tbl_cols_lrr = ['Cohort', 'N mice', 'Mean (licks/reward)', 'SD',
+                             'SW W', 'SW p', 'T-test normality OK?']
+            _tbl_rows_lrr = []
+            for _cn in _lrr_cond_names:
+                _arr = np.array(_lrr_groups[_cn])
+                _w_lrr, _p_lrr, _nn_lrr = _lrr_sw[_cn]
+                _mn_lrr = float(np.mean(_arr))
+                _sdv_str = (f'{np.std(_arr, ddof=1):.4g}'
+                            if _nn_lrr >= 2 else 'n/a')
+                _ok_lrr = ('Yes' if (not np.isnan(_p_lrr) and _p_lrr > 0.05)
+                           else ('Insufficient n (need \u22653)'
+                                 if np.isnan(_p_lrr)
+                                 else 'No \u2014 consider Mann-Whitney U'))
+                _tbl_rows_lrr.append([
+                    _cn, str(_nn_lrr), f'{_mn_lrr:.4g}', _sdv_str,
+                    f'{_w_lrr:.4f}' if not np.isnan(_w_lrr) else 'n/a',
+                    f'{_p_lrr:.4f}' if not np.isnan(_p_lrr) else 'n/a',
+                    _ok_lrr,
+                ])
+            _tbl_lrr = ax_lrrtbl.table(
+                cellText=_tbl_rows_lrr, colLabels=_tbl_cols_lrr,
+                cellLoc='center', loc='center', bbox=[0, 0, 1, 1],
+            )
+            _tbl_lrr.auto_set_font_size(False)
+            _tbl_lrr.set_fontsize(9)
+            for (_ri, _ci2), _cell in _tbl_lrr.get_celld().items():
+                if _ri == 0:
+                    _cell.set_facecolor('#d0d8e8')
+                    _cell.set_text_props(fontweight='bold')
+                elif _ci2 == 6 and _ri > 0:
+                    _txt2 = _tbl_rows_lrr[_ri - 1][6]
+                    _cell.set_facecolor(
+                        '#e6ffe6' if 'Yes' in _txt2
+                        else '#ffe6e6' if 'No' in _txt2
+                        else '#fffff0'
+                    )
+            ax_lrrtbl.set_title(
+                'Normality summary \u2014 one mean per mouse per cohort '
+                '(Shapiro-Wilk, \u03b1=0.05)',
+                fontsize=9, pad=6,
+            )
 
             expl_lick_reward_ratio_distfit_fig.suptitle(
-                'Lick / Reward Ratio Distribution — Exploratory Normality Check\n'
-                f'One mean per mouse across all sessions with rewards > 0  |  '
-                f'N = {_lrr_n} mice',
-                fontsize=10,
+                'Lick / Reward Ratio \u2014 Per-Mouse Means by Cohort\n'
+                '(N=1 value per mouse = mean across all sessions with rewards > 0; '
+                'goal: assess normality for between-cohort t-test)',
+                fontsize=11, y=1.01,
             )
             expl_lick_reward_ratio_distfit_fig.tight_layout()
 
-            # Console summary
-            print('\n\u2500\u2500 Lick/Reward Ratio Normality Diagnostics \u2500\u2500')
-            print(f'  N mice:            {_lrr_n}')
-            print(f'  Mean ratio:        {float(np.mean(_lrr_all_means)):.4f}')
-            print(f'  SD:                {float(np.std(_lrr_all_means, ddof=1)):.4f}')
-            print(f'  Shapiro-Wilk:      W={_lrr_sw_stat:.4f},  p={_lrr_sw_p:.6f}')
-            print(f'  Normality (p>0.05): {"YES \u2192 parametric t-test appropriate" if _lrr_normal else "NO  \u2192 consider Mann-Whitney U"}')
-            for _cond in _lrr_conds_sorted:
-                _cv = np.array(_lrr_cond_values[_cond])
-                _cw, _cp = _shapiro_lrr(_cv) if len(_cv) >= 3 else (np.nan, np.nan)
-                print(f'  [{_cond}]  n={len(_cv)},  mean={float(np.mean(_cv)):.4f},  '
-                      f'SD={float(np.std(_cv, ddof=1)):.4f},  '
-                      f'W={_cw:.4f},  p={_cp:.4f}')
-            if _lrr_ttest_results:
-                print(f'\n  Welch\'s t-test (pairwise, equal_var=False):')
-                for (_tc1, _tc2, _tt_stat, _tt_p) in _lrr_ttest_results:
-                    _tsig = ('***' if _tt_p < 0.001 else
-                             '**'  if _tt_p < 0.01  else
-                             '*'   if _tt_p < 0.05  else 'ns')
-                    print(f'    {_tc1} vs {_tc2}:  t={_tt_stat:.4f},  p={_tt_p:.6f}  [{_tsig}]')
-        else:
-            print(f'[expl_lick_reward_ratio_distfit] Not enough mice with valid data (n={_lrr_n}, need >= 3)')
+            print('\n\u2500\u2500 Lick/Reward Ratio \u2014 Per-Mouse Means by Cohort \u2500\u2500')
+            for _cn in _lrr_cond_names:
+                _arr = np.array(_lrr_groups[_cn])
+                _w_lrr, _p_lrr, _nn_lrr = _lrr_sw[_cn]
+                _sdv_str = f'{np.std(_arr, ddof=1):.4g}' if _nn_lrr >= 2 else 'n/a'
+                _w_str   = f'{_w_lrr:.4f}' if not np.isnan(_w_lrr) else 'n/a'
+                _p_str   = f'{_p_lrr:.4f}' if not np.isnan(_p_lrr) else 'n/a'
+                print(f'  {_cn}: n={_nn_lrr}, mean={np.mean(_arr):.4g}, '
+                      f'SD={_sdv_str}, SW W={_w_str}, p={_p_str}')
+
+        except Exception as _e:
+            import traceback as _tb_lrr
+            print(f'[expl_lick_reward_ratio_distfit] Error: {_e}')
+            _tb_lrr.print_exc()
+            expl_lick_reward_ratio_distfit_fig = None
 
     # Create collapsed condition bar plot for bout count
     condition_bout_count_bar_fig = None
@@ -6944,6 +7575,8 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     epoch_speed_early_ev_cond_fig      = epoch_speed_late_ev_cond_fig      = None
     epoch_cap_early_ev_per_mouse_fig   = epoch_cap_late_ev_per_mouse_fig   = None
     epoch_cap_early_ev_cond_fig        = epoch_cap_late_ev_cond_fig        = None
+    epoch_speed_early_ev_cond_clean_fig = epoch_speed_late_ev_cond_clean_fig = None
+    epoch_cap_early_ev_cond_clean_fig   = epoch_cap_late_ev_cond_clean_fig   = None
     punish_speed_per_mouse_fig         = punish_speed_cond_fig         = None
     punish_cap_per_mouse_fig           = punish_cap_cond_fig           = None
     punish_speed_sess_per_mouse_fig    = punish_speed_sess_cond_fig    = None
@@ -6976,6 +7609,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                    'epoch_reward_speed_sess', 'epoch_reward_cap_sess',
                    'epoch_reward_speed_early_late', 'epoch_reward_cap_early_late',
                    'epoch_reward_speed_early_late_ev', 'epoch_reward_cap_early_late_ev',
+                   'epoch_reward_speed_early_late_ev_clean', 'epoch_reward_cap_early_late_ev_clean',
                    'epoch_reward_speed_sess_clean', 'epoch_reward_cap_sess_clean',
                    'epoch_reward_speed_early_late_clean', 'epoch_reward_cap_early_late_clean',
                    'epoch_punish_speed', 'epoch_punish_cap',
@@ -7125,6 +7759,32 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     indices_key='cap_epoch_event_indices',
                     row_unit='events',
                     use_sd=True,
+                )
+        if 'epoch_reward_speed_early_late_ev_clean' in selected_plots and _any_speed:
+            (_, _,
+             epoch_speed_early_ev_cond_clean_fig, epoch_speed_late_ev_cond_clean_fig) = \
+                _plot_epoch_early_late_panels(
+                    all_results, 'speed_epoch_matrix',
+                    ylabel='Treadmill Speed (cm/s)',
+                    title_prefix='Speed Aligned to Reward Zone Entry',
+                    condition_color_map=condition_color_map,
+                    indices_key='speed_epoch_event_indices',
+                    row_unit='events',
+                    use_sd=True,
+                    show_individual_traces=False,
+                )
+        if 'epoch_reward_cap_early_late_ev_clean' in selected_plots and _any_cap:
+            (_, _,
+             epoch_cap_early_ev_cond_clean_fig, epoch_cap_late_ev_cond_clean_fig) = \
+                _plot_epoch_early_late_panels(
+                    all_results, 'cap_epoch_matrix',
+                    ylabel='Capacitive Value (z-score)',
+                    title_prefix='Capacitive Value Aligned to Reward Zone Entry',
+                    condition_color_map=condition_color_map,
+                    indices_key='cap_epoch_event_indices',
+                    row_unit='events',
+                    use_sd=True,
+                    show_individual_traces=False,
                 )
 
         # ── Reward zone: session-averaged lick count epoch ───────────────────
@@ -8852,7 +9512,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         f.write(report_text + "\n")
     print(f"\nMissing data report saved to: {report_path}")
 
-    return speed_fig, sensitivity_fig, lick_fig, reward_fig, lick_reward_ratio_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, avg_sex_speed_fig, distance_fig, bout_count_fig, avg_bout_count_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_lick_reward_ratio_fig, condition_lick_reward_ratio_bar_fig, condition_bar_fig, condition_speed_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, epoch_speed_per_mouse_fig, epoch_speed_cond_fig, epoch_cap_per_mouse_fig, epoch_cap_cond_fig, epoch_speed_sess_per_mouse_fig, epoch_speed_sess_cond_fig, epoch_cap_sess_per_mouse_fig, epoch_cap_sess_cond_fig, epoch_speed_early_per_mouse_fig, epoch_speed_late_per_mouse_fig, epoch_speed_early_cond_fig, epoch_speed_late_cond_fig, epoch_cap_early_per_mouse_fig, epoch_cap_late_per_mouse_fig, epoch_cap_early_cond_fig, epoch_cap_late_cond_fig, epoch_speed_early_ev_per_mouse_fig, epoch_speed_late_ev_per_mouse_fig, epoch_speed_early_ev_cond_fig, epoch_speed_late_ev_cond_fig, epoch_cap_early_ev_per_mouse_fig, epoch_cap_late_ev_per_mouse_fig, epoch_cap_early_ev_cond_fig, epoch_cap_late_ev_cond_fig, epoch_speed_sess_cond_clean_fig, epoch_cap_sess_cond_clean_fig, epoch_speed_early_cond_clean_fig, epoch_speed_late_cond_clean_fig, epoch_cap_early_cond_clean_fig, epoch_cap_late_cond_clean_fig, punish_speed_per_mouse_fig, punish_speed_cond_fig, punish_cap_per_mouse_fig, punish_cap_cond_fig, punish_speed_sess_per_mouse_fig, punish_speed_sess_cond_fig, punish_cap_sess_per_mouse_fig, punish_cap_sess_cond_fig, punish_speed_sess_cond_clean_fig, punish_cap_sess_cond_clean_fig, sex_speed_fig, sex_distance_indiv_fig, sex_reward_indiv_fig, epoch_speed_sess_sex_per_mouse_fig, epoch_speed_sess_sex_fig, epoch_cap_sess_sex_per_mouse_fig, epoch_cap_sess_sex_fig, epoch_punish_speed_sess_sex_per_mouse_fig, epoch_punish_speed_sess_sex_fig, epoch_punish_cap_sess_sex_per_mouse_fig, epoch_punish_cap_sess_sex_fig, epoch_reward_speed_pre_post_fig, epoch_reward_speed_diff_fig, epoch_reward_cap_pre_post_fig, epoch_reward_cap_diff_fig, epoch_reward_speed_pre_post_entry_fig, epoch_reward_speed_diff_entry_fig, epoch_reward_speed_pre_post_entry_1s_fig, epoch_reward_speed_diff_entry_1s_fig, epoch_reward_lick_count_sess_per_mouse_fig, epoch_reward_lick_count_sess_cond_fig, epoch_punish_lick_count_sess_per_mouse_fig, epoch_punish_lick_count_sess_cond_fig, epoch_punish_speed_pre_post_fig, epoch_punish_speed_diff_fig, epoch_punish_speed_pre_post_entry_fig, epoch_punish_speed_diff_entry_fig, epoch_punish_cap_pre_post_fig, epoch_punish_cap_diff_fig, epoch_punish_cap_pre_post_entry_fig, epoch_punish_cap_diff_entry_fig, expl_speed_histogram_fig, expl_speed_boxplot_fig, expl_speed_rm_anova_resid_fig, expl_cap_histogram_fig, expl_cap_boxplot_fig, expl_cap_rm_anova_resid_fig, expl_cap_distfit_fig, expl_lick_distfit_fig, expl_lick_boxplot_fig, expl_lick_rm_anova_resid_fig, expl_lick_reward_ratio_distfit_fig, all_results, _level_stats_data
+    return speed_fig, sensitivity_fig, lick_fig, reward_fig, lick_reward_ratio_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, avg_sex_speed_fig, distance_fig, bout_count_fig, avg_bout_count_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_lick_reward_ratio_fig, condition_lick_reward_ratio_bar_fig, condition_bar_fig, condition_speed_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, epoch_speed_per_mouse_fig, epoch_speed_cond_fig, epoch_cap_per_mouse_fig, epoch_cap_cond_fig, epoch_speed_sess_per_mouse_fig, epoch_speed_sess_cond_fig, epoch_cap_sess_per_mouse_fig, epoch_cap_sess_cond_fig, epoch_speed_early_per_mouse_fig, epoch_speed_late_per_mouse_fig, epoch_speed_early_cond_fig, epoch_speed_late_cond_fig, epoch_cap_early_per_mouse_fig, epoch_cap_late_per_mouse_fig, epoch_cap_early_cond_fig, epoch_cap_late_cond_fig, epoch_speed_early_ev_per_mouse_fig, epoch_speed_late_ev_per_mouse_fig, epoch_speed_early_ev_cond_fig, epoch_speed_late_ev_cond_fig, epoch_cap_early_ev_per_mouse_fig, epoch_cap_late_ev_per_mouse_fig, epoch_cap_early_ev_cond_fig, epoch_cap_late_ev_cond_fig, epoch_speed_early_ev_cond_clean_fig, epoch_speed_late_ev_cond_clean_fig, epoch_cap_early_ev_cond_clean_fig, epoch_cap_late_ev_cond_clean_fig, epoch_speed_sess_cond_clean_fig, epoch_cap_sess_cond_clean_fig, epoch_speed_early_cond_clean_fig, epoch_speed_late_cond_clean_fig, epoch_cap_early_cond_clean_fig, epoch_cap_late_cond_clean_fig, punish_speed_per_mouse_fig, punish_speed_cond_fig, punish_cap_per_mouse_fig, punish_cap_cond_fig, punish_speed_sess_per_mouse_fig, punish_speed_sess_cond_fig, punish_cap_sess_per_mouse_fig, punish_cap_sess_cond_fig, punish_speed_sess_cond_clean_fig, punish_cap_sess_cond_clean_fig, sex_speed_fig, sex_distance_indiv_fig, sex_reward_indiv_fig, epoch_speed_sess_sex_per_mouse_fig, epoch_speed_sess_sex_fig, epoch_cap_sess_sex_per_mouse_fig, epoch_cap_sess_sex_fig, epoch_punish_speed_sess_sex_per_mouse_fig, epoch_punish_speed_sess_sex_fig, epoch_punish_cap_sess_sex_per_mouse_fig, epoch_punish_cap_sess_sex_fig, epoch_reward_speed_pre_post_fig, epoch_reward_speed_diff_fig, epoch_reward_cap_pre_post_fig, epoch_reward_cap_diff_fig, epoch_reward_speed_pre_post_entry_fig, epoch_reward_speed_diff_entry_fig, epoch_reward_speed_pre_post_entry_1s_fig, epoch_reward_speed_diff_entry_1s_fig, epoch_reward_lick_count_sess_per_mouse_fig, epoch_reward_lick_count_sess_cond_fig, epoch_punish_lick_count_sess_per_mouse_fig, epoch_punish_lick_count_sess_cond_fig, epoch_punish_speed_pre_post_fig, epoch_punish_speed_diff_fig, epoch_punish_speed_pre_post_entry_fig, epoch_punish_speed_diff_entry_fig, epoch_punish_cap_pre_post_fig, epoch_punish_cap_diff_fig, epoch_punish_cap_pre_post_entry_fig, epoch_punish_cap_diff_entry_fig, expl_speed_histogram_fig, expl_speed_distfit_fig, expl_speed_boxplot_fig, expl_speed_rm_anova_resid_fig, expl_cap_histogram_fig, expl_cap_boxplot_fig, expl_cap_rm_anova_resid_fig, expl_cap_distfit_fig, expl_lick_distfit_fig, expl_lick_boxplot_fig, expl_lick_rm_anova_resid_fig, expl_lick_rate_distfit_fig, expl_lick_reward_ratio_distfit_fig, all_results, _level_stats_data
 
 def _ask_mode(root):
     """Ask whether to generate plots or run the descriptive stats report.
@@ -8874,6 +9534,8 @@ def _ask_mode(root):
     btn_frame.pack(padx=20, pady=(4, 16))
     tk.Button(btn_frame, text='Generate Plots', width=20,
               command=lambda: _choose('plots')).pack(side='left', padx=6)
+    tk.Button(btn_frame, text='Exploratory / Distribution Plots', width=32,
+              command=lambda: _choose('expl')).pack(side='left', padx=6)
     tk.Button(btn_frame, text='Descriptive Stats Report', width=24,
               command=lambda: _choose('stats')).pack(side='left', padx=6)
 
@@ -8983,7 +9645,13 @@ def main():
         return
 
     # ── PLOTS mode ────────────────────────────────────────────────────────────
-    selected_plots = _ask_plot_selection(root)
+    if mode == 'expl':
+        selected_plots = _ask_plot_selection(
+            root, labels=_EXPL_PLOT_LABELS,
+            title='Select Exploratory / Distribution Plots',
+        )
+    else:
+        selected_plots = _ask_plot_selection(root)
     if not selected_plots:
         print("No plots selected. Exiting...")
         return
@@ -9008,7 +9676,7 @@ def main():
             print("No transitions CSV selected — level plot will be empty.")
 
     # Analyze data and plot results
-    speed_fig, sensitivity_fig, lick_fig, reward_fig, lick_reward_ratio_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, avg_sex_speed_fig, distance_fig, bout_count_fig, avg_bout_count_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_lick_reward_ratio_fig, condition_lick_reward_ratio_bar_fig, condition_bar_fig, condition_speed_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, epoch_speed_per_mouse_fig, epoch_speed_cond_fig, epoch_cap_per_mouse_fig, epoch_cap_cond_fig, epoch_speed_sess_per_mouse_fig, epoch_speed_sess_cond_fig, epoch_cap_sess_per_mouse_fig, epoch_cap_sess_cond_fig, epoch_speed_early_per_mouse_fig, epoch_speed_late_per_mouse_fig, epoch_speed_early_cond_fig, epoch_speed_late_cond_fig, epoch_cap_early_per_mouse_fig, epoch_cap_late_per_mouse_fig, epoch_cap_early_cond_fig, epoch_cap_late_cond_fig, epoch_speed_early_ev_per_mouse_fig, epoch_speed_late_ev_per_mouse_fig, epoch_speed_early_ev_cond_fig, epoch_speed_late_ev_cond_fig, epoch_cap_early_ev_per_mouse_fig, epoch_cap_late_ev_per_mouse_fig, epoch_cap_early_ev_cond_fig, epoch_cap_late_ev_cond_fig, epoch_speed_sess_cond_clean_fig, epoch_cap_sess_cond_clean_fig, epoch_speed_early_cond_clean_fig, epoch_speed_late_cond_clean_fig, epoch_cap_early_cond_clean_fig, epoch_cap_late_cond_clean_fig, punish_speed_per_mouse_fig, punish_speed_cond_fig, punish_cap_per_mouse_fig, punish_cap_cond_fig, punish_speed_sess_per_mouse_fig, punish_speed_sess_cond_fig, punish_cap_sess_per_mouse_fig, punish_cap_sess_cond_fig, punish_speed_sess_cond_clean_fig, punish_cap_sess_cond_clean_fig, sex_speed_fig, sex_distance_indiv_fig, sex_reward_indiv_fig, epoch_speed_sess_sex_per_mouse_fig, epoch_speed_sess_sex_fig, epoch_cap_sess_sex_per_mouse_fig, epoch_cap_sess_sex_fig, epoch_punish_speed_sess_sex_per_mouse_fig, epoch_punish_speed_sess_sex_fig, epoch_punish_cap_sess_sex_per_mouse_fig, epoch_punish_cap_sess_sex_fig, epoch_reward_speed_pre_post_fig, epoch_reward_speed_diff_fig, epoch_reward_cap_pre_post_fig, epoch_reward_cap_diff_fig, epoch_reward_speed_pre_post_entry_fig, epoch_reward_speed_diff_entry_fig, epoch_reward_speed_pre_post_entry_1s_fig, epoch_reward_speed_diff_entry_1s_fig, epoch_reward_lick_count_sess_per_mouse_fig, epoch_reward_lick_count_sess_cond_fig, epoch_punish_lick_count_sess_per_mouse_fig, epoch_punish_lick_count_sess_cond_fig, epoch_punish_speed_pre_post_fig, epoch_punish_speed_diff_fig, epoch_punish_speed_pre_post_entry_fig, epoch_punish_speed_diff_entry_fig, epoch_punish_cap_pre_post_fig, epoch_punish_cap_diff_fig, epoch_punish_cap_pre_post_entry_fig, epoch_punish_cap_diff_entry_fig, expl_speed_histogram_fig, expl_speed_boxplot_fig, expl_speed_rm_anova_resid_fig, expl_cap_histogram_fig, expl_cap_boxplot_fig, expl_cap_rm_anova_resid_fig, expl_cap_distfit_fig, expl_lick_distfit_fig, expl_lick_boxplot_fig, expl_lick_rm_anova_resid_fig, expl_lick_reward_ratio_distfit_fig, all_results, _level_stats_data = analyze_mouse_data(
+    speed_fig, sensitivity_fig, lick_fig, reward_fig, lick_reward_ratio_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, avg_sex_speed_fig, distance_fig, bout_count_fig, avg_bout_count_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_lick_reward_ratio_fig, condition_lick_reward_ratio_bar_fig, condition_bar_fig, condition_speed_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, epoch_speed_per_mouse_fig, epoch_speed_cond_fig, epoch_cap_per_mouse_fig, epoch_cap_cond_fig, epoch_speed_sess_per_mouse_fig, epoch_speed_sess_cond_fig, epoch_cap_sess_per_mouse_fig, epoch_cap_sess_cond_fig, epoch_speed_early_per_mouse_fig, epoch_speed_late_per_mouse_fig, epoch_speed_early_cond_fig, epoch_speed_late_cond_fig, epoch_cap_early_per_mouse_fig, epoch_cap_late_per_mouse_fig, epoch_cap_early_cond_fig, epoch_cap_late_cond_fig, epoch_speed_early_ev_per_mouse_fig, epoch_speed_late_ev_per_mouse_fig, epoch_speed_early_ev_cond_fig, epoch_speed_late_ev_cond_fig, epoch_cap_early_ev_per_mouse_fig, epoch_cap_late_ev_per_mouse_fig, epoch_cap_early_ev_cond_fig, epoch_cap_late_ev_cond_fig, epoch_speed_early_ev_cond_clean_fig, epoch_speed_late_ev_cond_clean_fig, epoch_cap_early_ev_cond_clean_fig, epoch_cap_late_ev_cond_clean_fig, epoch_speed_sess_cond_clean_fig, epoch_cap_sess_cond_clean_fig, epoch_speed_early_cond_clean_fig, epoch_speed_late_cond_clean_fig, epoch_cap_early_cond_clean_fig, epoch_cap_late_cond_clean_fig, punish_speed_per_mouse_fig, punish_speed_cond_fig, punish_cap_per_mouse_fig, punish_cap_cond_fig, punish_speed_sess_per_mouse_fig, punish_speed_sess_cond_fig, punish_cap_sess_per_mouse_fig, punish_cap_sess_cond_fig, punish_speed_sess_cond_clean_fig, punish_cap_sess_cond_clean_fig, sex_speed_fig, sex_distance_indiv_fig, sex_reward_indiv_fig, epoch_speed_sess_sex_per_mouse_fig, epoch_speed_sess_sex_fig, epoch_cap_sess_sex_per_mouse_fig, epoch_cap_sess_sex_fig, epoch_punish_speed_sess_sex_per_mouse_fig, epoch_punish_speed_sess_sex_fig, epoch_punish_cap_sess_sex_per_mouse_fig, epoch_punish_cap_sess_sex_fig, epoch_reward_speed_pre_post_fig, epoch_reward_speed_diff_fig, epoch_reward_cap_pre_post_fig, epoch_reward_cap_diff_fig, epoch_reward_speed_pre_post_entry_fig, epoch_reward_speed_diff_entry_fig, epoch_reward_speed_pre_post_entry_1s_fig, epoch_reward_speed_diff_entry_1s_fig, epoch_reward_lick_count_sess_per_mouse_fig, epoch_reward_lick_count_sess_cond_fig, epoch_punish_lick_count_sess_per_mouse_fig, epoch_punish_lick_count_sess_cond_fig, epoch_punish_speed_pre_post_fig, epoch_punish_speed_diff_fig, epoch_punish_speed_pre_post_entry_fig, epoch_punish_speed_diff_entry_fig, epoch_punish_cap_pre_post_fig, epoch_punish_cap_diff_fig, epoch_punish_cap_pre_post_entry_fig, epoch_punish_cap_diff_entry_fig, expl_speed_histogram_fig, expl_speed_distfit_fig, expl_speed_boxplot_fig, expl_speed_rm_anova_resid_fig, expl_cap_histogram_fig, expl_cap_boxplot_fig, expl_cap_rm_anova_resid_fig, expl_cap_distfit_fig, expl_lick_distfit_fig, expl_lick_boxplot_fig, expl_lick_rm_anova_resid_fig, expl_lick_rate_distfit_fig, expl_lick_reward_ratio_distfit_fig, all_results, _level_stats_data = analyze_mouse_data(
         file_paths, markers, starting_conditions,
         transitions_csv_path=transitions_csv_path,
         selected_plots=selected_plots,
@@ -9046,6 +9714,8 @@ def main():
         epoch_speed_early_ev_cond_fig, epoch_speed_late_ev_cond_fig,
         epoch_cap_early_ev_per_mouse_fig, epoch_cap_late_ev_per_mouse_fig,
         epoch_cap_early_ev_cond_fig, epoch_cap_late_ev_cond_fig,
+        epoch_speed_early_ev_cond_clean_fig, epoch_speed_late_ev_cond_clean_fig,
+        epoch_cap_early_ev_cond_clean_fig, epoch_cap_late_ev_cond_clean_fig,
         punish_speed_per_mouse_fig, punish_speed_cond_fig,
         punish_cap_per_mouse_fig, punish_cap_cond_fig,
         punish_speed_sess_per_mouse_fig, punish_speed_sess_cond_fig,
@@ -9077,6 +9747,7 @@ def main():
         epoch_punish_cap_pre_post_entry_fig,
         epoch_punish_cap_diff_entry_fig,
         expl_speed_histogram_fig,
+        expl_speed_distfit_fig,
         expl_speed_boxplot_fig,
         expl_speed_rm_anova_resid_fig,
         expl_cap_histogram_fig,
@@ -9085,6 +9756,7 @@ def main():
         expl_lick_distfit_fig,
         expl_lick_boxplot_fig,
         expl_lick_rm_anova_resid_fig,
+        expl_lick_rate_distfit_fig,
         expl_lick_reward_ratio_distfit_fig,
     ] if f is not None]
 
@@ -9194,6 +9866,10 @@ def main():
         (epoch_cap_early_ev_cond_fig,        'epoch_reward_cap_early_ev_condition',   'Capacitive epoch ev (early sessions) — by condition'),
         (epoch_cap_late_ev_per_mouse_fig,    'epoch_reward_cap_late_ev_per_mouse',    'Capacitive epoch ev (late sessions) — per mouse'),
         (epoch_cap_late_ev_cond_fig,         'epoch_reward_cap_late_ev_condition',    'Capacitive epoch ev (late sessions) — by condition'),
+        (epoch_speed_early_ev_cond_clean_fig,  'epoch_reward_speed_early_ev_condition_clean', 'Speed epoch ev (early sessions) — by condition, no individual traces'),
+        (epoch_speed_late_ev_cond_clean_fig,   'epoch_reward_speed_late_ev_condition_clean',  'Speed epoch ev (late sessions) — by condition, no individual traces'),
+        (epoch_cap_early_ev_cond_clean_fig,    'epoch_reward_cap_early_ev_condition_clean',   'Capacitive epoch ev (early sessions) — by condition, no individual traces'),
+        (epoch_cap_late_ev_cond_clean_fig,     'epoch_reward_cap_late_ev_condition_clean',    'Capacitive epoch ev (late sessions) — by condition, no individual traces'),
         (punish_speed_per_mouse_fig,          'epoch_punish_speed_per_mouse',          'Speed epoch (punish, event) — per mouse'),
         (punish_speed_cond_fig,               'epoch_punish_speed_condition',          'Speed epoch (punish, event) — by condition'),
         (punish_cap_per_mouse_fig,            'epoch_punish_cap_per_mouse',            'Capacitive epoch (punish, event) — per mouse'),
@@ -9236,15 +9912,17 @@ def main():
         (epoch_punish_cap_pre_post_entry_fig,        'epoch_punish_cap_pre_post_entry',        'Pre/post-entry punishment zone capacitive (z-scored) bar chart by condition (1 s windows)'),
         (epoch_punish_cap_diff_entry_fig,            'epoch_punish_cap_diff_entry',            'Pre-minus-post-entry punishment zone capacitive difference by condition (Mann-Whitney U)'),
         (expl_speed_histogram_fig,                   'expl_speed_histogram',                   'Exploratory: speed histogram (all sessions + per-mouse means)'),
+        (expl_speed_distfit_fig,                     'expl_speed_distfit',                     'Exploratory: Average speed distribution fit (Normal, Log-normal, Gamma)'),
         (expl_speed_boxplot_fig,                     'expl_speed_boxplot',                     'Exploratory: speed box-and-whisker (per-mouse + overall)'),
         (expl_speed_rm_anova_resid_fig,              'expl_speed_rm_anova_resid',               'Exploratory: RM ANOVA residual diagnostics'),
         (expl_cap_histogram_fig,                     'expl_cap_histogram',                     'Exploratory: z-scored mean cap value histogram'),
         (expl_cap_boxplot_fig,                       'expl_cap_boxplot',                       'Exploratory: z-scored mean cap value box-and-whisker'),
         (expl_cap_rm_anova_resid_fig,                'expl_cap_rm_anova_resid',                'Exploratory: Capacitive RM ANOVA residual diagnostics'),
         (expl_cap_distfit_fig,                       'expl_cap_distfit',                       'Exploratory: Capacitive sensor value distribution fit (Normal, Log-normal, Gamma)'),
-        (expl_lick_distfit_fig,                      'expl_lick_distfit',                      'Exploratory: Lick count Poisson vs NB distribution fit'),  
+        (expl_lick_distfit_fig,                      'expl_lick_distfit',                      'Exploratory: Lick count Poisson vs NB distribution fit'),
         (expl_lick_boxplot_fig,                      'expl_lick_boxplot',                      'Exploratory: raw lick count box-and-whisker'),
         (expl_lick_rm_anova_resid_fig,               'expl_lick_rm_anova_resid',               'Exploratory: Raw lick count RM ANOVA residual diagnostics'),
+        (expl_lick_rate_distfit_fig,                 'expl_lick_rate_distfit',                 'Exploratory: Average lick rate distribution fit (Normal, Log-normal, Gamma)'),
         (expl_lick_reward_ratio_distfit_fig,          'expl_lick_reward_ratio_distfit',          'Exploratory: Lick/reward ratio distribution KDE + normality test'),
     ]
 
