@@ -10301,20 +10301,31 @@ def _run_weight_correlations(root, file_paths, animal_info):
         dc_col    = wdf_cols_lower.get('daily_change', wdf_cols_lower.get('daily change', None))
         tc_col    = wdf_cols_lower.get('total_change', wdf_cols_lower.get('total change', None))
         if date_col is None or tc_col is None:
-            # Try to find by position (Date = col 5, Total Change = col 8 in the known format)
+            # Try to find by position (Date=col5, Daily Change=col7, Total Change=col8)
             date_col = wdf.columns[5] if len(wdf.columns) > 5 else wdf.columns[1]
             tc_col   = wdf.columns[8] if len(wdf.columns) > 8 else wdf.columns[2]
+        if dc_col is None:
+            dc_col = wdf.columns[7] if len(wdf.columns) > 7 else wdf.columns[2]
         wdf[date_col] = pd.to_datetime(wdf[date_col], errors='coerce')
         wdf[tc_col]   = pd.to_numeric(wdf[tc_col],   errors='coerce')
-        # Build lookup: (mouse_id, date_normalised) -> total_change
-        weight_lookup = {}
+        wdf[dc_col]   = pd.to_numeric(wdf[dc_col],   errors='coerce')
+        # Build lookups: (mouse_id, date_normalised) -> total_change / daily_change
+        weight_lookup       = {}
+        daily_change_lookup = {}
         for _, row in wdf.iterrows():
             mid = str(row[id_col]).strip()
             dt  = row[date_col]
-            tc  = row[tc_col]
-            if pd.notna(dt) and pd.notna(tc):
-                weight_lookup[(mid, dt.normalize())] = tc
-        print(f"Weight CSV loaded: {len(weight_lookup)} date entries across "
+            if not pd.notna(dt):
+                continue
+            d = dt.normalize()
+            tc = row[tc_col]
+            dc = row[dc_col]
+            if pd.notna(tc):
+                weight_lookup[(mid, d)] = float(tc)
+            if pd.notna(dc):
+                daily_change_lookup[(mid, d)] = float(dc)
+        print(f"Weight CSV loaded: {len(weight_lookup)} total-change entries, "
+              f"{len(daily_change_lookup)} daily-change entries across "
               f"{len(wdf[id_col].unique())} mice.")
     except Exception as e:
         print(f"[ERROR] Cannot read weight CSV: {e}")
@@ -10334,22 +10345,25 @@ def _run_weight_correlations(root, file_paths, animal_info):
     )
 
     # ── Build merged dataframe ────────────────────────────────────────────────
+    _one_day = pd.Timedelta(days=1)
     records = []
     for result in all_results:
-        mouse      = result['mouse']
-        condition  = result['starting_condition']
-        df_r       = result['df']
+        mouse     = result['mouse']
+        condition = result['starting_condition']
+        df_r      = result['df']
         for _, row in df_r.iterrows():
-            dt    = pd.Timestamp(row['date']).normalize()
-            hits  = pd.to_numeric(row.get('hits', np.nan), errors='coerce')
-            tc    = weight_lookup.get((mouse, dt), np.nan)
-            if pd.notna(hits) and pd.notna(tc):
+            dt      = pd.Timestamp(row['date']).normalize()
+            hits    = pd.to_numeric(row.get('hits', np.nan), errors='coerce')
+            tc      = weight_lookup.get((mouse, dt), np.nan)
+            next_dc = daily_change_lookup.get((mouse, dt + _one_day), np.nan)
+            if pd.notna(hits) and (pd.notna(tc) or pd.notna(next_dc)):
                 records.append({
-                    'mouse': mouse,
-                    'condition': condition,
-                    'date': dt,
+                    'mouse':        mouse,
+                    'condition':    condition,
+                    'date':         dt,
                     'reward_count': float(hits),
-                    'total_change': float(tc),
+                    'total_change': float(tc)      if pd.notna(tc)      else np.nan,
+                    'next_day_dc':  float(next_dc) if pd.notna(next_dc) else np.nan,
                 })
 
     if not records:
@@ -10378,20 +10392,23 @@ def _run_weight_correlations(root, file_paths, animal_info):
                 bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
                           edgecolor='lightgray', alpha=0.8))
 
-    def _assumptions_figure(sub_df, title):
+    def _assumptions_figure(sub_df, title,
+                             x_col='total_change', y_col='reward_count',
+                             x_label='Total Weight Change (%)',
+                             y_label='Reward Count per Session'):
         """Return a 2×2 assumption-check figure for a weight-correlation subset.
 
         Panels:
-          Top-left  — Box plot of Total Weight Change with 1.5×IQR whiskers
-          Top-right — Box plot of Reward Count with 1.5×IQR whiskers
+          Top-left  — Box plot of X variable with 1.5×IQR whiskers
+          Top-right — Box plot of Y variable with 1.5×IQR whiskers
           Bot-left  — Scatter with linear fit + LOWESS (linearity check)
           Bot-right — χ² Q-Q plot of Mahalanobis D² (bivariate normality)
                       + marginal Shapiro-Wilk results annotated
         """
         from scipy.stats import chi2 as _chi2, shapiro as _shapiro
 
-        both_df   = sub_df[['total_change', 'reward_count', 'mouse']].dropna()
-        xy        = both_df[['total_change', 'reward_count']].values.astype(float)
+        both_df   = sub_df[[x_col, y_col, 'mouse']].dropna(subset=[x_col, y_col])
+        xy        = both_df[[x_col, y_col]].values.astype(float)
         fin       = np.isfinite(xy[:, 0]) & np.isfinite(xy[:, 1])
         x_both    = xy[fin, 0]
         y_both    = xy[fin, 1]
@@ -10414,9 +10431,9 @@ def _run_weight_correlations(root, file_paths, animal_info):
                                     alpha=0.75),
                     whis=1.5)
         ax1.set_xticks([1])
-        ax1.set_xticklabels(['Total Weight\nChange (%)'])
+        ax1.set_xticklabels([x_label])
         ax1.set_ylabel('Value')
-        ax1.set_title('Outlier Check: Total Weight Change\n(Whiskers = 1.5 × IQR)')
+        ax1.set_title(f'Outlier Check: {x_label}\n(Whiskers = 1.5 × IQR)')
         ax1.spines['top'].set_visible(False)
         ax1.spines['right'].set_visible(False)
         if n > 0:
@@ -10443,9 +10460,9 @@ def _run_weight_correlations(root, file_paths, animal_info):
                                     alpha=0.75),
                     whis=1.5)
         ax2.set_xticks([1])
-        ax2.set_xticklabels(['Reward Count'])
+        ax2.set_xticklabels([y_label])
         ax2.set_ylabel('Value')
-        ax2.set_title('Outlier Check: Reward Count\n(Whiskers = 1.5 × IQR)')
+        ax2.set_title(f'Outlier Check: {y_label}\n(Whiskers = 1.5 × IQR)')
         ax2.spines['top'].set_visible(False)
         ax2.spines['right'].set_visible(False)
         if n > 0:
@@ -10488,8 +10505,8 @@ def _run_weight_correlations(root, file_paths, animal_info):
                 ax3.plot(x_line, np.polyval(coef2, x_line),
                          color='#e74c3c', linewidth=1.5, linestyle='-',
                          label='Quadratic fit', zorder=6)
-        ax3.set_xlabel('Total Weight Change (%)')
-        ax3.set_ylabel('Reward Count per Session')
+        ax3.set_xlabel(x_label)
+        ax3.set_ylabel(y_label)
         ax3.set_title('Linearity Check\n(Dashed = linear fit,  Red = LOWESS / quadratic)')
         ax3.spines['top'].set_visible(False)
         ax3.spines['right'].set_visible(False)
@@ -10520,9 +10537,9 @@ def _run_weight_correlations(root, file_paths, animal_info):
                 sig_y = '*' if sw_y.pvalue < 0.05 else 'ns'
                 ax4.text(0.03, 0.97,
                          'Shapiro-Wilk (marginals):\n'
-                         f'  Wt Change: W={sw_x.statistic:.3f}, '
+                         f'  {x_label[:15]}: W={sw_x.statistic:.3f}, '
                          f'p={sw_x.pvalue:.3f} {sig_x}\n'
-                         f'  Rewards:   W={sw_y.statistic:.3f}, '
+                         f'  {y_label[:15]}: W={sw_y.statistic:.3f}, '
                          f'p={sw_y.pvalue:.3f} {sig_y}',
                          transform=ax4.transAxes, ha='left', va='top',
                          fontsize=7.5,
@@ -10547,14 +10564,41 @@ def _run_weight_correlations(root, file_paths, animal_info):
         fig.tight_layout()
         return fig
 
-    # ── Assumption checks (one figure per group) ──────────────────────────────
-    fig_assump_all   = _assumptions_figure(merged, 'All Mice Combined')
+    # ── Assumption checks (one figure per group) — total change ──────────────
+    fig_assump_all   = _assumptions_figure(merged.dropna(subset=['total_change']),
+                                            'All Mice Combined')
     fig_assump_conds = {
         cond: _assumptions_figure(
-            merged[merged['condition'] == cond], f'Condition: {cond}'
+            merged[merged['condition'] == cond].dropna(subset=['total_change']),
+            f'Condition: {cond}'
         )
         for cond in conditions_sorted
     }
+
+    # ── Assumption checks — reward count vs next-day daily change ─────────────
+    _nd_x_label = 'Reward Count (Day D)'
+    _nd_y_label = 'Daily Weight Change Day D+1 (%)'
+    merged_nd = merged.dropna(subset=['reward_count', 'next_day_dc']).copy()
+    if not merged_nd.empty:
+        fig_assump_nd_all = _assumptions_figure(
+            merged_nd, 'All Mice Combined \u2014 Next-Day Daily Change',
+            x_col='reward_count', y_col='next_day_dc',
+            x_label=_nd_x_label, y_label=_nd_y_label,
+        )
+        fig_assump_nd_conds = {
+            cond: _assumptions_figure(
+                merged_nd[merged_nd['condition'] == cond],
+                f'Condition: {cond} \u2014 Next-Day Daily Change',
+                x_col='reward_count', y_col='next_day_dc',
+                x_label=_nd_x_label, y_label=_nd_y_label,
+            )
+            for cond in conditions_sorted
+            if not merged_nd[merged_nd['condition'] == cond].empty
+        }
+    else:
+        fig_assump_nd_all  = None
+        fig_assump_nd_conds = {}
+        print("[WARN] No next-day daily change data found \u2014 skipping next-day correlation plots.")
 
     # ── Plot 1: all mice combined ─────────────────────────────────────────────
     fig_all, ax_all = plt.subplots(figsize=(8, 6))
@@ -10615,23 +10659,98 @@ def _run_weight_correlations(root, file_paths, animal_info):
                       fontsize=12, fontweight='bold')
     fig_cond.tight_layout()
 
+    # ── Plot 3: next-day daily change — all mice combined ─────────────────────
+    if merged_nd.empty:
+        fig_nd_all = fig_nd_cond = None
+    else:
+        fig_nd_all, ax_nd_all = plt.subplots(figsize=(8, 6))
+        for mouse in mice_sorted:
+            sub = merged_nd[merged_nd['mouse'] == mouse]
+            if sub.empty:
+                continue
+            ax_nd_all.scatter(sub['reward_count'], sub['next_day_dc'],
+                              color=mouse_colors[mouse], label=mouse,
+                              s=38, alpha=0.82, edgecolors='none')
+        nd_x  = merged_nd['reward_count'].values
+        nd_y  = merged_nd['next_day_dc'].values
+        nd_fin = np.isfinite(nd_x) & np.isfinite(nd_y)
+        if nd_fin.sum() >= 2:
+            coef_nd = np.polyfit(nd_x[nd_fin], nd_y[nd_fin], 1)
+            xl_nd   = np.linspace(nd_x[nd_fin].min(), nd_x[nd_fin].max(), 200)
+            ax_nd_all.plot(xl_nd, np.polyval(coef_nd, xl_nd),
+                           color='black', linewidth=1.5, linestyle='--', zorder=5)
+        _add_corr_annotation(ax_nd_all, nd_x, nd_y)
+        ax_nd_all.set_xlabel(_nd_x_label)
+        ax_nd_all.set_ylabel(_nd_y_label)
+        ax_nd_all.set_title(
+            'Reward Count (Day D) vs Next-Day Daily Weight Change\n'
+            '(all mice, all sessions \u2014 Kendall\'s \u03c4)')
+        ax_nd_all.spines['top'].set_visible(False)
+        ax_nd_all.spines['right'].set_visible(False)
+        ax_nd_all.legend(title='Mouse', bbox_to_anchor=(1.02, 1), loc='upper left',
+                         fontsize=7.5, title_fontsize=8)
+        fig_nd_all.tight_layout()
+
+        # ── Plot 4: next-day daily change — by starting condition ──────────────
+        fig_nd_cond, axes_nd_cond = plt.subplots(1, n_conds,
+                                                  figsize=(6 * n_conds, 6),
+                                                  sharey=False)
+        if n_conds == 1:
+            axes_nd_cond = [axes_nd_cond]
+        for ax_ndc, cond in zip(axes_nd_cond, conditions_sorted):
+            sub_cond_nd = merged_nd[merged_nd['condition'] == cond]
+            for mouse in sorted(sub_cond_nd['mouse'].unique()):
+                sub_m = sub_cond_nd[sub_cond_nd['mouse'] == mouse]
+                ax_ndc.scatter(sub_m['reward_count'], sub_m['next_day_dc'],
+                               color=mouse_colors[mouse], label=mouse,
+                               s=38, alpha=0.82, edgecolors='none')
+            cndx  = sub_cond_nd['reward_count'].values
+            cndy  = sub_cond_nd['next_day_dc'].values
+            cnd_fin = np.isfinite(cndx) & np.isfinite(cndy)
+            if cnd_fin.sum() >= 2:
+                coef_ndc = np.polyfit(cndx[cnd_fin], cndy[cnd_fin], 1)
+                xl_ndc   = np.linspace(cndx[cnd_fin].min(), cndx[cnd_fin].max(), 200)
+                ax_ndc.plot(xl_ndc, np.polyval(coef_ndc, xl_ndc),
+                            color='black', linewidth=1.5, linestyle='--', zorder=5)
+            _add_corr_annotation(ax_ndc, cndx, cndy)
+            ax_ndc.set_xlabel(_nd_x_label)
+            ax_ndc.set_ylabel(_nd_y_label)
+            ax_ndc.set_title(f'Condition: {cond}')
+            ax_ndc.spines['top'].set_visible(False)
+            ax_ndc.spines['right'].set_visible(False)
+            ax_ndc.legend(title='Mouse', fontsize=7.5, title_fontsize=8)
+        fig_nd_cond.suptitle(
+            'Reward Count (Day D) vs Next-Day Daily Weight Change by Condition'
+            ' (Kendall\'s \u03c4)',
+            fontsize=12, fontweight='bold')
+        fig_nd_cond.tight_layout()
+
     # ── Display and optionally save ───────────────────────────────────────────
-    fig_assump_all.show()
-    for fig_a in fig_assump_conds.values():
-        fig_a.show()
-    fig_all.show()
-    fig_cond.show()
+    for fig_obj in ([fig_assump_all]
+                    + list(fig_assump_conds.values())
+                    + [fig_all, fig_cond]
+                    + ([fig_assump_nd_all] if fig_assump_nd_all else [])
+                    + list(fig_assump_nd_conds.values())
+                    + ([fig_nd_all, fig_nd_cond] if fig_nd_all else [])):
+        fig_obj.show()
     plt.show()
 
-    plt.rcParams['font.family'] = 'sans-serif'
+    plt.rcParams['font.family']    = 'sans-serif'
     plt.rcParams['font.sans-serif'] = ['Arial']
-    plt.rcParams['svg.fonttype'] = 'none'
+    plt.rcParams['svg.fonttype']   = 'none'
     figs_to_save = (
         [(fig_assump_all, 'weight_assumptions_all')]
         + [(fig_a, f'weight_assumptions_cond_{cond}')
            for cond, fig_a in fig_assump_conds.items()]
         + [(fig_all,  'weight_corr_all_mice'),
            (fig_cond, 'weight_corr_by_condition')]
+        + ([(fig_assump_nd_all, 'weight_nd_assumptions_all')]
+           if fig_assump_nd_all else [])
+        + [(fig_a, f'weight_nd_assumptions_cond_{cond}')
+           for cond, fig_a in fig_assump_nd_conds.items()]
+        + ([(fig_nd_all,  'weight_nd_corr_all_mice'),
+            (fig_nd_cond, 'weight_nd_corr_by_condition')]
+           if fig_nd_all else [])
     )
     for fig_obj, fname in figs_to_save:
         save_path = filedialog.asksaveasfilename(
