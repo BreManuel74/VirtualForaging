@@ -10273,6 +10273,378 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
 
     return speed_fig, sensitivity_fig, lick_fig, reward_fig, lick_reward_ratio_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, avg_sex_speed_fig, distance_fig, bout_count_fig, avg_bout_count_fig, rewards_per_bout_fig, first_lick_latency_fig, condition_rewards_per_bout_fig, condition_rewards_per_bout_bar_fig, condition_first_lick_latency_fig, condition_first_lick_latency_bar_fig, weekday_reward_bar_fig, weekday_reward_bar_condition_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_lick_reward_ratio_fig, condition_lick_reward_ratio_bar_fig, condition_punish_zone_pct_bar_fig, condition_bar_fig, condition_speed_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, last_level_bar_fig, epoch_speed_per_mouse_fig, epoch_speed_cond_fig, epoch_cap_per_mouse_fig, epoch_cap_cond_fig, epoch_speed_sess_per_mouse_fig, epoch_speed_sess_cond_fig, epoch_cap_sess_per_mouse_fig, epoch_cap_sess_cond_fig, epoch_speed_early_per_mouse_fig, epoch_speed_late_per_mouse_fig, epoch_speed_early_cond_fig, epoch_speed_late_cond_fig, epoch_cap_early_per_mouse_fig, epoch_cap_late_per_mouse_fig, epoch_cap_early_cond_fig, epoch_cap_late_cond_fig, epoch_speed_early_ev_per_mouse_fig, epoch_speed_late_ev_per_mouse_fig, epoch_speed_early_ev_cond_fig, epoch_speed_late_ev_cond_fig, epoch_cap_early_ev_per_mouse_fig, epoch_cap_late_ev_per_mouse_fig, epoch_cap_early_ev_cond_fig, epoch_cap_late_ev_cond_fig, epoch_speed_early_ev_cond_clean_fig, epoch_speed_late_ev_cond_clean_fig, epoch_cap_early_ev_cond_clean_fig, epoch_cap_late_ev_cond_clean_fig, epoch_speed_sess_cond_clean_fig, epoch_cap_sess_cond_clean_fig, epoch_speed_early_cond_clean_fig, epoch_speed_late_cond_clean_fig, epoch_cap_early_cond_clean_fig, epoch_cap_late_cond_clean_fig, punish_speed_per_mouse_fig, punish_speed_cond_fig, punish_cap_per_mouse_fig, punish_cap_cond_fig, punish_speed_sess_per_mouse_fig, punish_speed_sess_cond_fig, punish_cap_sess_per_mouse_fig, punish_cap_sess_cond_fig, punish_speed_sess_cond_clean_fig, punish_cap_sess_cond_clean_fig, sex_speed_fig, sex_distance_indiv_fig, sex_reward_indiv_fig, epoch_speed_sess_sex_per_mouse_fig, epoch_speed_sess_sex_fig, epoch_cap_sess_sex_per_mouse_fig, epoch_cap_sess_sex_fig, epoch_punish_speed_sess_sex_per_mouse_fig, epoch_punish_speed_sess_sex_fig, epoch_punish_cap_sess_sex_per_mouse_fig, epoch_punish_cap_sess_sex_fig, epoch_reward_speed_pre_post_fig, epoch_reward_speed_diff_fig, epoch_reward_cap_pre_post_fig, epoch_reward_cap_diff_fig, epoch_reward_speed_pre_post_entry_fig, epoch_reward_speed_diff_entry_fig, epoch_reward_speed_pre_post_entry_1s_fig, epoch_reward_speed_diff_entry_1s_fig, epoch_reward_lick_count_sess_per_mouse_fig, epoch_reward_lick_count_sess_cond_fig, epoch_punish_lick_count_sess_per_mouse_fig, epoch_punish_lick_count_sess_cond_fig, epoch_punish_speed_pre_post_fig, epoch_punish_speed_diff_fig, epoch_punish_speed_pre_post_entry_fig, epoch_punish_speed_diff_entry_fig, epoch_punish_cap_pre_post_fig, epoch_punish_cap_diff_fig, epoch_punish_cap_pre_post_entry_fig, epoch_punish_cap_diff_entry_fig, expl_speed_histogram_fig, expl_speed_distfit_fig, expl_speed_boxplot_fig, expl_speed_rm_anova_resid_fig, expl_cap_histogram_fig, expl_cap_boxplot_fig, expl_cap_rm_anova_resid_fig, expl_cap_distfit_fig, expl_lick_distfit_fig, expl_lick_boxplot_fig, expl_lick_rm_anova_resid_fig, expl_lick_rate_distfit_fig, expl_lick_reward_ratio_distfit_fig, all_results, _level_stats_data
 
+def _run_weight_correlations(root, file_paths, animal_info):
+    """Load a weight CSV, match to session data by mouse ID + date, and produce
+    two correlation plots (Total Change vs reward count):
+      1. All mice on one axes, each mouse its own colour.
+      2. Two subplots split by starting condition.
+    """
+    from scipy.stats import kendalltau as _kendalltau
+
+    # ── Load weight CSV ───────────────────────────────────────────────────────
+    weight_csv_path = filedialog.askopenfilename(
+        title='Select weight master CSV (ID, Date, Total Change …)',
+        filetypes=[('CSV files', '*.csv'), ('All files', '*.*')],
+        initialdir=os.path.dirname(file_paths[0]),
+    ) or None
+    if not weight_csv_path:
+        print("No weight CSV selected — weight correlations cancelled.")
+        return
+
+    try:
+        wdf = pd.read_csv(weight_csv_path)
+        wdf.columns = wdf.columns.str.strip()
+        # Normalise column names to lower-case for flexible matching
+        wdf_cols_lower = {c.lower().replace(' ', '_'): c for c in wdf.columns}
+        id_col    = wdf_cols_lower.get('id',    wdf.columns[0])
+        date_col  = wdf_cols_lower.get('date',  None)
+        dc_col    = wdf_cols_lower.get('daily_change', wdf_cols_lower.get('daily change', None))
+        tc_col    = wdf_cols_lower.get('total_change', wdf_cols_lower.get('total change', None))
+        if date_col is None or tc_col is None:
+            # Try to find by position (Date = col 5, Total Change = col 8 in the known format)
+            date_col = wdf.columns[5] if len(wdf.columns) > 5 else wdf.columns[1]
+            tc_col   = wdf.columns[8] if len(wdf.columns) > 8 else wdf.columns[2]
+        wdf[date_col] = pd.to_datetime(wdf[date_col], errors='coerce')
+        wdf[tc_col]   = pd.to_numeric(wdf[tc_col],   errors='coerce')
+        # Build lookup: (mouse_id, date_normalised) -> total_change
+        weight_lookup = {}
+        for _, row in wdf.iterrows():
+            mid = str(row[id_col]).strip()
+            dt  = row[date_col]
+            tc  = row[tc_col]
+            if pd.notna(dt) and pd.notna(tc):
+                weight_lookup[(mid, dt.normalize())] = tc
+        print(f"Weight CSV loaded: {len(weight_lookup)} date entries across "
+              f"{len(wdf[id_col].unique())} mice.")
+    except Exception as e:
+        print(f"[ERROR] Cannot read weight CSV: {e}")
+        return
+
+    # ── Load session data ─────────────────────────────────────────────────────
+    *_, all_results, _ = analyze_mouse_data(
+        file_paths,
+        ['s' if animal_info[os.path.basename(fp).split('_')[0]]['sex'] == 'male' else 'o'
+         for fp in file_paths
+         if os.path.basename(fp).split('_')[0] in animal_info],
+        [animal_info[os.path.basename(fp).split('_')[0]]['starting_condition']
+         for fp in file_paths
+         if os.path.basename(fp).split('_')[0] in animal_info],
+        transitions_csv_path=None,
+        selected_plots=frozenset(),
+    )
+
+    # ── Build merged dataframe ────────────────────────────────────────────────
+    records = []
+    for result in all_results:
+        mouse      = result['mouse']
+        condition  = result['starting_condition']
+        df_r       = result['df']
+        for _, row in df_r.iterrows():
+            dt    = pd.Timestamp(row['date']).normalize()
+            hits  = pd.to_numeric(row.get('hits', np.nan), errors='coerce')
+            tc    = weight_lookup.get((mouse, dt), np.nan)
+            if pd.notna(hits) and pd.notna(tc):
+                records.append({
+                    'mouse': mouse,
+                    'condition': condition,
+                    'date': dt,
+                    'reward_count': float(hits),
+                    'total_change': float(tc),
+                })
+
+    if not records:
+        print("[WARN] No overlapping dates found between weight CSV and session data.")
+        return
+
+    merged = pd.DataFrame(records)
+    mice_sorted   = sorted(merged['mouse'].unique())
+    cmap          = plt.get_cmap('tab20')
+    mouse_colors  = {m: cmap(i / max(len(mice_sorted) - 1, 1))
+                     for i, m in enumerate(mice_sorted)}
+    conditions_sorted = sorted(merged['condition'].unique())
+
+    def _add_corr_annotation(ax, x, y):
+        """Add Kendall's tau and p-value annotation to axes."""
+        mask = np.isfinite(x) & np.isfinite(y)
+        if mask.sum() < 3:
+            return
+        tau, p = _kendalltau(x[mask], y[mask])
+        sig = ('***' if p < 0.001 else '**' if p < 0.01
+               else '*' if p < 0.05 else 'ns')
+        ax.text(0.97, 0.05,
+                f'\u03c4 = {tau:.3f}\np = {p:.3f}  {sig}',
+                transform=ax.transAxes, ha='right', va='bottom',
+                fontsize=8.5,
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
+                          edgecolor='lightgray', alpha=0.8))
+
+    def _assumptions_figure(sub_df, title):
+        """Return a 2×2 assumption-check figure for a weight-correlation subset.
+
+        Panels:
+          Top-left  — Box plot of Total Weight Change with 1.5×IQR whiskers
+          Top-right — Box plot of Reward Count with 1.5×IQR whiskers
+          Bot-left  — Scatter with linear fit + LOWESS (linearity check)
+          Bot-right — χ² Q-Q plot of Mahalanobis D² (bivariate normality)
+                      + marginal Shapiro-Wilk results annotated
+        """
+        from scipy.stats import chi2 as _chi2, shapiro as _shapiro
+
+        both_df   = sub_df[['total_change', 'reward_count', 'mouse']].dropna()
+        xy        = both_df[['total_change', 'reward_count']].values.astype(float)
+        fin       = np.isfinite(xy[:, 0]) & np.isfinite(xy[:, 1])
+        x_both    = xy[fin, 0]
+        y_both    = xy[fin, 1]
+        mouse_arr = both_df['mouse'].values[fin]
+        n = len(x_both)
+
+        fig, axes = plt.subplots(2, 2, figsize=(11, 8))
+        fig.suptitle(f'Correlation Assumption Checks — {title}',
+                     fontsize=13, fontweight='bold')
+
+        # ── Panel 1 (top-left): Box plot — Total Weight Change (1.5×IQR) ─────
+        ax1 = axes[0, 0]
+        ax1.boxplot(x_both, vert=True, patch_artist=True,
+                    boxprops=dict(facecolor='#aec6e8', color='#2c5f82'),
+                    medianprops=dict(color='#c0392b', linewidth=2),
+                    whiskerprops=dict(color='#2c5f82', linewidth=1.2),
+                    capprops=dict(color='#2c5f82', linewidth=1.2),
+                    flierprops=dict(marker='o', color='#e74c3c', markersize=5.5,
+                                    linestyle='none', markerfacecolor='#e74c3c',
+                                    alpha=0.75),
+                    whis=1.5)
+        ax1.set_xticks([1])
+        ax1.set_xticklabels(['Total Weight\nChange (%)'])
+        ax1.set_ylabel('Value')
+        ax1.set_title('Outlier Check: Total Weight Change\n(Whiskers = 1.5 × IQR)')
+        ax1.spines['top'].set_visible(False)
+        ax1.spines['right'].set_visible(False)
+        if n > 0:
+            q1x, q3x = np.percentile(x_both, [25, 75])
+            iqr_x    = q3x - q1x
+            lo_x, hi_x = q1x - 1.5 * iqr_x, q3x + 1.5 * iqr_x
+            n_out_x  = int(np.sum((x_both < lo_x) | (x_both > hi_x)))
+            ax1.text(0.97, 0.97,
+                     f'n = {n}\nIQR = {iqr_x:.2f}\n'
+                     f'Fences: [{lo_x:.2f}, {hi_x:.2f}]\nOutliers: {n_out_x}',
+                     transform=ax1.transAxes, ha='right', va='top', fontsize=7.5,
+                     bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
+                               edgecolor='lightgray', alpha=0.8))
+
+        # ── Panel 2 (top-right): Box plot — Reward Count (1.5×IQR) ──────────
+        ax2 = axes[0, 1]
+        ax2.boxplot(y_both, vert=True, patch_artist=True,
+                    boxprops=dict(facecolor='#a8e8c0', color='#2c7a4b'),
+                    medianprops=dict(color='#c0392b', linewidth=2),
+                    whiskerprops=dict(color='#2c7a4b', linewidth=1.2),
+                    capprops=dict(color='#2c7a4b', linewidth=1.2),
+                    flierprops=dict(marker='o', color='#e74c3c', markersize=5.5,
+                                    linestyle='none', markerfacecolor='#e74c3c',
+                                    alpha=0.75),
+                    whis=1.5)
+        ax2.set_xticks([1])
+        ax2.set_xticklabels(['Reward Count'])
+        ax2.set_ylabel('Value')
+        ax2.set_title('Outlier Check: Reward Count\n(Whiskers = 1.5 × IQR)')
+        ax2.spines['top'].set_visible(False)
+        ax2.spines['right'].set_visible(False)
+        if n > 0:
+            q1y, q3y = np.percentile(y_both, [25, 75])
+            iqr_y    = q3y - q1y
+            lo_y, hi_y = q1y - 1.5 * iqr_y, q3y + 1.5 * iqr_y
+            n_out_y  = int(np.sum((y_both < lo_y) | (y_both > hi_y)))
+            ax2.text(0.97, 0.97,
+                     f'n = {n}\nIQR = {iqr_y:.2f}\n'
+                     f'Fences: [{lo_y:.2f}, {hi_y:.2f}]\nOutliers: {n_out_y}',
+                     transform=ax2.transAxes, ha='right', va='top', fontsize=7.5,
+                     bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
+                               edgecolor='lightgray', alpha=0.8))
+
+        # ── Panel 3 (bottom-left): Scatter — Linearity check ─────────────────
+        ax3 = axes[1, 0]
+        for m in np.unique(mouse_arr):
+            idx = mouse_arr == m
+            ax3.scatter(x_both[idx], y_both[idx],
+                        color=mouse_colors.get(m, 'gray'),
+                        s=30, alpha=0.75, edgecolors='none', label=m)
+        if n >= 2:
+            coef1  = np.polyfit(x_both, y_both, 1)
+            x_line = np.linspace(x_both.min(), x_both.max(), 200)
+            ax3.plot(x_line, np.polyval(coef1, x_line),
+                     color='black', linewidth=1.5, linestyle='--',
+                     label='Linear fit', zorder=5)
+        try:
+            from statsmodels.nonparametric.smoothers_lowess import lowess as _lowess
+            if n >= 5:
+                order    = np.argsort(x_both)
+                smoothed = _lowess(y_both[order], x_both[order],
+                                   frac=0.5, return_sorted=True)
+                ax3.plot(smoothed[:, 0], smoothed[:, 1],
+                         color='#e74c3c', linewidth=1.5, linestyle='-',
+                         label='LOWESS', zorder=6)
+        except ImportError:
+            if n >= 3:
+                coef2 = np.polyfit(x_both, y_both, 2)
+                ax3.plot(x_line, np.polyval(coef2, x_line),
+                         color='#e74c3c', linewidth=1.5, linestyle='-',
+                         label='Quadratic fit', zorder=6)
+        ax3.set_xlabel('Total Weight Change (%)')
+        ax3.set_ylabel('Reward Count per Session')
+        ax3.set_title('Linearity Check\n(Dashed = linear fit,  Red = LOWESS / quadratic)')
+        ax3.spines['top'].set_visible(False)
+        ax3.spines['right'].set_visible(False)
+        ax3.legend(fontsize=7, loc='best', framealpha=0.7)
+
+        # ── Panel 4 (bottom-right): Bivariate normality — χ² Q-Q plot ────────
+        ax4 = axes[1, 1]
+        if n >= 4:
+            X_mat    = np.column_stack([x_both, y_both])
+            mean_vec = X_mat.mean(axis=0)
+            cov_mat  = np.cov(X_mat.T)
+            try:
+                cov_inv   = np.linalg.inv(cov_mat)
+                diff      = X_mat - mean_vec
+                d2        = np.einsum('ij,jk,ik->i', diff, cov_inv, diff)
+                d2_sorted = np.sort(d2)
+                probs     = (np.arange(1, n + 1) - 0.5) / n
+                chi2_q    = _chi2.ppf(probs, df=2)
+                ax4.scatter(chi2_q, d2_sorted, s=22, alpha=0.75,
+                            color='#5b7fce', edgecolors='none',
+                            label='Observed D²')
+                ref_max = max(float(chi2_q.max()), float(d2_sorted.max()))
+                ax4.plot([0, ref_max], [0, ref_max], 'r--',
+                         linewidth=1.2, label='Reference (normal)')
+                sw_x = _shapiro(x_both)
+                sw_y = _shapiro(y_both)
+                sig_x = '*' if sw_x.pvalue < 0.05 else 'ns'
+                sig_y = '*' if sw_y.pvalue < 0.05 else 'ns'
+                ax4.text(0.03, 0.97,
+                         'Shapiro-Wilk (marginals):\n'
+                         f'  Wt Change: W={sw_x.statistic:.3f}, '
+                         f'p={sw_x.pvalue:.3f} {sig_x}\n'
+                         f'  Rewards:   W={sw_y.statistic:.3f}, '
+                         f'p={sw_y.pvalue:.3f} {sig_y}',
+                         transform=ax4.transAxes, ha='left', va='top',
+                         fontsize=7.5,
+                         bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
+                                   edgecolor='lightgray', alpha=0.8))
+                ax4.legend(fontsize=7.5, loc='lower right')
+            except np.linalg.LinAlgError:
+                ax4.text(0.5, 0.5,
+                         'Singular covariance matrix\n(insufficient data variance)',
+                         ha='center', va='center',
+                         transform=ax4.transAxes, fontsize=9)
+        else:
+            ax4.text(0.5, 0.5, f'Insufficient data (n = {n} < 4)',
+                     ha='center', va='center',
+                     transform=ax4.transAxes, fontsize=9)
+        ax4.set_xlabel('Theoretical χ² Quantiles (df = 2)')
+        ax4.set_ylabel('Mahalanobis Distance²')
+        ax4.set_title('Bivariate Normality Check\n(χ² Q-Q of Mahalanobis D²)')
+        ax4.spines['top'].set_visible(False)
+        ax4.spines['right'].set_visible(False)
+
+        fig.tight_layout()
+        return fig
+
+    # ── Assumption checks (one figure per group) ──────────────────────────────
+    fig_assump_all   = _assumptions_figure(merged, 'All Mice Combined')
+    fig_assump_conds = {
+        cond: _assumptions_figure(
+            merged[merged['condition'] == cond], f'Condition: {cond}'
+        )
+        for cond in conditions_sorted
+    }
+
+    # ── Plot 1: all mice combined ─────────────────────────────────────────────
+    fig_all, ax_all = plt.subplots(figsize=(8, 6))
+    for mouse in mice_sorted:
+        sub = merged[merged['mouse'] == mouse]
+        ax_all.scatter(sub['total_change'], sub['reward_count'],
+                       color=mouse_colors[mouse], label=mouse,
+                       s=38, alpha=0.82, edgecolors='none')
+    # Overall regression line
+    all_x = merged['total_change'].values
+    all_y = merged['reward_count'].values
+    mask  = np.isfinite(all_x) & np.isfinite(all_y)
+    if mask.sum() >= 2:
+        coef = np.polyfit(all_x[mask], all_y[mask], 1)
+        x_line = np.linspace(all_x[mask].min(), all_x[mask].max(), 200)
+        ax_all.plot(x_line, np.polyval(coef, x_line),
+                    color='black', linewidth=1.5, linestyle='--', zorder=5)
+    _add_corr_annotation(ax_all, all_x, all_y)
+    ax_all.set_xlabel('Total Body Weight Change (%)')
+    ax_all.set_ylabel('Reward Count per Session')
+    ax_all.set_title('Total Weight Change vs Reward Count\n(all mice, all sessions — Kendall\'s \u03c4)')
+    ax_all.spines['top'].set_visible(False)
+    ax_all.spines['right'].set_visible(False)
+    ax_all.legend(title='Mouse', bbox_to_anchor=(1.02, 1), loc='upper left',
+                  fontsize=7.5, title_fontsize=8)
+    fig_all.tight_layout()
+
+    # ── Plot 2: subplots by starting condition ────────────────────────────────
+    n_conds = len(conditions_sorted)
+    fig_cond, axes_cond = plt.subplots(1, n_conds,
+                                        figsize=(6 * n_conds, 6),
+                                        sharey=False)
+    if n_conds == 1:
+        axes_cond = [axes_cond]
+    for ax_c, cond in zip(axes_cond, conditions_sorted):
+        sub_cond = merged[merged['condition'] == cond]
+        for mouse in sorted(sub_cond['mouse'].unique()):
+            sub_m = sub_cond[sub_cond['mouse'] == mouse]
+            ax_c.scatter(sub_m['total_change'], sub_m['reward_count'],
+                         color=mouse_colors[mouse], label=mouse,
+                         s=38, alpha=0.82, edgecolors='none')
+        cx = sub_cond['total_change'].values
+        cy = sub_cond['reward_count'].values
+        cmask = np.isfinite(cx) & np.isfinite(cy)
+        if cmask.sum() >= 2:
+            coef_c = np.polyfit(cx[cmask], cy[cmask], 1)
+            xc_line = np.linspace(cx[cmask].min(), cx[cmask].max(), 200)
+            ax_c.plot(xc_line, np.polyval(coef_c, xc_line),
+                      color='black', linewidth=1.5, linestyle='--', zorder=5)
+        _add_corr_annotation(ax_c, cx, cy)
+        ax_c.set_xlabel('Total Body Weight Change (%)')
+        ax_c.set_ylabel('Reward Count per Session')
+        ax_c.set_title(f'Condition: {cond}')
+        ax_c.spines['top'].set_visible(False)
+        ax_c.spines['right'].set_visible(False)
+        ax_c.legend(title='Mouse', fontsize=7.5, title_fontsize=8)
+    fig_cond.suptitle('Total Weight Change vs Reward Count by Starting Condition (Kendall\'s \u03c4)',
+                      fontsize=12, fontweight='bold')
+    fig_cond.tight_layout()
+
+    # ── Display and optionally save ───────────────────────────────────────────
+    fig_assump_all.show()
+    for fig_a in fig_assump_conds.values():
+        fig_a.show()
+    fig_all.show()
+    fig_cond.show()
+    plt.show()
+
+    plt.rcParams['font.family'] = 'sans-serif'
+    plt.rcParams['font.sans-serif'] = ['Arial']
+    plt.rcParams['svg.fonttype'] = 'none'
+    figs_to_save = (
+        [(fig_assump_all, 'weight_assumptions_all')]
+        + [(fig_a, f'weight_assumptions_cond_{cond}')
+           for cond, fig_a in fig_assump_conds.items()]
+        + [(fig_all,  'weight_corr_all_mice'),
+           (fig_cond, 'weight_corr_by_condition')]
+    )
+    for fig_obj, fname in figs_to_save:
+        save_path = filedialog.asksaveasfilename(
+            defaultextension='.svg',
+            filetypes=[('SVG files', '*.svg'), ('All files', '*.*')],
+            title=f'Save {fname} as',
+            initialfile=f'{fname}_{len(mice_sorted)}mice.svg',
+        )
+        if save_path:
+            fig_obj.savefig(save_path, bbox_inches='tight', format='svg')
+            print(f"Saved: {save_path}")
+
+
 def _ask_mode(root):
     """Ask whether to generate plots or run the descriptive stats report.
     Returns 'plots', 'stats', or None if the dialog is dismissed."""
@@ -10297,6 +10669,8 @@ def _ask_mode(root):
               command=lambda: _choose('expl')).pack(side='left', padx=6)
     tk.Button(btn_frame, text='Descriptive Stats Report', width=24,
               command=lambda: _choose('stats')).pack(side='left', padx=6)
+    tk.Button(btn_frame, text='Weight Correlations', width=22,
+              command=lambda: _choose('weight_corr')).pack(side='left', padx=6)
 
     dialog.update_idletasks()
     dialog.geometry(
@@ -10401,6 +10775,11 @@ def main():
             selected_plots=frozenset(),
         )
         generate_descriptive_stats_report(all_results, _level_stats_data, output_dir=output_dir)
+        return
+
+    # ── WEIGHT CORRELATIONS mode ──────────────────────────────────────────────
+    if mode == 'weight_corr':
+        _run_weight_correlations(root, file_paths, animal_info)
         return
 
     # ── PLOTS mode ────────────────────────────────────────────────────────────
