@@ -78,6 +78,86 @@ def cache_kde_value(capacitive_filepath, kde_value):
         # If caching fails, just continue without caching
         print(f"Warning: Cache write failed for {capacitive_filepath}: {e}")
 
+
+def detect_capacitive_gaps(cap_df: pd.DataFrame,
+                            max_gap_s: float = 1.0) -> dict:
+    """Detect time gaps in a capacitive recording that exceed max_gap_s.
+
+    The sensor runs at ~50 Hz (20 ms per sample). Any inter-sample interval
+    longer than max_gap_s indicates a section of data was deliberately removed
+    (e.g. by the baseline-spike trimmer). Knowing where these gaps are is
+    required for correct epoch alignment and lick-bout analysis.
+
+    Parameters
+    ----------
+    cap_df : DataFrame with an 'elapsed_time' column
+    max_gap_s : minimum inter-sample interval (seconds) to count as a gap
+
+    Returns
+    -------
+    dict with keys:
+        'has_gaps'   : bool
+        'n_gaps'     : int
+        'gaps'       : list of (gap_start_s, gap_end_s, gap_duration_s) tuples
+        'total_gap_s': float  — total trimmed time
+    """
+    if 'elapsed_time' not in cap_df.columns:
+        return {'has_gaps': False, 'n_gaps': 0, 'gaps': [], 'total_gap_s': 0.0}
+
+    times = pd.to_numeric(cap_df['elapsed_time'], errors='coerce').dropna().values
+    if len(times) < 2:
+        return {'has_gaps': False, 'n_gaps': 0, 'gaps': [], 'total_gap_s': 0.0}
+
+    diffs = np.diff(times)
+    gap_mask = diffs > max_gap_s
+    gap_indices = np.where(gap_mask)[0]
+
+    gaps = []
+    for idx in gap_indices:
+        t_start = float(times[idx])
+        t_end   = float(times[idx + 1])
+        gaps.append((t_start, t_end, t_end - t_start))
+
+    total_gap_s = sum(g[2] for g in gaps)
+    return {
+        'has_gaps':    len(gaps) > 0,
+        'n_gaps':      len(gaps),
+        'gaps':        gaps,
+        'total_gap_s': total_gap_s,
+    }
+
+
+def compute_valid_session_duration(cap_df: pd.DataFrame,
+                                    max_gap_s: float = 1.0) -> float:
+    """Return the true valid data duration of a (possibly trimmed) capacitive file.
+
+    For un-trimmed files this equals elapsed_time.max() - elapsed_time.min().
+    For trimmed files (where trim_baseline_spikes.py removed rows) the
+    elapsed_time column retains the original timestamps from the full session,
+    so elapsed_time.max() would over-count by the total trimmed time.
+
+    This function sums only the inter-sample intervals that are <= max_gap_s
+    (normal ~20 ms steps at 50 Hz), giving the total time actually covered by
+    valid data — excluding any removed segments.
+
+    Parameters
+    ----------
+    cap_df    : DataFrame with an 'elapsed_time' column
+    max_gap_s : inter-sample threshold above which an interval counts as a gap
+
+    Returns
+    -------
+    float — valid data duration in seconds (NaN if elapsed_time is absent)
+    """
+    if 'elapsed_time' not in cap_df.columns:
+        return float('nan')
+    times = pd.to_numeric(cap_df['elapsed_time'], errors='coerce').dropna().values
+    if len(times) < 2:
+        return float(times[0]) if len(times) == 1 else 0.0
+    diffs = np.diff(times)
+    return float(diffs[diffs <= max_gap_s].sum())
+
+
 def compute_session_distance(treadmill_df):
     """Compute total distance traversed in a session from raw treadmill data.
 
@@ -539,6 +619,32 @@ def _build_lick_epoch_matrix(lick_event_times, event_times,
     return np.array(rows, dtype=float)
 
 
+def _filter_event_times_by_gaps(event_times, gap_info, window_s=EPOCH_WINDOW_S):
+    """Return only those event times whose ±window_s epoch does not overlap a gap.
+
+    Used to exclude trials from capacitive/lick epoch plots and latency
+    calculations when the capacitive file has been trimmed and a data gap
+    falls inside the analysis window.
+
+    Parameters
+    ----------
+    event_times : sequence of float — event timestamps in seconds.
+    gap_info    : dict returned by detect_capacitive_gaps.
+    window_s    : float — half-window size in seconds (default = EPOCH_WINDOW_S).
+
+    Returns
+    -------
+    list of float — event times whose epoch is fully within a continuous data segment.
+    """
+    if not gap_info['has_gaps'] or len(event_times) == 0:
+        return list(event_times)
+    gaps = gap_info['gaps']  # list of (t_start, t_end, duration)
+    return [
+        t0 for t0 in event_times
+        if not any(g[0] < t0 + window_s and g[1] > t0 - window_s for g in gaps)
+    ]
+
+
 # ── Plot selection ────────────────────────────────────────────────────────────
 _ALL_PLOT_KEYS = {
     'speed', 'sensitivity', 'lick_count', 'reward_count',
@@ -933,6 +1039,15 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
                     if 'capacitive_value' in cap.columns:
                         cap_df = cap.copy()
                         cap_df['Time_sec'] = cap_df['elapsed_time']
+
+                        # ── Gap detection ──────────────────────────────────
+                        _gap_info = detect_capacitive_gaps(cap_df)
+                        if _gap_info['has_gaps']:
+                            print(f"  [GAP] {animal_id} session {session_num}: "
+                                  f"{_gap_info['n_gaps']} gap(s) detected in capacitive file "
+                                  f"(total trimmed: {_gap_info['total_gap_s']:.2f}s) — "
+                                  + ", ".join(f"{g[0]:.2f}s–{g[1]:.2f}s" for g in _gap_info['gaps']))
+
                         kde_val = get_cached_kde(capacitive_path)
                         if kde_val is None:
                             kde_val = lda.compute_KDE(cap_df, 'capacitive_value')
@@ -2829,9 +2944,20 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                 # Read capacitive data for lick detection
                 try:
                     capacitive_data = pd.read_csv(row['capacitive'])
+                    # ── Gap detection ─────────────────────────────────────
+                    _cap_gap_info = detect_capacitive_gaps(capacitive_data)
+                    if _cap_gap_info['has_gaps']:
+                        print(f"  [GAP] {date_str}: {_cap_gap_info['n_gaps']} gap(s) detected in "
+                              f"capacitive file — total trimmed time: {_cap_gap_info['total_gap_s']:.2f}s")
+                        for _gi, _g in enumerate(_cap_gap_info['gaps']):
+                            print(f"    gap {_gi+1}: {_g[0]:.3f}s → {_g[1]:.3f}s "
+                                  f"(duration: {_g[2]:.3f}s)")
+                    else:
+                        print(f"  [GAP] {date_str}: no gaps detected — file is continuous")
                 except Exception:
                     missing_files.append('capacitive')
                     capacitive_data = None
+                    _cap_gap_info = {'has_gaps': False, 'n_gaps': 0, 'gaps': [], 'total_gap_s': 0.0}
 
                 # Read trial log
                 try:
@@ -2896,7 +3022,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
 
                 # ── Capacitive-derived metrics ────────────────────────────
                 if capacitive_data is not None:
-                    session_length_minutes = capacitive_data['elapsed_time'].max() / 60.0
+                    session_length_minutes = float(capacitive_data['elapsed_time'].max()) / 60.0
 
                     cap_df = capacitive_data.copy()
                     cap_df['Time_sec'] = cap_df['elapsed_time']
@@ -2935,7 +3061,12 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                         capacitive_data['capacitive_value'], errors='coerce').dropna()
                     avg_cap_session = float(np.nanmean(_cap_raw)) if len(_cap_raw) > 0 else float('nan')
                 else:
-                    session_length_minutes = float('nan')
+                    # Fall back to treadmill global_time span if available
+                    if treadmill_data is not None and 'global_time' in treadmill_data.columns:
+                        _tm_times = pd.to_numeric(treadmill_data['global_time'], errors='coerce').dropna()
+                        session_length_minutes = float(_tm_times.max()) / 60.0 if len(_tm_times) > 0 else float('nan')
+                    else:
+                        session_length_minutes = float('nan')
                     lick_count = float('nan')
                     avg_cap_session = float('nan')
 
@@ -3108,8 +3239,19 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                         for _fll_zt in _fll_zone_ts:
                             _fll_rd = _fll_zt + 0.65  # reward delivery time
                             _fll_candidates = _sess_lick_arr[_sess_lick_arr > _fll_rd]
-                            if len(_fll_candidates) > 0:
-                                _fll_latencies.append(float(_fll_candidates[0] - _fll_rd))
+                            if len(_fll_candidates) == 0:
+                                continue
+                            _first_lick = _fll_candidates[0]
+                            # Drop trial if a gap interrupts the window between
+                            # reward delivery and the first detected lick.
+                            if _cap_gap_info['has_gaps']:
+                                _blocking_gaps = [
+                                    g for g in _cap_gap_info['gaps']
+                                    if g[0] > _fll_rd and g[0] < _first_lick
+                                ]
+                                if _blocking_gaps:
+                                    continue
+                            _fll_latencies.append(float(_first_lick - _fll_rd))
                         if _fll_latencies:
                             _first_lick_lat = float(np.mean(_fll_latencies))
                     except Exception:
@@ -3128,10 +3270,17 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                             for _lar_zt in _lar_zone_ts:
                                 _lar_start = _lar_zt + 0.65
                                 _lar_end   = _lar_zt + 2.65
-                                _lar_binary.append(
-                                    1 if np.any((_sess_lick_arr >= _lar_start) & (_sess_lick_arr < _lar_end)) else 0
-                                )
-                            _lick_after_rew_prop = float(np.mean(_lar_binary))
+                                # Drop trial if a gap falls anywhere in the 2 s detection window.
+                                if _cap_gap_info['has_gaps']:
+                                    _lar_blocking = [
+                                        g for g in _cap_gap_info['gaps']
+                                        if g[0] < _lar_end and g[1] > _lar_start
+                                    ]
+                                    if _lar_blocking:
+                                        continue
+                                _hit = int(np.any((_sess_lick_arr >= _lar_start) & (_sess_lick_arr < _lar_end)))
+                                _lar_binary.append(_hit)
+                            _lick_after_rew_prop = float(np.mean(_lar_binary)) if _lar_binary else float('nan')
                     except Exception:
                         _lick_after_rew_prop = float('nan')
                 lick_after_reward_prop_list.append(_lick_after_rew_prop)
@@ -3158,9 +3307,13 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                 if trial_log is not None and (treadmill_data is not None or capacitive_data is not None):
                     try:
                         _zone_times = _extract_reward_zone_entry_times(trial_log)
+                        # Filtered list for capacitive/lick epochs: drop trials whose
+                        # ±EPOCH_WINDOW_S window is interrupted by a trimmed gap.
+                        _zone_times_cap = _filter_event_times_by_gaps(_zone_times, _cap_gap_info)
                         if _zone_times:
                             if treadmill_data is not None:
                                 # Use raw (unfiltered) speed via uniformly_sample_treadmill.
+                                # Speed epochs are NOT gap-filtered (treadmill data is untrimmed).
                                 _sp_time, _sp_val = uniformly_sample_treadmill(treadmill_data)
                                 _sp_mat = _build_epoch_matrix(_sp_time, _sp_val, _zone_times)
                                 if _sp_mat is not None:
@@ -3183,7 +3336,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                                     _cp_val = (_cp_val - _cp_mu) / _cp_sig
                                 else:
                                     _cp_val = _cp_val - _cp_mu  # zero-mean, can't scale
-                                _cp_mat = _build_epoch_matrix(_cp_time, _cp_val, _zone_times)
+                                _cp_mat = _build_epoch_matrix(_cp_time, _cp_val, _zone_times_cap)
                                 if _cp_mat is not None:
                                     cap_epoch_windows_all.append(_cp_mat)
                                     with warnings.catch_warnings():
@@ -3195,7 +3348,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                                         [_sess_idx] * _cp_mat.shape[0])
                             # ── Lick count epoch (reward zone) ───────────────────────────
                             if capacitive_data is not None and '_sess_lick_times' in dir():
-                                _lk_mat = _build_lick_epoch_matrix(_sess_lick_times, _zone_times)
+                                _lk_mat = _build_lick_epoch_matrix(_sess_lick_times, _zone_times_cap)
                                 if _lk_mat is not None:
                                     with warnings.catch_warnings():
                                         warnings.simplefilter('ignore', RuntimeWarning)
@@ -3208,8 +3361,11 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                 if trial_log is not None and (treadmill_data is not None or capacitive_data is not None):
                     try:
                         _punish_times = _extract_punish_zone_entry_times(trial_log)
+                        # Filtered list for capacitive/lick epochs only.
+                        _punish_times_cap = _filter_event_times_by_gaps(_punish_times, _cap_gap_info)
                         if _punish_times:
                             if treadmill_data is not None:
+                                # Speed epochs are NOT gap-filtered (treadmill data is untrimmed).
                                 _sp_time, _sp_val = uniformly_sample_treadmill(treadmill_data)
                                 _sp_mat = _build_epoch_matrix(_sp_time, _sp_val, _punish_times)
                                 if _sp_mat is not None:
@@ -3229,7 +3385,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                                     _cp_val = (_cp_val - _cp_mu) / _cp_sig
                                 else:
                                     _cp_val = _cp_val - _cp_mu
-                                _cp_mat = _build_epoch_matrix(_cp_time, _cp_val, _punish_times)
+                                _cp_mat = _build_epoch_matrix(_cp_time, _cp_val, _punish_times_cap)
                                 if _cp_mat is not None:
                                     punish_cap_epoch_windows_all.append(_cp_mat)
                                     with warnings.catch_warnings():
@@ -3241,7 +3397,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                                         [_sess_idx] * _cp_mat.shape[0])
                             # ── Lick count epoch (punishment zone) ──────────────────────
                             if capacitive_data is not None and '_sess_lick_times' in dir():
-                                _plk_mat = _build_lick_epoch_matrix(_sess_lick_times, _punish_times)
+                                _plk_mat = _build_lick_epoch_matrix(_sess_lick_times, _punish_times_cap)
                                 if _plk_mat is not None:
                                     with warnings.catch_warnings():
                                         warnings.simplefilter('ignore', RuntimeWarning)

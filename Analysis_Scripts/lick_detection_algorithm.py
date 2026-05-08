@@ -203,7 +203,7 @@ def _kde_valley_search(x: np.ndarray, density: np.ndarray, min_deviation_gap: fl
     return float(x[valley_idx]), fwhm_x
 
 
-def _compute_kde_valley_threshold(deviations: np.ndarray) -> float:
+def _compute_kde_valley_threshold(deviations: np.ndarray, min_deviation_gap: float = 10.0) -> float:
     """Find the noise/signal boundary using FWHM-gated KDE valley detection.
 
     Uses a two-pass strategy to handle both normal sessions (many licks) and
@@ -238,7 +238,7 @@ def _compute_kde_valley_threshold(deviations: np.ndarray) -> float:
 
         # --- Pass 1: standard range (works for sessions with many licks) ---
         x1 = np.linspace(0, np.percentile(clean, 99.5), 1000)
-        valley1, fwhm1 = _kde_valley_search(x1, kde(x1))
+        valley1, fwhm1 = _kde_valley_search(x1, kde(x1), min_deviation_gap=min_deviation_gap)
         if valley1 is not None:
             return valley1
 
@@ -247,7 +247,7 @@ def _compute_kde_valley_threshold(deviations: np.ndarray) -> float:
         data_max = float(clean.max())
         if data_max > x1[-1] * 1.05:
             x2 = np.linspace(0, data_max, 3000)
-            valley2, fwhm2 = _kde_valley_search(x2, kde(x2))
+            valley2, fwhm2 = _kde_valley_search(x2, kde(x2), min_deviation_gap=min_deviation_gap)
             if valley2 is not None:
                 return valley2
             # Use FWHM from the extended pass if available
@@ -264,7 +264,8 @@ def _compute_kde_valley_threshold(deviations: np.ndarray) -> float:
 def detect_events_above_threshold(
     df: pd.DataFrame,
     column: str = 'capacitive_value',
-    threshold: float = None
+    threshold: float = None,
+    min_deviation_gap: float = 10.0
 ) -> tuple:
     """Detect time points where KDE normalized deviation exceeds the threshold.
     
@@ -328,7 +329,7 @@ def detect_events_above_threshold(
     
     # Calculate dynamic threshold if not provided
     if threshold is None:
-        threshold = _compute_kde_valley_threshold(clean_deviations.values)
+        threshold = _compute_kde_valley_threshold(clean_deviations.values, min_deviation_gap=min_deviation_gap)
     
     # Find peaks in the deviation signal using scipy.signal.find_peaks
     peaks, _ = find_peaks(clean_deviations, height=threshold, distance=1)

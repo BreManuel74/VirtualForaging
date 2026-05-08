@@ -252,7 +252,7 @@ def main():
             ax_bot.axhline(half_max, color='gray', linestyle=':', linewidth=1,
                            alpha=0.6, label='Half-max (FWHM level)')
 
-            # Min deviation gap boundary (20 deviation units past noise peak)
+            # Min deviation gap boundary (10 deviation units past noise peak)
             gap_x = noise_peak_x + MIN_DEVIATION_GAP
             ax_bot.axvline(gap_x, color='darkorchid', linestyle=':', linewidth=1.5,
                            alpha=0.8, label=f'Min gap boundary (+{MIN_DEVIATION_GAP:.0f}): {gap_x:.4f}')
