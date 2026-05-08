@@ -136,6 +136,131 @@ def compute_KDE_normalizations(df: pd.DataFrame, column: str, kde_value: float) 
 # EVENT DETECTION FUNCTIONS
 # ============================================================================
 
+def _kde_valley_search(x: np.ndarray, density: np.ndarray, min_deviation_gap: float = 10.0):
+    """Shared valley-search logic for _compute_kde_valley_threshold.
+
+    Returns (valley_x, fwhm_x) where valley_x is the deepest valley past the
+    noise FWHM, and fwhm_x is the FWHM right edge (fallback). Either may be None.
+
+    Two guards prevent spurious valleys inside the noise distribution:
+
+    1. Minimum deviation gap: the valley search starts at whichever boundary is
+       furthest right among (a) the FWHM right edge and (b) the point where the
+       x-axis value is at least `min_deviation_gap` units beyond the noise peak.
+       This is enforced in actual deviation-value units, not grid-index units, so
+       it is scale-invariant regardless of the eval-grid resolution or data range.
+
+    2. Post-valley signal peak: a genuine noise/signal boundary must have a
+       signal peak rising after the valley. If only a decaying tail follows, the
+       "valley" is a noise-tail artefact and is rejected.
+    """
+    peaks, _ = find_peaks(density)
+    if len(peaks) == 0:
+        return None, None
+
+    noise_peak_idx = peaks[0]
+    noise_peak_x = float(x[noise_peak_idx])
+    half_max = density[noise_peak_idx] / 2.0
+    # The fallback threshold must be AT LEAST this far into the deviation axis.
+    min_gap_x = noise_peak_x + min_deviation_gap
+
+    right_half = density[noise_peak_idx:]
+    below_half = np.where(right_half < half_max)[0]
+    if len(below_half) == 0:
+        return None, None
+
+    fwhm_right_idx = noise_peak_idx + below_half[0]
+    fwhm_x = float(x[fwhm_right_idx])
+    # Fallback is always at least at the minimum gap, even when no valley found.
+    fallback_x = max(fwhm_x, min_gap_x)
+
+    # Guard 1: enforce minimum deviation-value gap from the noise peak.
+    # Find the first index where x >= noise_peak_x + min_deviation_gap.
+    gap_indices = np.where(x >= min_gap_x)[0]
+    if len(gap_indices) == 0:
+        # The required gap extends beyond the eval range entirely.
+        return None, fallback_x
+    min_gap_idx = gap_indices[0]
+
+    search_start = max(fwhm_right_idx, min_gap_idx)
+    if search_start >= len(density):
+        return None, fallback_x
+
+    post_search_density = density[search_start:]
+    valleys_relative, _ = find_peaks(-post_search_density)
+    if len(valleys_relative) == 0:
+        return None, fallback_x
+
+    valley_densities = post_search_density[valleys_relative]
+    deepest_valley_rel = valleys_relative[np.argmin(valley_densities)]
+    valley_idx = search_start + deepest_valley_rel
+
+    # Guard 2: a genuine boundary must have a signal peak rising after the valley.
+    post_valley_peaks, _ = find_peaks(density[valley_idx:])
+    if len(post_valley_peaks) == 0:
+        return None, fallback_x
+
+    return float(x[valley_idx]), fwhm_x
+
+
+def _compute_kde_valley_threshold(deviations: np.ndarray) -> float:
+    """Find the noise/signal boundary using FWHM-gated KDE valley detection.
+
+    Uses a two-pass strategy to handle both normal sessions (many licks) and
+    edge cases (zero or one lick events):
+
+    Pass 1 — standard range (percentile 99.5): preserves the grid resolution
+        needed to detect the noise/lick valley in typical sessions. A single
+        lick whose deviation exceeds the 99.5th percentile is not visible here,
+        but that is fine because any lick cluster present in a normal session
+        will be within this range.
+
+    Pass 2 — extended range (full data max, 3000 points): only attempted when
+        Pass 1 finds no valley AND the data contains values beyond the Pass 1
+        range. This catches the single-lick edge case where the lone lick point
+        was clipped from the first-pass eval grid.
+
+    Falls back to the FWHM right edge (outer noise boundary) when no valley is
+    found in either pass. For zero-lick sessions, falls back to max/2.
+
+    Parameters:
+        deviations: 1-D array of non-negative deviation values
+
+    Returns:
+        Threshold value (float)
+    """
+    clean = deviations[np.isfinite(deviations) & (deviations >= 0)]
+    if len(clean) < 10:
+        return float(np.nanmax(deviations)) / 2.0
+
+    try:
+        kde = stats.gaussian_kde(clean, bw_method='scott')
+
+        # --- Pass 1: standard range (works for sessions with many licks) ---
+        x1 = np.linspace(0, np.percentile(clean, 99.5), 1000)
+        valley1, fwhm1 = _kde_valley_search(x1, kde(x1))
+        if valley1 is not None:
+            return valley1
+
+        # --- Pass 2: extended range (catches rare / single-lick edge cases) ---
+        # Only attempt if there is meaningful data beyond the Pass 1 range.
+        data_max = float(clean.max())
+        if data_max > x1[-1] * 1.05:
+            x2 = np.linspace(0, data_max, 3000)
+            valley2, fwhm2 = _kde_valley_search(x2, kde(x2))
+            if valley2 is not None:
+                return valley2
+            # Use FWHM from the extended pass if available
+            if fwhm2 is not None:
+                return fwhm2
+
+        # Fall back to FWHM from Pass 1, then max/2
+        return fwhm1 if fwhm1 is not None else float(np.nanmax(deviations)) / 2.0
+
+    except Exception:
+        return float(np.nanmax(deviations)) / 2.0
+
+
 def detect_events_above_threshold(
     df: pd.DataFrame,
     column: str = 'capacitive_value',
@@ -146,13 +271,17 @@ def detect_events_above_threshold(
     Creates boolean column indicating when the deviation peaks above the threshold.
     Uses scipy.signal.find_peaks for robust peak detection in discrete sampled data.
     
-    If threshold is None, automatically calculates a dynamic threshold as max_deviation / 2.
+    If threshold is None, automatically calculates a dynamic threshold using KDE valley
+    detection: a KDE is fit to the deviation distribution, the dominant noise peak near 0
+    is located, and the first valley after that peak is used as the threshold. This valley
+    represents the natural boundary between sensor noise and true lick events. Falls back
+    to max_deviation / 2 if the distribution is unimodal.
     
     Parameters:
         df: DataFrame with Time_sec and deviation column (from compute_KDE_normalizations)
         column: Name of the capacitive column (default: 'capacitive_value')
         threshold: Threshold value for peak detection. If None (default), calculates dynamically
-                   as max_deviation / 2
+                   using KDE valley detection (falls back to max_deviation / 2 if unimodal)
         
     Returns:
         Tuple of (DataFrame, threshold_used) where:
@@ -199,10 +328,7 @@ def detect_events_above_threshold(
     
     # Calculate dynamic threshold if not provided
     if threshold is None:
-        max_deviation = deviations.max()
-        threshold = max_deviation / 2.0
-        # print(f"[Dynamic Threshold] Max deviation: {max_deviation:.4f}")
-        # print(f"[Dynamic Threshold] Calculated threshold: {threshold:.4f} (max/2)")
+        threshold = _compute_kde_valley_threshold(clean_deviations.values)
     
     # Find peaks in the deviation signal using scipy.signal.find_peaks
     peaks, _ = find_peaks(clean_deviations, height=threshold, distance=1)
