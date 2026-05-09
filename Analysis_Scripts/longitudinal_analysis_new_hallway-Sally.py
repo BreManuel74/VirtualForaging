@@ -42,6 +42,7 @@ import pickle
 import hashlib
 import warnings
 import math
+from concurrent.futures import ThreadPoolExecutor as _TPE
 
 # Add Analysis_Scripts to path to import lick detection algorithm
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -95,6 +96,83 @@ def cache_kde_value(capacitive_filepath, kde_value):
     except Exception as e:
         # If caching fails, just continue without caching
         print(f"Warning: Cache write failed for {capacitive_filepath}: {e}")
+
+
+# ── Session-level result cache ────────────────────────────────────────────────
+# Caches all per-session computed metrics so that re-runs load in seconds
+# instead of re-reading and re-processing every CSV file.
+SESSION_CACHE_DIR = os.path.join(script_dir, '.session_cache')
+if not os.path.exists(SESSION_CACHE_DIR):
+    os.makedirs(SESSION_CACHE_DIR)
+
+_SESSION_CACHE_VERSION = 3  # bump this to invalidate all cached sessions after code changes
+
+
+def _session_cache_key(paths):
+    """Hash a list of file paths by path + size + mtime to create a unique session key."""
+    parts = []
+    for p in paths:
+        p = str(p) if p else ''
+        if p and os.path.exists(p):
+            st = os.stat(p)
+            parts.append(f"{p}|{st.st_size}|{st.st_mtime}")
+        else:
+            parts.append(f"missing:{p}")
+    return hashlib.md5("|".join(parts).encode('utf-8')).hexdigest()
+
+
+def _load_session_cache(key):
+    """Return cached session data dict, or None on miss / version mismatch."""
+    cache_file = os.path.join(SESSION_CACHE_DIR, f"{key}.pkl")
+    if os.path.exists(cache_file):
+        try:
+            with open(cache_file, 'rb') as f:
+                data = pickle.load(f)
+            if data.get('_version') == _SESSION_CACHE_VERSION:
+                return data
+        except Exception:
+            pass
+    return None
+
+
+def _save_session_cache(key, data):
+    """Persist session data dict to disk."""
+    data['_version'] = _SESSION_CACHE_VERSION
+    cache_file = os.path.join(SESSION_CACHE_DIR, f"{key}.pkl")
+    try:
+        with open(cache_file, 'wb') as f:
+            pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+    except Exception as e:
+        print(f"Warning: session cache write failed: {e}")
+
+
+def _read_three_csvs(path_treadmill, path_capacitive, path_trial_log):
+    """Read three session CSV files in parallel (I/O-bound, uses threads).
+
+    Returns
+    -------
+    treadmill_df, capacitive_df, trial_log_df : DataFrames or None
+    missing : list of label strings for files that could not be read
+    """
+    results = [None, None, None]
+    missing = []
+    labels  = ['treadmill', 'capacitive', 'trial_log']
+    paths   = [path_treadmill, path_capacitive, path_trial_log]
+
+    def _read(idx):
+        try:
+            results[idx] = pd.read_csv(paths[idx])
+        except Exception:
+            pass  # results[idx] stays None
+
+    with _TPE(max_workers=3) as ex:
+        list(ex.map(_read, range(3)))
+
+    for i, label in enumerate(labels):
+        if results[i] is None:
+            missing.append(label)
+
+    return results[0], results[1], results[2], missing
 
 
 def detect_capacitive_gaps(cap_df: pd.DataFrame,
@@ -3058,17 +3136,138 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             date_str = datetime.fromtimestamp(int(timestamp)).strftime('%Y-%m-%d')
             missing_files = []
             try:
-                # Read the treadmill data from the file path
-                try:
-                    treadmill_data = pd.read_csv(row['treadmill'])
-                except Exception:
-                    missing_files.append('treadmill')
-                    treadmill_data = None
+                # ── Session-level cache check ─────────────────────────────────────
+                _s_paths = [
+                    str(row.get('treadmill',  '') or ''),
+                    str(row.get('capacitive', '') or ''),
+                    str(row.get('trial_log',  '') or ''),
+                ]
+                _s_key   = _session_cache_key(_s_paths)
+                _s_cache = _load_session_cache(_s_key)
 
-                # Read capacitive data for lick detection
-                try:
-                    capacitive_data = pd.read_csv(row['capacitive'])
-                    # ── Gap detection ─────────────────────────────────────
+                if _s_cache is not None:
+                    # ── Cache HIT: restore pre-computed session data ───────────────
+                    print(f"  [CACHE] {date_str}: loading pre-computed session data")
+                    _c = _s_cache
+                    missing_files = _c.get('missing_files', [])
+
+                    if missing_files == ['treadmill', 'capacitive', 'trial_log']:
+                        session_file_errors[date_str] = missing_files
+                        print(f"  [WARN] {date_str}: all files missing — skipping (cached)")
+                        continue
+                    if missing_files:
+                        session_file_errors[date_str] = missing_files
+
+                    # Restore gap info (needed for gap printing below)
+                    _cap_gap_info = _c['cap_gap_info']
+                    if _cap_gap_info['has_gaps']:
+                        print(f"  [GAP] {date_str}: {_cap_gap_info['n_gaps']} gap(s) in "
+                              f"capacitive file (cached) — total trimmed: {_cap_gap_info['total_gap_s']:.2f}s")
+                    else:
+                        print(f"  [GAP] {date_str}: no gaps (cached)")
+
+                    # Restore scalars
+                    date                    = _c['date']
+                    avg_speed               = _c['avg_speed']
+                    total_distance          = _c['total_distance']
+                    bout_count              = _c['bout_count']
+                    rewards_per_bout_val    = _c['rewards_per_bout_val']
+                    avg_speed_per_bout      = _c['avg_speed_per_bout']
+                    avg_dist_per_bout       = _c['avg_dist_per_bout']
+                    reward_count            = _c['reward_count']
+                    _gap_aware_reward_count = _c['gap_aware_reward_count']
+                    misses                  = _c['misses']
+                    sensitivity             = _c['sensitivity']
+                    lick_count              = _c['lick_count']
+                    session_length_minutes  = _c['session_length_minutes']
+                    avg_cap_session         = _c['avg_cap_session']
+                    false_alarm_count       = _c['false_alarm_count']
+                    correct_rejection_count = _c['correct_rejection_count']
+                    specificity             = _c['specificity']
+                    dprime                  = _c['dprime']
+                    _first_lick_lat         = _c['first_lick_lat']
+                    _lick_after_rew_prop    = _c['lick_after_rew_prop']
+
+                    # Accumulate punishment zone percentage deltas
+                    _mouse_punish_count      += _c.get('punish_count_delta', 0)
+                    _mouse_total_zone_count  += _c.get('total_zone_count_delta', 0)
+
+                    # Append scalars to per-mouse result lists
+                    dates.append(date)
+                    speeds.append(avg_speed)
+                    total_distances.append(total_distance)
+                    bout_counts.append(bout_count)
+                    rewards_per_bout_list.append(rewards_per_bout_val)
+                    avg_speeds_per_bout.append(avg_speed_per_bout)
+                    avg_dists_per_bout.append(avg_dist_per_bout)
+                    hits.append(reward_count)
+                    hits_gap_aware.append(_gap_aware_reward_count)
+                    misses_list.append(misses)
+                    sensitivities.append(sensitivity)
+                    lick_counts.append(lick_count)
+                    session_lengths.append(session_length_minutes)
+                    avg_cap_values.append(avg_cap_session)
+                    false_alarms_list.append(false_alarm_count)
+                    correct_rejections_list.append(correct_rejection_count)
+                    specificities_list.append(specificity)
+                    dprimes_list.append(dprime)
+                    avg_lick_latency_list.append(_first_lick_lat)
+                    lick_after_reward_prop_list.append(_lick_after_rew_prop)
+
+                    # Restore epoch matrices and append to accumulator lists
+                    _sp_mat_c = _c.get('sp_epoch_mat')
+                    if _sp_mat_c is not None:
+                        speed_epoch_windows_all.append(_sp_mat_c)
+                        with warnings.catch_warnings():
+                            warnings.simplefilter('ignore', RuntimeWarning)
+                            speed_epoch_session_means_all.append(np.nanmean(_sp_mat_c, axis=0))
+                        speed_epoch_session_indices_all.append(_sess_idx)
+                        speed_epoch_event_indices_all.extend([_sess_idx] * _sp_mat_c.shape[0])
+
+                    _cp_mat_c = _c.get('cp_epoch_mat')
+                    if _cp_mat_c is not None:
+                        cap_epoch_windows_all.append(_cp_mat_c)
+                        with warnings.catch_warnings():
+                            warnings.simplefilter('ignore', RuntimeWarning)
+                            cap_epoch_session_means_all.append(np.nanmean(_cp_mat_c, axis=0))
+                        cap_epoch_session_indices_all.append(_sess_idx)
+                        cap_epoch_event_indices_all.extend([_sess_idx] * _cp_mat_c.shape[0])
+
+                    _lk_mean_c = _c.get('lick_epoch_mean')
+                    if _lk_mean_c is not None:
+                        lick_epoch_session_means_all.append(_lk_mean_c)
+
+                    _psp_mat_c = _c.get('punish_sp_epoch_mat')
+                    if _psp_mat_c is not None:
+                        punish_speed_epoch_windows_all.append(_psp_mat_c)
+                        with warnings.catch_warnings():
+                            warnings.simplefilter('ignore', RuntimeWarning)
+                            punish_speed_epoch_session_means_all.append(np.nanmean(_psp_mat_c, axis=0))
+                        punish_speed_epoch_session_indices_all.append(_sess_idx)
+                        punish_speed_epoch_event_indices_all.extend([_sess_idx] * _psp_mat_c.shape[0])
+
+                    _pcp_mat_c = _c.get('punish_cp_epoch_mat')
+                    if _pcp_mat_c is not None:
+                        punish_cap_epoch_windows_all.append(_pcp_mat_c)
+                        with warnings.catch_warnings():
+                            warnings.simplefilter('ignore', RuntimeWarning)
+                            punish_cap_epoch_session_means_all.append(np.nanmean(_pcp_mat_c, axis=0))
+                        punish_cap_epoch_session_indices_all.append(_sess_idx)
+                        punish_cap_epoch_event_indices_all.extend([_sess_idx] * _pcp_mat_c.shape[0])
+
+                    _plk_mean_c = _c.get('punish_lick_epoch_mean')
+                    if _plk_mean_c is not None:
+                        punish_lick_epoch_session_means_all.append(_plk_mean_c)
+
+                    continue  # skip all normal processing for this session
+                # ── End cache HIT ─────────────────────────────────────────────────
+
+                # ── Cache MISS: read CSVs in parallel, process normally ────────────
+                treadmill_data, capacitive_data, trial_log, missing_files = _read_three_csvs(
+                    _s_paths[0], _s_paths[1], _s_paths[2])
+
+                # ── Gap detection on freshly-loaded capacitive data ───────────────
+                if capacitive_data is not None:
                     _cap_gap_info = detect_capacitive_gaps(capacitive_data)
                     if _cap_gap_info['has_gaps']:
                         print(f"  [GAP] {date_str}: {_cap_gap_info['n_gaps']} gap(s) detected in "
@@ -3078,17 +3277,8 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                                   f"(duration: {_g[2]:.3f}s)")
                     else:
                         print(f"  [GAP] {date_str}: no gaps detected — file is continuous")
-                except Exception:
-                    missing_files.append('capacitive')
-                    capacitive_data = None
+                else:
                     _cap_gap_info = {'has_gaps': False, 'n_gaps': 0, 'gaps': [], 'total_gap_s': 0.0}
-
-                # Read trial log
-                try:
-                    trial_log = pd.read_csv(row['trial_log'])
-                except Exception:
-                    missing_files.append('trial_log')
-                    trial_log = None
 
                 if len(missing_files) == 3:
                     # All three files missing — nothing to process for this date
@@ -3367,10 +3557,14 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     rewards_per_bout_val = float('nan')
 
                 # ── Punishment zone percentage (accumulated across all sessions) ──
+                _sess_punish_count_delta      = 0
+                _sess_total_zone_count_delta  = 0
                 if trial_log is not None and 'texture_history' in trial_log.columns:
                     _th = trial_log['texture_history'].dropna()
-                    _mouse_total_zone_count += len(_th)
-                    _mouse_punish_count += int((_th == 'assets/punish_mean100.jpg').sum())
+                    _sess_total_zone_count_delta  = len(_th)
+                    _sess_punish_count_delta       = int((_th == 'assets/punish_mean100.jpg').sum())
+                    _mouse_total_zone_count += _sess_total_zone_count_delta
+                    _mouse_punish_count     += _sess_punish_count_delta
 
                 # ── First-lick latency after reward delivery ──────────────────────
                 # For each reward zone entry, reward is delivered 0.65 s after entry.
@@ -3450,6 +3644,29 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                 specificities_list.append(specificity)
                 dprimes_list.append(dprime)
 
+                # ── Pre-sample continuous signals once (shared for both epoch blocks) ─
+                # Avoids reading and interpolating the same large arrays twice per session.
+                _sess_sp_time = _sess_sp_val = None
+                _sess_cp_time = _sess_cp_val_z = None
+                if treadmill_data is not None:
+                    _sess_sp_time, _sess_sp_val = uniformly_sample_treadmill(treadmill_data)
+                if capacitive_data is not None:
+                    _sess_cp_time, _sess_cp_val_raw = uniformly_sample_capacitive(capacitive_data)
+                    _cp_mu  = np.nanmean(_sess_cp_val_raw)
+                    _cp_sig = np.nanstd(_sess_cp_val_raw, ddof=1)
+                    if _cp_sig > 0:
+                        _sess_cp_val_z = (_sess_cp_val_raw - _cp_mu) / _cp_sig
+                    else:
+                        _sess_cp_val_z = _sess_cp_val_raw - _cp_mu
+
+                # Record list lengths before epoch extraction for reliable cache harvesting
+                _n_sp_before  = len(speed_epoch_windows_all)
+                _n_cp_before  = len(cap_epoch_windows_all)
+                _n_lk_before  = len(lick_epoch_session_means_all)
+                _n_psp_before = len(punish_speed_epoch_windows_all)
+                _n_pcp_before = len(punish_cap_epoch_windows_all)
+                _n_plk_before = len(punish_lick_epoch_session_means_all)
+
                 # ── Behavioral epoch extraction (reward zone entry) ──────────────────
                 if trial_log is not None and (treadmill_data is not None or capacitive_data is not None):
                     try:
@@ -3458,11 +3675,10 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                         # ±EPOCH_WINDOW_S window is interrupted by a trimmed gap.
                         _zone_times_cap = _filter_event_times_by_gaps(_zone_times, _cap_gap_info)
                         if _zone_times:
-                            if treadmill_data is not None:
-                                # Use raw (unfiltered) speed via uniformly_sample_treadmill.
+                            if treadmill_data is not None and _sess_sp_time is not None:
+                                # Use pre-sampled (unfiltered) speed — computed once above.
                                 # Speed epochs are NOT gap-filtered (treadmill data is untrimmed).
-                                _sp_time, _sp_val = uniformly_sample_treadmill(treadmill_data)
-                                _sp_mat = _build_epoch_matrix(_sp_time, _sp_val, _zone_times)
+                                _sp_mat = _build_epoch_matrix(_sess_sp_time, _sess_sp_val, _zone_times)
                                 if _sp_mat is not None:
                                     speed_epoch_windows_all.append(_sp_mat)
                                     with warnings.catch_warnings():
@@ -3472,18 +3688,9 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                                     speed_epoch_session_indices_all.append(_sess_idx)
                                     speed_epoch_event_indices_all.extend(
                                         [_sess_idx] * _sp_mat.shape[0])
-                            if capacitive_data is not None:
-                                _cp_time, _cp_val = uniformly_sample_capacitive(capacitive_data)
-                                # Z-score the capacitive signal for this session so that
-                                # sessions with different baselines / dynamic ranges are
-                                # comparable when epochs are averaged across sessions or mice.
-                                _cp_mu  = np.nanmean(_cp_val)
-                                _cp_sig = np.nanstd(_cp_val, ddof=1)
-                                if _cp_sig > 0:
-                                    _cp_val = (_cp_val - _cp_mu) / _cp_sig
-                                else:
-                                    _cp_val = _cp_val - _cp_mu  # zero-mean, can't scale
-                                _cp_mat = _build_epoch_matrix(_cp_time, _cp_val, _zone_times_cap)
+                            if capacitive_data is not None and _sess_cp_time is not None:
+                                # Use pre-sampled, z-scored capacitive signal — computed once above.
+                                _cp_mat = _build_epoch_matrix(_sess_cp_time, _sess_cp_val_z, _zone_times_cap)
                                 if _cp_mat is not None:
                                     cap_epoch_windows_all.append(_cp_mat)
                                     with warnings.catch_warnings():
@@ -3511,10 +3718,10 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                         # Filtered list for capacitive/lick epochs only.
                         _punish_times_cap = _filter_event_times_by_gaps(_punish_times, _cap_gap_info)
                         if _punish_times:
-                            if treadmill_data is not None:
+                            if treadmill_data is not None and _sess_sp_time is not None:
+                                # Use pre-sampled speed — already computed above.
                                 # Speed epochs are NOT gap-filtered (treadmill data is untrimmed).
-                                _sp_time, _sp_val = uniformly_sample_treadmill(treadmill_data)
-                                _sp_mat = _build_epoch_matrix(_sp_time, _sp_val, _punish_times)
+                                _sp_mat = _build_epoch_matrix(_sess_sp_time, _sess_sp_val, _punish_times)
                                 if _sp_mat is not None:
                                     punish_speed_epoch_windows_all.append(_sp_mat)
                                     with warnings.catch_warnings():
@@ -3524,15 +3731,9 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                                     punish_speed_epoch_session_indices_all.append(_sess_idx)
                                     punish_speed_epoch_event_indices_all.extend(
                                         [_sess_idx] * _sp_mat.shape[0])
-                            if capacitive_data is not None:
-                                _cp_time, _cp_val = uniformly_sample_capacitive(capacitive_data)
-                                _cp_mu  = np.nanmean(_cp_val)
-                                _cp_sig = np.nanstd(_cp_val, ddof=1)
-                                if _cp_sig > 0:
-                                    _cp_val = (_cp_val - _cp_mu) / _cp_sig
-                                else:
-                                    _cp_val = _cp_val - _cp_mu
-                                _cp_mat = _build_epoch_matrix(_cp_time, _cp_val, _punish_times_cap)
+                            if capacitive_data is not None and _sess_cp_time is not None:
+                                # Use pre-sampled, z-scored capacitive signal — computed once above.
+                                _cp_mat = _build_epoch_matrix(_sess_cp_time, _sess_cp_val_z, _punish_times_cap)
                                 if _cp_mat is not None:
                                     punish_cap_epoch_windows_all.append(_cp_mat)
                                     with warnings.catch_warnings():
@@ -3552,6 +3753,50 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                                             np.nanmean(_plk_mat, axis=0))
                     except Exception as _punish_epoch_err:
                         print(f"  [WARN] {date_str}: punish epoch extraction failed — {_punish_epoch_err}")
+
+                # ── Save computed session data to cache ────────────────────────────────────────
+                try:
+                    # Harvest epoch matrices added during this session using pre-recorded lengths
+                    _cache_sp_mat   = speed_epoch_windows_all[-1]             if len(speed_epoch_windows_all)             > _n_sp_before  else None
+                    _cache_cp_mat   = cap_epoch_windows_all[-1]               if len(cap_epoch_windows_all)               > _n_cp_before  else None
+                    _cache_lk_mean  = lick_epoch_session_means_all[-1]        if len(lick_epoch_session_means_all)        > _n_lk_before  else None
+                    _cache_psp_mat  = punish_speed_epoch_windows_all[-1]      if len(punish_speed_epoch_windows_all)      > _n_psp_before else None
+                    _cache_pcp_mat  = punish_cap_epoch_windows_all[-1]        if len(punish_cap_epoch_windows_all)        > _n_pcp_before else None
+                    _cache_plk_mean = punish_lick_epoch_session_means_all[-1] if len(punish_lick_epoch_session_means_all) > _n_plk_before else None
+                    _save_session_cache(_s_key, {
+                        'missing_files':             missing_files,
+                        'cap_gap_info':              _cap_gap_info,
+                        'date':                      date,
+                        'avg_speed':                 avg_speed,
+                        'total_distance':            total_distance,
+                        'bout_count':                bout_count,
+                        'rewards_per_bout_val':      rewards_per_bout_val,
+                        'avg_speed_per_bout':        avg_speed_per_bout,
+                        'avg_dist_per_bout':         avg_dist_per_bout,
+                        'reward_count':              reward_count,
+                        'gap_aware_reward_count':    _gap_aware_reward_count,
+                        'misses':                    misses,
+                        'sensitivity':               sensitivity,
+                        'lick_count':                lick_count,
+                        'session_length_minutes':    session_length_minutes,
+                        'avg_cap_session':           avg_cap_session,
+                        'false_alarm_count':         false_alarm_count,
+                        'correct_rejection_count':   correct_rejection_count,
+                        'specificity':               specificity,
+                        'dprime':                    dprime,
+                        'first_lick_lat':            _first_lick_lat,
+                        'lick_after_rew_prop':       _lick_after_rew_prop,
+                        'punish_count_delta':        _sess_punish_count_delta,
+                        'total_zone_count_delta':    _sess_total_zone_count_delta,
+                        'sp_epoch_mat':              _cache_sp_mat,
+                        'cp_epoch_mat':              _cache_cp_mat,
+                        'lick_epoch_mean':           _cache_lk_mean,
+                        'punish_sp_epoch_mat':       _cache_psp_mat,
+                        'punish_cp_epoch_mat':       _cache_pcp_mat,
+                        'punish_lick_epoch_mean':    _cache_plk_mean,
+                    })
+                except Exception as _cache_err:
+                    print(f"  [WARN] {date_str}: session cache save failed — {_cache_err}")
 
             except Exception as e:
                 print(f"Error processing date {timestamp}: {str(e)}")
