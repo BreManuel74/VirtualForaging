@@ -107,6 +107,12 @@ if not os.path.exists(SESSION_CACHE_DIR):
 
 _SESSION_CACHE_VERSION = 7  # bump this to invalidate all cached sessions after code changes
 
+# ── Levels-analysis treadmill/lick cache (separate from main session cache) ───
+_LEVELS_SESS_CACHE_DIR = os.path.join(SESSION_CACHE_DIR, 'levels')
+if not os.path.exists(_LEVELS_SESS_CACHE_DIR):
+    os.makedirs(_LEVELS_SESS_CACHE_DIR)
+_LEVELS_CACHE_VERSION = 1  # bump to invalidate levels cache independently
+
 # ── Diagnostic mode ───────────────────────────────────────────────────────────
 # Set to True to print per-trial matching, lick-latency, and lick-prop traces
 # to the console while sessions are being processed.  Has no effect on results.
@@ -149,6 +155,44 @@ def _save_session_cache(key, data):
             pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
     except Exception as e:
         print(f"Warning: session cache write failed: {e}")
+
+
+def _lvl_sess_cache_key(treadmill_path, capacitive_path):
+    """Hash (treadmill, capacitive) paths by path+size+mtime for the levels cache."""
+    parts = []
+    for p in [treadmill_path, capacitive_path]:
+        p = str(p) if p else ''
+        if p and os.path.exists(p):
+            st = os.stat(p)
+            parts.append(f"{p}|{st.st_size}|{st.st_mtime}")
+        else:
+            parts.append(f"missing:{p}")
+    return hashlib.md5("|".join(parts).encode('utf-8')).hexdigest()
+
+
+def _load_lvl_sess_cache(key):
+    """Return cached levels-session data dict, or None on miss / version mismatch."""
+    cache_file = os.path.join(_LEVELS_SESS_CACHE_DIR, f"{key}.pkl")
+    if os.path.exists(cache_file):
+        try:
+            with open(cache_file, 'rb') as f:
+                data = pickle.load(f)
+            if data.get('_lvl_version') == _LEVELS_CACHE_VERSION:
+                return data
+        except Exception:
+            pass
+    return None
+
+
+def _save_lvl_sess_cache(key, data):
+    """Persist levels-session data dict to disk."""
+    data['_lvl_version'] = _LEVELS_CACHE_VERSION
+    cache_file = os.path.join(_LEVELS_SESS_CACHE_DIR, f"{key}.pkl")
+    try:
+        with open(cache_file, 'wb') as f:
+            pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+    except Exception as e:
+        print(f"  [WARN] levels cache write failed: {e}")
 
 
 def _read_three_csvs(path_treadmill, path_capacitive, path_trial_log):
@@ -963,6 +1007,7 @@ _ALL_PLOT_KEYS = {
     'time_to_level2',
     'lick_after_reward_prop', 'lick_after_reward_prop_bar',
     'epoch_delivery_speed_sess', 'epoch_delivery_cap_sess', 'epoch_delivery_lick_sess',
+    'epoch_reward_speed_sess_by_level', 'epoch_delivery_speed_sess_by_level',
     'epoch_reward_speed', 'epoch_reward_cap',
     'epoch_reward_speed_sess', 'epoch_reward_cap_sess',
     'epoch_reward_speed_early_late', 'epoch_reward_cap_early_late',
@@ -1049,6 +1094,8 @@ _PLOT_LABELS = [
     ('epoch_delivery_speed_sess', 'Epoch: Treadmill speed — session-averaged, aligned to reward DELIVERY time (per-mouse + condition)'),
     ('epoch_delivery_cap_sess',   'Epoch: Capacitive value (z-score) — session-averaged, aligned to reward DELIVERY time (gap-excluded; per-mouse + condition)'),
     ('epoch_delivery_lick_sess',  'Epoch: Lick count — session-averaged, aligned to reward DELIVERY time (gap-excluded; per-mouse + condition)'),
+    ('epoch_reward_speed_sess_by_level',    'Epoch: Treadmill speed — session-averaged, aligned to reward zone entry, one panel per level (by condition, only mice at each level)'),
+    ('epoch_delivery_speed_sess_by_level',  'Epoch: Treadmill speed — session-averaged, aligned to reward DELIVERY, one panel per level (by condition, only mice at each level)'),
     ('sex_distance',        'Aggregate: Sex-specific average distance per session (m)'),
     ('condition_distance',  'Condition: Distance per session by starting condition (m)'),
     ('condition_distance_bar', 'Condition: Average distance per session — collapsed bar chart (m)'),
@@ -1324,59 +1371,93 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
             if 'reward_event' not in tl.columns or 'texture_change_time' not in tl.columns:
                 continue
 
-            # Session end time and lick event detection from capacitive data -----
-            lick_event_times = np.array([])
-            session_end_time = None
-            if isinstance(capacitive_path, str) and not pd.isna(capacitive_path):
-                try:
-                    cap = pd.read_csv(capacitive_path)
-                    if 'elapsed_time' in cap.columns:
-                        session_end_time = float(cap['elapsed_time'].max())
-                    if 'capacitive_value' in cap.columns:
-                        cap_df = cap.copy()
-                        cap_df['Time_sec'] = cap_df['elapsed_time']
+            # ── Levels session cache (treadmill + lick) ───────────────────────
+            _lvl_ckey = _lvl_sess_cache_key(treadmill_path, capacitive_path)
+            _lvl_chit = _load_lvl_sess_cache(_lvl_ckey)
+            if _lvl_chit is not None:
+                treadmill_df     = _lvl_chit['treadmill_df']
+                lick_event_times = _lvl_chit['lick_event_times']
+                session_end_time = _lvl_chit['session_end_time']
+                if _lvl_chit.get('has_gaps'):
+                    print(f"  [GAP] {animal_id} session {session_num}: "
+                          f"{_lvl_chit['n_gaps']} gap(s) detected in capacitive file "
+                          f"(cached, total trimmed: {_lvl_chit['total_gap_s']:.2f}s)")
+                if session_end_time is None:
+                    tc_vals = tl['texture_change_time'].dropna()
+                    session_end_time = float(tc_vals.max()) if len(tc_vals) else None
+            else:
+                # Session end time and lick event detection from capacitive data
+                lick_event_times = np.array([])
+                session_end_time = None
+                _gap_info_lvl    = {'has_gaps': False, 'n_gaps': 0, 'total_gap_s': 0.0, 'gaps': []}
+                if isinstance(capacitive_path, str) and not pd.isna(capacitive_path):
+                    try:
+                        cap = pd.read_csv(capacitive_path)
+                        if 'elapsed_time' in cap.columns:
+                            session_end_time = float(cap['elapsed_time'].max())
+                        if 'capacitive_value' in cap.columns:
+                            cap_df = cap.copy()
+                            cap_df['Time_sec'] = cap_df['elapsed_time']
 
-                        # ── Gap detection ──────────────────────────────────
-                        _gap_info = detect_capacitive_gaps(cap_df)
-                        if _gap_info['has_gaps']:
-                            print(f"  [GAP] {animal_id} session {session_num}: "
-                                  f"{_gap_info['n_gaps']} gap(s) detected in capacitive file "
-                                  f"(total trimmed: {_gap_info['total_gap_s']:.2f}s) — "
-                                  + ", ".join(f"{g[0]:.2f}s–{g[1]:.2f}s" for g in _gap_info['gaps']))
+                            # ── Gap detection ─────────────────────────────
+                            _gap_info_lvl = detect_capacitive_gaps(cap_df)
+                            if _gap_info_lvl['has_gaps']:
+                                print(f"  [GAP] {animal_id} session {session_num}: "
+                                      f"{_gap_info_lvl['n_gaps']} gap(s) detected in capacitive file "
+                                      f"(total trimmed: {_gap_info_lvl['total_gap_s']:.2f}s) — "
+                                      + ", ".join(f"{g[0]:.2f}s\u2013{g[1]:.2f}s"
+                                                  for g in _gap_info_lvl['gaps']))
 
-                        kde_val = get_cached_kde(capacitive_path)
-                        if kde_val is None:
-                            kde_val = lda.compute_KDE(cap_df, 'capacitive_value')
-                            cache_kde_value(capacitive_path, kde_val)
-                        cap_df = lda.compute_KDE_normalizations(cap_df, 'capacitive_value', kde_val)
-                        events_df, _ = lda.detect_events_above_threshold(
-                            cap_df, 'capacitive_value', threshold=None)
-                        mask_evt = events_df['capacitive_value_event'] == 1
-                        lick_event_times = events_df.loc[mask_evt, 'Time_sec'].values.astype(float)
-                except Exception:
-                    pass
-            if session_end_time is None:
-                tc_vals = tl['texture_change_time'].dropna()
-                session_end_time = float(tc_vals.max()) if len(tc_vals) else None
+                            kde_val = get_cached_kde(capacitive_path)
+                            if kde_val is None:
+                                kde_val = lda.compute_KDE(cap_df, 'capacitive_value')
+                                cache_kde_value(capacitive_path, kde_val)
+                            cap_df = lda.compute_KDE_normalizations(cap_df, 'capacitive_value', kde_val)
+                            events_df, _ = lda.detect_events_above_threshold(
+                                cap_df, 'capacitive_value', threshold=None)
+                            mask_evt = events_df['capacitive_value_event'] == 1
+                            lick_event_times = events_df.loc[mask_evt, 'Time_sec'].values.astype(float)
+                    except Exception:
+                        pass
+                if session_end_time is None:
+                    tc_vals = tl['texture_change_time'].dropna()
+                    session_end_time = float(tc_vals.max()) if len(tc_vals) else None
 
-            # Load treadmill speed data for this session -----------------------
-            treadmill_df = None
-            if isinstance(treadmill_path, str) and not pd.isna(treadmill_path):
-                try:
-                    tm = pd.read_csv(treadmill_path)
-                    if 'global_time' in tm.columns and 'speed' in tm.columns:
-                        load_cols = ['global_time', 'speed']
-                        if 'distance' in tm.columns:
-                            load_cols.append('distance')
-                        treadmill_df = tm[load_cols].dropna(subset=['global_time', 'speed'])
-                        # Apply Butterworth low-pass (0.25 Hz, order 3) to full session speed
-                        if len(treadmill_df) >= 15:
-                            _fs_lvl = 1.0 / treadmill_df['global_time'].diff().median()
-                            _b_lvl, _a_lvl = butter(3, 0.25 / (_fs_lvl / 2.0), btype='low')
-                            treadmill_df = treadmill_df.copy()
-                            treadmill_df['speed'] = filtfilt(_b_lvl, _a_lvl, treadmill_df['speed'].values)
-                except Exception:
-                    pass
+                # Load treadmill speed data for this session -------------------
+                treadmill_df = None
+                if isinstance(treadmill_path, str) and not pd.isna(treadmill_path):
+                    try:
+                        tm = pd.read_csv(treadmill_path)
+                        if 'global_time' in tm.columns and 'speed' in tm.columns:
+                            load_cols = ['global_time', 'speed']
+                            if 'distance' in tm.columns:
+                                load_cols.append('distance')
+                            treadmill_df = tm[load_cols].dropna(subset=['global_time', 'speed'])
+                            # Apply Butterworth low-pass (0.25 Hz, order 3) to full session speed
+                            if len(treadmill_df) >= 15:
+                                _gt_diffs_lvl = treadmill_df['global_time'].diff().dropna()
+                                _gt_diffs_lvl_pos = _gt_diffs_lvl[_gt_diffs_lvl > 0]
+                                if len(_gt_diffs_lvl_pos) > 0:
+                                    _fs_lvl = 1.0 / _gt_diffs_lvl_pos.median()
+                                else:
+                                    _fs_lvl = 50.0
+                                _nyq_lvl = _fs_lvl / 2.0
+                                _cutoff_lvl = min(0.25 / _nyq_lvl, 0.999)
+                                _b_lvl, _a_lvl = butter(3, _cutoff_lvl, btype='low')
+                                treadmill_df = treadmill_df.copy()
+                                treadmill_df['speed'] = filtfilt(_b_lvl, _a_lvl, treadmill_df['speed'].values)
+                    except Exception:
+                        pass
+
+                # Save to cache ------------------------------------------------
+                _save_lvl_sess_cache(_lvl_ckey, {
+                    'treadmill_df':     treadmill_df,
+                    'lick_event_times': lick_event_times,
+                    'session_end_time': session_end_time,
+                    'has_gaps':         _gap_info_lvl['has_gaps'],
+                    'n_gaps':           _gap_info_lvl['n_gaps'],
+                    'total_gap_s':      _gap_info_lvl['total_gap_s'],
+                })
 
             levels   = session_group['level'].tolist()
             trans_ts = session_group['transition_ts'].tolist()
@@ -2932,6 +3013,160 @@ def _plot_epoch_panels(all_results, signal_key, ylabel, title_prefix,
     return fig_per_mouse, fig_cond
 
 
+def _plot_epoch_panels_by_level(all_results, transitions_csv_path,
+                                 signal_key, indices_key,
+                                 ylabel, title_prefix, condition_color_map,
+                                 window_s=EPOCH_WINDOW_S, canonical_time=None,
+                                 reward_delivery_vline=True):
+    """One condition-averaged epoch figure per level.
+
+    For each level present in the transitions CSV, a separate figure is produced
+    showing only the mice (and conditions) that have at least one session at that
+    level.  Individual mouse traces are NOT shown — only condition mean ± SEM.
+
+    Parameters
+    ----------
+    all_results          : list[dict] from analyze_mouse_data
+    transitions_csv_path : path to the transitions CSV (level_sorter.py output)
+    signal_key           : key in each result dict for the (n_sessions × n_pts) matrix
+    indices_key          : key for the parallel array of 0-based session indices
+    ylabel, title_prefix : axis/title strings
+    condition_color_map  : dict condition -> colour
+    reward_delivery_vline: if True, draw a dashed vline at t=0.65 s
+
+    Returns
+    -------
+    list of (level_name: str, fig: matplotlib.Figure) pairs, sorted by level number
+    """
+    if not transitions_csv_path:
+        print(f"  [WARN] No transitions CSV — skipping by-level epoch plots for {signal_key}")
+        return []
+    try:
+        trans_df = pd.read_csv(transitions_csv_path)
+        trans_df['date'] = pd.to_datetime(trans_df['date'])
+    except Exception as e:
+        print(f"  [WARN] Cannot read transitions CSV for by-level epochs: {e}")
+        return []
+
+    canonical_time = EPOCH_CANONICAL_TIME if canonical_time is None else canonical_time
+
+    # Build (animal_id, date_normalised) -> session_start_level.
+    # Use only the first row per (animal, session_num) so intra-session transitions
+    # don't create duplicate keys with different levels.
+    level_map = {}
+    for _, row in trans_df.iterrows():
+        key = (str(row['animal_id']), pd.Timestamp(row['date']).normalize())
+        if key not in level_map:
+            lvl = str(row.get('session_start_level', row.get('level', 'level_1')))
+            level_map[key] = lvl.replace('.json', '')
+
+    # level_mouse_means[level][condition][animal_id] = list of epoch row arrays
+    level_mouse_means: dict = {}
+
+    for result in all_results:
+        animal_id = result['mouse']
+        dates     = result.get('dates', [])
+        matrix    = result.get(signal_key)
+        indices   = result.get(indices_key)
+        condition = result.get('starting_condition', 'unknown')
+
+        if matrix is None or indices is None or len(indices) == 0:
+            continue
+
+        for row_i, sess_i in enumerate(indices):
+            if sess_i >= len(dates):
+                continue
+            date_norm = pd.Timestamp(dates[sess_i]).normalize()
+            lvl = level_map.get((animal_id, date_norm))
+            if lvl is None:
+                continue
+            (level_mouse_means
+             .setdefault(lvl, {})
+             .setdefault(condition, {})
+             .setdefault(animal_id, [])
+             .append(matrix[row_i]))
+
+    if not level_mouse_means:
+        print(f"  [WARN] No level-matched epoch data found for {signal_key} — "
+              "check that animal IDs in the transitions CSV match the data file names.")
+        return []
+
+    # Sort levels numerically (level_1 < level_2 < ...)
+    def _lvl_sort_key(name):
+        parts = name.split('_')
+        return int(parts[-1]) if parts[-1].isdigit() else 999
+
+    all_levels = sorted(level_mouse_means.keys(), key=_lvl_sort_key)
+
+    figs = []
+    for lvl in all_levels:
+        lvl_data    = level_mouse_means[lvl]
+        lvl_display = lvl.replace('_', ' ').title()
+
+        fig, ax = plt.subplots(figsize=plt.rcParams.get('figure.figsize', (4.0, 2.5)))
+        _yvals = []
+        plotted_any = False
+
+        for condition in sorted(lvl_data.keys()):
+            color      = condition_color_map.get(condition, 'steelblue')
+            mouse_dict = lvl_data[condition]
+
+            # Per-mouse mean at this level
+            mouse_means = []
+            for _aid, rows in mouse_dict.items():
+                arr = np.array(rows)          # (n_sess_at_level × n_pts)
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    mouse_means.append(np.nanmean(arr, axis=0))
+
+            if not mouse_means:
+                continue
+            mouse_means = np.array(mouse_means)   # (n_mice × n_pts)
+            n_mice      = mouse_means.shape[0]
+
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', RuntimeWarning)
+                cond_mean = np.nanmean(mouse_means, axis=0)
+                cond_err  = (np.nanstd(mouse_means, axis=0, ddof=1) / np.sqrt(n_mice)
+                             if n_mice > 1 else np.zeros_like(cond_mean))
+
+            _yvals.extend([float(np.nanmax(cond_mean + cond_err)),
+                           float(np.nanmin(cond_mean - cond_err))])
+
+            ax.plot(canonical_time, cond_mean, color=color, linewidth=2.0,
+                    label=f'{condition} (n={n_mice})')
+            ax.fill_between(canonical_time,
+                            cond_mean - cond_err,
+                            cond_mean + cond_err,
+                            color=color, alpha=0.20)
+            plotted_any = True
+
+        if not plotted_any:
+            plt.close(fig)
+            continue
+
+        ax.axvline(0, color='red', linestyle='--', linewidth=1.5, label='Event (t=0)')
+        if reward_delivery_vline:
+            ax.axvline(0.65, color='black', linestyle='--', linewidth=1.0,
+                       label='Reward delivery (t=0.65 s)')
+        ax.set_xlabel('Time (s)')
+        ax.set_ylabel(ylabel)
+        ax.set_title(f'{title_prefix} — {lvl_display}')
+        ax.set_xlim(-window_s, window_s)
+        if _yvals:
+            _ymax = float(np.nanmax(_yvals))
+            _ymin = float(np.nanmin(_yvals))
+            _bot  = _ymin * 1.05 if _ymin < 0 else 0.0
+            ax.set_ylim(_bot, _ymax * 1.05)
+        ax.legend(fontsize=7.5)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        fig.tight_layout()
+        figs.append((lvl, fig))
+
+    return figs
+
+
 def _plot_epoch_early_late_panels(all_results, signal_key, ylabel, title_prefix,
                                    condition_color_map, window_s=EPOCH_WINDOW_S,
                                    indices_key=None, row_unit='sessions', use_sd=False,
@@ -3227,7 +3462,8 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         punish_cap_epoch_event_indices_all     = []  # same for capacitive (punishment zone)
         lick_epoch_session_means_all           = []  # per-session mean lick-count trace (reward zone)
         punish_lick_epoch_session_means_all    = []  # per-session mean lick-count trace (punishment zone)
-        delivery_speed_epoch_session_means_all = []  # per-session mean speed trace aligned to reward delivery
+        delivery_speed_epoch_session_means_all   = []  # per-session mean speed trace aligned to reward delivery
+        delivery_speed_epoch_session_indices_all  = []  # 0-based session index for each delivery speed mean
         delivery_cap_epoch_session_means_all   = []  # per-session mean cap (z-score) trace aligned to reward delivery
         delivery_lick_epoch_session_means_all  = []  # per-session mean lick trace aligned to reward delivery
         avg_lick_latency_list                  = []  # per-session avg first-lick latency after reward delivery (s)
@@ -3364,6 +3600,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     _dsp_mean_c = _c.get('delivery_sp_epoch_mean')
                     if _dsp_mean_c is not None:
                         delivery_speed_epoch_session_means_all.append(_dsp_mean_c)
+                        delivery_speed_epoch_session_indices_all.append(_sess_idx)
 
                     _dcp_mean_c = _c.get('delivery_cp_epoch_mean')
                     if _dcp_mean_c is not None:
@@ -3980,6 +4217,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                                         warnings.simplefilter('ignore', RuntimeWarning)
                                         delivery_speed_epoch_session_means_all.append(
                                             np.nanmean(_dsp_mat, axis=0))
+                                        delivery_speed_epoch_session_indices_all.append(_sess_idx)
                             if (capacitive_data is not None and _sess_cp_time is not None
                                     and len(_del_times_cap) > 0):
                                 _dcp_mat = _build_epoch_matrix(
@@ -4133,8 +4371,10 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                                               if lick_epoch_session_means_all           else None)
         punish_lick_epoch_session_means    = (np.vstack(punish_lick_epoch_session_means_all)
                                               if punish_lick_epoch_session_means_all    else None)
-        delivery_speed_epoch_session_means = (np.vstack(delivery_speed_epoch_session_means_all)
-                                              if delivery_speed_epoch_session_means_all else None)
+        delivery_speed_epoch_session_means   = (np.vstack(delivery_speed_epoch_session_means_all)
+                                               if delivery_speed_epoch_session_means_all else None)
+        delivery_speed_epoch_session_indices = (np.array(delivery_speed_epoch_session_indices_all, dtype=int)
+                                               if delivery_speed_epoch_session_indices_all else None)
         delivery_cap_epoch_session_means   = (np.vstack(delivery_cap_epoch_session_means_all)
                                               if delivery_cap_epoch_session_means_all   else None)
         delivery_lick_epoch_session_means  = (np.vstack(delivery_lick_epoch_session_means_all)
@@ -4180,7 +4420,8 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             'punish_cap_epoch_event_indices':     punish_cap_epoch_event_indices,
             'lick_epoch_session_means':           lick_epoch_session_means,
             'punish_lick_epoch_session_means':    punish_lick_epoch_session_means,
-            'delivery_speed_epoch_session_means': delivery_speed_epoch_session_means,
+            'delivery_speed_epoch_session_means':   delivery_speed_epoch_session_means,
+            'delivery_speed_epoch_session_indices':  delivery_speed_epoch_session_indices,
             'delivery_cap_epoch_session_means':   delivery_cap_epoch_session_means,
             'delivery_lick_epoch_session_means':  delivery_lick_epoch_session_means,
             'pct_punish_zones':                   _pct_punish_zones,
@@ -12121,7 +12362,9 @@ def main():
                                           'level_bout_avg_speed', 'level_bout_avg_speed_condition',
                                           'level_bout_avg_dist', 'level_bout_avg_dist_condition',
                                           'last_level_bar', 'level_survivor',
-                                          'time_to_level2')):
+                                          'time_to_level2',
+                                          'epoch_reward_speed_sess_by_level',
+                                          'epoch_delivery_speed_sess_by_level')):
         transitions_csv_path = filedialog.askopenfilename(
             title='Select transitions CSV (from level_sorter.py) — cancel to skip level plot',
             filetypes=[('CSV files', '*.csv'), ('All files', '*.*')],
@@ -12422,5 +12665,68 @@ def main():
         if save_path:
             fig.savefig(save_path, bbox_inches='tight', format='svg')
             print(f"{title} saved to: {save_path}")
+
+    # ── By-level epoch plots (variable number of figures) ─────────────────────
+    # These are built post-hoc from all_results + transitions CSV so they are
+    # handled in a separate loop rather than the fixed plot_configs list above.
+    _condition_color_map_main = {
+        cond: _condition_to_color(cond)
+        for result in all_results
+        for cond in [result.get('starting_condition', '')]
+    }
+
+    if 'epoch_reward_speed_sess_by_level' in selected_plots and transitions_csv_path:
+        _by_lvl_reward = _plot_epoch_panels_by_level(
+            all_results, transitions_csv_path,
+            signal_key='speed_epoch_session_means',
+            indices_key='speed_epoch_session_indices',
+            ylabel='Treadmill Speed (cm/s)',
+            title_prefix='Speed Aligned to Reward Zone Entry',
+            condition_color_map=_condition_color_map_main,
+            reward_delivery_vline=True,
+        )
+    else:
+        _by_lvl_reward = []
+
+    if 'epoch_delivery_speed_sess_by_level' in selected_plots and transitions_csv_path:
+        _by_lvl_delivery = _plot_epoch_panels_by_level(
+            all_results, transitions_csv_path,
+            signal_key='delivery_speed_epoch_session_means',
+            indices_key='delivery_speed_epoch_session_indices',
+            ylabel='Treadmill Speed (cm/s)',
+            title_prefix='Speed Aligned to Reward Delivery',
+            condition_color_map=_condition_color_map_main,
+            reward_delivery_vline=True,
+        )
+    else:
+        _by_lvl_delivery = []
+
+    # Show all by-level figures together, then save dialogs one by one
+    for _lvl_name, _fig in _by_lvl_reward + _by_lvl_delivery:
+        _fig.canvas.manager.set_window_title(_lvl_name)
+    plt.show()
+
+    for lvl_name, fig in _by_lvl_reward:
+        save_path = filedialog.asksaveasfilename(
+            defaultextension='.svg',
+            filetypes=[('SVG files', '*.svg'), ('All files', '*.*')],
+            title=f'Save speed epoch — {lvl_name} as',
+            initialfile=f'epoch_reward_speed_sess_{lvl_name}_{len(file_paths)}mice.svg',
+        )
+        if save_path:
+            fig.savefig(save_path, bbox_inches='tight', format='svg')
+            print(f"Saved: {save_path}")
+
+    for lvl_name, fig in _by_lvl_delivery:
+        save_path = filedialog.asksaveasfilename(
+            defaultextension='.svg',
+            filetypes=[('SVG files', '*.svg'), ('All files', '*.*')],
+            title=f'Save delivery speed epoch — {lvl_name} as',
+            initialfile=f'epoch_delivery_speed_sess_{lvl_name}_{len(file_paths)}mice.svg',
+        )
+        if save_path:
+            fig.savefig(save_path, bbox_inches='tight', format='svg')
+            print(f"Saved: {save_path}")
+
 if __name__ == "__main__":
     main()
