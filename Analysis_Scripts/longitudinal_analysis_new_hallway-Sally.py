@@ -17,8 +17,26 @@ import tkinter as tk
 from tkinter import filedialog
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
 from datetime import datetime
 import colorsys
+
+# ── Global Matplotlib defaults ────────────────────────────────────────────────
+plt.rcParams["font.family"] = "sans-serif"
+plt.rcParams["font.sans-serif"] = ["Arial"]
+plt.rcParams["svg.fonttype"] = "none"
+plt.rcParams.update({
+    "font.size": 8,
+    "axes.titlesize": 10,
+    "axes.labelsize": 8,
+    "xtick.labelsize": 8,
+    "ytick.labelsize": 8,
+    "legend.fontsize": 7.5,
+    "figure.titlesize": 10,
+    "lines.linewidth": 0.9,
+    "lines.markersize": 3,
+    "figure.figsize": (4, 2.5),
+})
 import sys
 import pickle
 import hashlib
@@ -208,6 +226,115 @@ def generate_colors(n):
         rgb = colorsys.hsv_to_rgb(hue, saturation, value)
         colors.append(rgb)
     return colors
+
+# ── Canonical condition colours ───────────────────────────────────────────────
+_COLOR_0PCT  = "#808080"   # 0% CA starting condition (gray)
+_COLOR_2PCT  = "#c0392b"   # 2% CA starting condition (red)
+_COLOR_OTHER = "#7f3f98"   # fallback (purple)
+
+
+def _condition_to_color(label: str) -> str:
+    """Map a starting_condition label to its canonical hex colour."""
+    lo = str(label).lower()
+    if "0%" in lo:
+        return _COLOR_0PCT
+    if "2%" in lo:
+        return _COLOR_2PCT
+    return _COLOR_OTHER
+
+
+def apply_common_plot_style(
+    ax,
+    start_x_at_zero: bool = False,
+    remove_top_right: bool = True,
+    remove_x_margins: bool = True,
+    remove_y_margins: bool = True,
+    ticks_in: bool = True,
+    draw_zero_dotted_line: bool = True,
+):
+    """Apply common styling: remove top/right spines, set tick directions, adjust margins."""
+    if remove_top_right:
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+
+    if ticks_in:
+        ax.tick_params(direction='in', which='both', length=5)
+
+    if remove_x_margins:
+        ax.margins(x=0)
+
+    if remove_y_margins:
+        ax.margins(y=0)
+        ax.autoscale(axis='y', tight=True)
+
+    if start_x_at_zero:
+        left, right = ax.get_xlim()
+        ax.set_xlim(left=0, right=right)
+
+    if draw_zero_dotted_line:
+        try:
+            ax.axhline(0, linestyle='-', color='0', linewidth=1.0, alpha=0.8, zorder=1)
+        except Exception:
+            pass
+
+    return ax
+
+
+def _auto_integer_step(
+    vmin: float,
+    vmax: float,
+    target_ticks: int = 7,
+    allow_sub5: bool = False,
+) -> int:
+    """Choose a 'nice' integer step so about target_ticks cover the range."""
+    if not (np.isfinite(vmin) and np.isfinite(vmax)):
+        return 1
+    range_int = int(abs(math.ceil(vmax) - math.floor(vmin)))
+    if range_int <= 0:
+        return 1
+    approx = max(1.0, range_int / max(1, target_ticks))
+    pow10 = 10 ** int(math.floor(math.log10(approx)))
+    multipliers = (1, 2, 2.5, 3, 4, 5) if allow_sub5 else (1, 2, 5)
+    for m in multipliers:
+        step = int(max(1, math.ceil(m * pow10)))
+        if range_int / step <= target_ticks:
+            return step
+    return int(max(1, 10 * pow10))
+
+
+def _apply_integer_axis(
+    ax,
+    *,
+    axis: str,
+    data_min: float,
+    data_max: float,
+    step: int,
+    clamp_min=None,
+    left_pad_steps: int = 0,
+    right_pad_steps: int = 1,
+) -> None:
+    """Apply integer ticks and limits to the chosen axis with one extra step beyond data."""
+    step = int(max(1, step))
+    base_start = int(math.floor(data_min / step) * step)
+    base_end_tick = int(math.ceil(data_max / step) * step)
+    tick_start = base_start - left_pad_steps * step
+    tick_end = base_end_tick + right_pad_steps * step
+    start = tick_start
+    if clamp_min is not None and start < clamp_min:
+        start = clamp_min
+    end = int(data_max) + right_pad_steps * step
+    if end <= start:
+        end = start + step
+    all_ticks = list(range(tick_start, tick_end + 1, step))
+    ticks = [t for t in all_ticks if start <= t <= end]
+    if axis == 'x':
+        ax.set_xlim(start, end)
+        ax.set_xticks(ticks)
+        ax.xaxis.set_major_formatter(mticker.FormatStrFormatter('%d'))
+    elif axis == 'y':
+        ax.set_ylim(start, end)
+        ax.set_yticks(ticks)
+        ax.yaxis.set_major_formatter(mticker.FormatStrFormatter('%.0f'))
 
 # ── Locomotion bout detection constants ──────────────────────────────────────
 BOUT_THRESHOLD_CM_S  = 2.0   # cm/s — minimum speed to count as moving
@@ -1242,9 +1369,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
     n_conditions = len(conditions_sorted)
     n_levels     = len(all_levels)
 
-    # Assign one color per condition using the existing generate_colors helper
-    cond_colors = generate_colors(max(n_conditions, 1))
-    cond_color_map = {c: cond_colors[i] for i, c in enumerate(conditions_sorted)}
+    cond_color_map = {c: _condition_to_color(c) for c in conditions_sorted}
 
     # Grouped bar chart ----------------------------------------------------------
     level_reward_fig, ax = plt.subplots(figsize=(max(15, n_levels * 0.8), 8))
@@ -2029,8 +2154,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
         if _surv_cond_mice:
             level_survivor_fig, ax_surv = plt.subplots(figsize=(max(10, len(all_lvls_surv) * 0.6), 6))
             _surv_conds = sorted(_surv_cond_mice.keys())
-            _surv_colors = generate_colors(max(len(_surv_conds), 1))
-            _surv_color_map = {c: _surv_colors[i] for i, c in enumerate(_surv_conds)}
+            _surv_color_map = {c: _condition_to_color(c) for c in _surv_conds}
 
             for cond in _surv_conds:
                 n_total = len(_surv_cond_mice[cond])
@@ -2849,8 +2973,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     # Create color mapping based on starting conditions
     # Sort so that the condition→color assignment is deterministic across runs
     unique_conditions = sorted(set(starting_conditions))
-    condition_colors = generate_colors(len(unique_conditions))
-    condition_color_map = {condition: color for condition, color in zip(unique_conditions, condition_colors)}
+    condition_color_map = {cond: _condition_to_color(cond) for cond in unique_conditions}
     
     speed_fig             = plt.figure(figsize=(12, 6)) if 'speed'              in selected_plots else None
     sensitivity_fig       = plt.figure(figsize=(12, 6)) if 'sensitivity'        in selected_plots else None
@@ -6248,8 +6371,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
 
             # ── Residuals vs Fitted ───────────────────────────────────────────
             _uniq_conds = np.unique(_conds)
-            _cond_colors_rm = generate_colors(max(len(_uniq_conds), 1))
-            _cond_color_rm  = {c: _cond_colors_rm[i] for i, c in enumerate(_uniq_conds)}
+            _cond_color_rm = {c: _condition_to_color(c) for c in _uniq_conds}
             for _c in _uniq_conds:
                 _mask = _conds == _c
                 ax_rf.scatter(_fitted[_mask], _resid[_mask],
@@ -6764,8 +6886,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
 
             # ── Residuals vs Fitted ───────────────────────────────────────────
             _c_uniq_conds = np.unique(_c_conds)
-            _c_cond_colors = generate_colors(max(len(_c_uniq_conds), 1))
-            _c_cond_color  = {c: _c_cond_colors[i] for i, c in enumerate(_c_uniq_conds)}
+            _c_cond_color = {c: _condition_to_color(c) for c in _c_uniq_conds}
             for _cc in _c_uniq_conds:
                 _cmask = _c_conds == _cc
                 ax_crf.scatter(_c_fitted[_cmask], _c_resid[_cmask],
@@ -7797,8 +7918,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
 
             # ── Residuals vs Fitted ───────────────────────────────────────────
             _lk_uniq_conds = np.unique(_lk_conds)
-            _lk_cond_colors = generate_colors(max(len(_lk_uniq_conds), 1))
-            _lk_cond_color  = {c: _lk_cond_colors[i] for i, c in enumerate(_lk_uniq_conds)}
+            _lk_cond_color = {c: _condition_to_color(c) for c in _lk_uniq_conds}
             for _lkc in _lk_uniq_conds:
                 _lkmask = _lk_conds == _lkc
                 ax_lkrf.scatter(_lk_fitted[_lkmask], _lk_resid[_lkmask],
