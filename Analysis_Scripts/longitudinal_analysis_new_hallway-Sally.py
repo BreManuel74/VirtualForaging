@@ -105,7 +105,12 @@ SESSION_CACHE_DIR = os.path.join(script_dir, '.session_cache')
 if not os.path.exists(SESSION_CACHE_DIR):
     os.makedirs(SESSION_CACHE_DIR)
 
-_SESSION_CACHE_VERSION = 3  # bump this to invalidate all cached sessions after code changes
+_SESSION_CACHE_VERSION = 5  # bump this to invalidate all cached sessions after code changes
+
+# ── Diagnostic mode ───────────────────────────────────────────────────────────
+# Set to True to print per-trial matching, lick-latency, and lick-prop traces
+# to the console while sessions are being processed.  Has no effect on results.
+_DIAGNOSTIC_MODE = False
 
 
 def _session_cache_key(paths):
@@ -848,6 +853,88 @@ def _filter_event_times_by_gaps(event_times, gap_info, window_s=EPOCH_WINDOW_S):
         t0 for t0 in event_times
         if not any(g[0] < t0 + window_s and g[1] > t0 - window_s for g in gaps)
     ]
+
+
+# ── RV-cohort helpers ─────────────────────────────────────────────────────────
+
+def _is_rv_cohort(mouse_name: str) -> bool:
+    """Return True if *mouse_name* belongs to the RV cohort.
+
+    RV mice are identified by the naming prefix 'RV' (case-insensitive),
+    e.g. RV1, RV2, RV10.  Their reward delivery time relative to zone entry
+    is variable (not the fixed 0.65 s used for other cohorts), so downstream
+    calculations must use the actual matched delivery time instead.
+    """
+    return str(mouse_name).upper().startswith('RV')
+
+
+def _match_rewards_to_zones(trial_log_df, max_window_s: float = 30.0):
+    """Match each reward delivery event to its preceding reward zone entry.
+
+    Used for cohorts (e.g. RV) where reward delivery delay is variable rather
+    than a fixed offset from zone entry.  For each ``reward_event`` (and
+    ``hits_event``) timestamp, the function finds the most recent
+    ``stay_texture_change_time`` that preceded it within *max_window_s* and
+    pairs them.
+
+    The zone-entry times are extracted with the same logic as
+    :func:`_extract_reward_zone_entry_times` (re-entry filtering included), so
+    ``test_matching_logic`` remains fully valid as an independent diagnostic.
+
+    Parameters
+    ----------
+    trial_log_df : pd.DataFrame
+        Trial log loaded from a ``*_trial_log.csv`` file.
+    max_window_s : float
+        Maximum allowed zone-entry → reward-delivery interval (seconds).
+        Pairs with a delay outside this range are discarded.
+
+    Returns
+    -------
+    list of (zone_entry_time: float, reward_delivery_time: float)
+        Sorted by zone entry time.  Empty list if required columns are absent
+        or no matches are found.
+    """
+    if 'reward_event' not in trial_log_df.columns:
+        return []
+
+    zone_times = np.array(_extract_reward_zone_entry_times(trial_log_df))
+    if len(zone_times) == 0:
+        return []
+
+    reward_times = pd.to_numeric(
+        trial_log_df['reward_event'], errors='coerce').dropna().values
+    hits_times = (pd.to_numeric(trial_log_df['hits_event'], errors='coerce').dropna().values
+                  if 'hits_event' in trial_log_df.columns else np.array([]))
+    all_delivery_times = np.sort(np.concatenate([reward_times, hits_times]))
+
+    if _DIAGNOSTIC_MODE:
+        print(f"    [MATCH] _match_rewards_to_zones: {len(zone_times)} zone entries, "
+              f"{len(all_delivery_times)} reward delivery events")
+
+    matched = []
+    unmatched = []
+    for r_t in all_delivery_times:
+        # All zone entries that precede this reward within the allowed window
+        candidates = zone_times[(zone_times < r_t) & (r_t - zone_times <= max_window_s)]
+        if len(candidates) == 0:
+            if _DIAGNOSTIC_MODE:
+                unmatched.append(r_t)
+            continue
+        # Pair with the most recent preceding zone entry
+        z_t = float(candidates[-1])
+        matched.append((z_t, float(r_t)))
+        if _DIAGNOSTIC_MODE:
+            print(f"      reward@{r_t:.3f}s  ←  zone@{z_t:.3f}s  (delay {r_t - z_t:.3f}s)")
+
+    if _DIAGNOSTIC_MODE and unmatched:
+        print(f"      [MATCH] {len(unmatched)} reward(s) had NO preceding zone within {max_window_s}s:")
+        for _u in unmatched:
+            print(f"        reward@{_u:.3f}s — skipped")
+    if _DIAGNOSTIC_MODE:
+        print(f"    [MATCH] → {len(matched)} matched pairs")
+
+    return sorted(matched, key=lambda x: x[0])
 
 
 # ── Plot selection ────────────────────────────────────────────────────────────
@@ -3084,7 +3171,14 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     for idx, data_file in enumerate(data_files):
         # Read the combined data file
         df = pd.read_csv(data_file, index_col='timestamp')
-        
+
+        # Detect cohort from the file name prefix (e.g. "RV1_data.csv" → "RV1" → RV cohort)
+        _mouse_name_prefix = os.path.basename(data_file).split("_")[0]
+        _mouse_is_rv = _is_rv_cohort(_mouse_name_prefix)
+        if _mouse_is_rv:
+            print(f"[RV COHORT] {_mouse_name_prefix}: reward delivery times will be determined "
+                  f"by zone-to-reward matching (variable delay, not fixed 0.65 s)")
+
         print(f"Reading data from: {data_file}")
         
         # Initialize lists to store results
@@ -3567,19 +3661,47 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     _mouse_punish_count     += _sess_punish_count_delta
 
                 # ── First-lick latency after reward delivery ──────────────────────
-                # For each reward zone entry, reward is delivered 0.65 s after entry.
-                # Find the first lick after that delivery time and record the latency.
-                # Average across all entries with a valid first lick for the session.
+                # For each reward delivery, find the first lick that follows it and
+                # record the latency.  Average across all trials with a valid first lick.
+                #
+                # Standard cohorts : reward delivered 0.65 s after zone entry.
+                # RV cohort        : actual delivery time determined by zone-to-reward
+                #                    matching (_match_rewards_to_zones).
                 _first_lick_lat = float('nan')
                 _sess_lick_arr = _sess_lick_times if '_sess_lick_times' in dir() else np.array([])
                 if trial_log is not None and len(_sess_lick_arr) > 0:
                     try:
-                        _fll_zone_ts = _extract_reward_zone_entry_times(trial_log)
+                        # Build (zone_entry_time, reward_delivery_time) pairs
+                        if _mouse_is_rv:
+                            _fll_pairs = _match_rewards_to_zones(trial_log)
+                        else:
+                            _fll_pairs = [
+                                (_zt, _zt + 0.65)
+                                for _zt in _extract_reward_zone_entry_times(trial_log)
+                            ]
+                        if _DIAGNOSTIC_MODE:
+                            _diag_method = 'zone-to-reward match' if _mouse_is_rv else 'zone+0.65s'
+                            print(f"  [FLL] {_mouse_name_prefix} | {date_str} | "
+                                  f"{len(_fll_pairs)} pairs via {_diag_method}")
                         _fll_latencies = []
-                        for _fll_zt in _fll_zone_ts:
-                            _fll_rd = _fll_zt + 0.65  # reward delivery time
+                        for _fll_zt, _fll_rd in _fll_pairs:
+                            # Drop trial if the reward delivery itself lands inside a gap.
+                            if _cap_gap_info['has_gaps']:
+                                _delivery_in_gap = [
+                                    g for g in _cap_gap_info['gaps']
+                                    if g[0] <= _fll_rd <= g[1]
+                                ]
+                                if _delivery_in_gap:
+                                    if _DIAGNOSTIC_MODE:
+                                        _dg = _delivery_in_gap[0]
+                                        print(f"    trial zone@{_fll_zt:.3f}s delivery@{_fll_rd:.3f}s "
+                                              f"→ SKIP (delivery inside gap {_dg[0]:.3f}–{_dg[1]:.3f}s)")
+                                    continue
                             _fll_candidates = _sess_lick_arr[_sess_lick_arr > _fll_rd]
                             if len(_fll_candidates) == 0:
+                                if _DIAGNOSTIC_MODE:
+                                    print(f"    trial zone@{_fll_zt:.3f}s delivery@{_fll_rd:.3f}s "
+                                          f"→ SKIP (no lick after delivery)")
                                 continue
                             _first_lick = _fll_candidates[0]
                             # Drop trial if a gap interrupts the window between
@@ -3590,37 +3712,80 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                                     if g[0] > _fll_rd and g[0] < _first_lick
                                 ]
                                 if _blocking_gaps:
+                                    if _DIAGNOSTIC_MODE:
+                                        print(f"    trial zone@{_fll_zt:.3f}s delivery@{_fll_rd:.3f}s "
+                                              f"→ SKIP (gap {_blocking_gaps[0][0]:.3f}–{_blocking_gaps[0][1]:.3f}s "
+                                              f"before first lick@{_first_lick:.3f}s)")
                                     continue
-                            _fll_latencies.append(float(_first_lick - _fll_rd))
+                            _lat = float(_first_lick - _fll_rd)
+                            if _DIAGNOSTIC_MODE:
+                                print(f"    trial zone@{_fll_zt:.3f}s delivery@{_fll_rd:.3f}s "
+                                      f"first_lick@{_first_lick:.3f}s → latency {_lat:.3f}s")
+                            _fll_latencies.append(_lat)
                         if _fll_latencies:
                             _first_lick_lat = float(np.mean(_fll_latencies))
+                        if _DIAGNOSTIC_MODE:
+                            print(f"  [FLL] session mean latency: "
+                                  f"{_first_lick_lat:.3f}s  ({len(_fll_latencies)}/{len(_fll_pairs)} trials valid)")
                     except Exception:
                         _first_lick_lat = float('nan')
                 avg_lick_latency_list.append(_first_lick_lat)
 
                 # ── Proportion of reward deliveries with licks (2 s post-delivery window) ──
-                # Window: [entry_time + 0.65 s, entry_time + 2.65 s]. Binary per delivery:
+                # Window: [delivery_time, delivery_time + 2 s]. Binary per delivery:
                 # 1 if any lick detected in window, 0 otherwise. NaN if data unavailable.
+                #
+                # Standard cohorts : delivery_time = zone_entry + 0.65 s.
+                # RV cohort        : delivery_time determined by zone-to-reward matching.
                 _lick_after_rew_prop = float('nan')
                 if trial_log is not None and capacitive_data is not None:
                     try:
-                        _lar_zone_ts = _extract_reward_zone_entry_times(trial_log)
-                        if len(_lar_zone_ts) > 0:
+                        # Build list of actual reward delivery times for this session
+                        if _mouse_is_rv:
+                            _lar_delivery_times = [
+                                rd for _, rd in _match_rewards_to_zones(trial_log)
+                            ]
+                        else:
+                            _lar_delivery_times = [
+                                _zt + 0.65
+                                for _zt in _extract_reward_zone_entry_times(trial_log)
+                            ]
+                        if _DIAGNOSTIC_MODE:
+                            _diag_method = 'zone-to-reward match' if _mouse_is_rv else 'zone+0.65s'
+                            print(f"  [LAR] {_mouse_name_prefix} | {date_str} | "
+                                  f"{len(_lar_delivery_times)} deliveries via {_diag_method}")
+                        if _lar_delivery_times:
                             _lar_binary = []
-                            for _lar_zt in _lar_zone_ts:
-                                _lar_start = _lar_zt + 0.65
-                                _lar_end   = _lar_zt + 2.65
-                                # Drop trial if a gap falls anywhere in the 2 s detection window.
+                            for _lar_rd in _lar_delivery_times:
+                                _lar_start = _lar_rd
+                                _lar_end   = _lar_rd + 2.0  # 2 s post-delivery detection window
+                                # Drop trial if a gap falls anywhere in the detection window.
                                 if _cap_gap_info['has_gaps']:
                                     _lar_blocking = [
                                         g for g in _cap_gap_info['gaps']
                                         if g[0] < _lar_end and g[1] > _lar_start
                                     ]
                                     if _lar_blocking:
+                                        if _DIAGNOSTIC_MODE:
+                                            print(f"    delivery@{_lar_rd:.3f}s window [{_lar_start:.3f},{_lar_end:.3f}] "
+                                                  f"→ SKIP (gap {_lar_blocking[0][0]:.3f}–{_lar_blocking[0][1]:.3f}s)")
                                         continue
-                                _hit = int(np.any((_sess_lick_arr >= _lar_start) & (_sess_lick_arr < _lar_end)))
+                                _hit = int(np.any(
+                                    (_sess_lick_arr >= _lar_start) & (_sess_lick_arr < _lar_end)
+                                ))
+                                if _DIAGNOSTIC_MODE:
+                                    _licks_in_win = _sess_lick_arr[
+                                        (_sess_lick_arr >= _lar_start) & (_sess_lick_arr < _lar_end)
+                                    ]
+                                    _hit_str = f"HIT  licks={list(np.round(_licks_in_win, 3))}" if _hit else "MISS"
+                                    print(f"    delivery@{_lar_rd:.3f}s window [{_lar_start:.3f},{_lar_end:.3f}] → {_hit_str}")
                                 _lar_binary.append(_hit)
-                            _lick_after_rew_prop = float(np.mean(_lar_binary)) if _lar_binary else float('nan')
+                            _lick_after_rew_prop = (float(np.mean(_lar_binary))
+                                                    if _lar_binary else float('nan'))
+                        if _DIAGNOSTIC_MODE:
+                            _n_valid = len(_lar_binary) if _lar_delivery_times else 0
+                            print(f"  [LAR] session proportion: "
+                                  f"{_lick_after_rew_prop:.3f}  ({_n_valid}/{len(_lar_delivery_times)} trials valid)")
                     except Exception:
                         _lick_after_rew_prop = float('nan')
                 lick_after_reward_prop_list.append(_lick_after_rew_prop)
