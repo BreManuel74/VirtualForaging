@@ -3018,6 +3018,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         avg_speeds_per_bout = []  # List for avg speed per locomotion bout (cm/s)
         avg_dists_per_bout  = []  # List for avg distance per locomotion bout (mm)
         hits = []  # List for reward events
+        hits_gap_aware = []  # Reward count excluding events inside capacitive gaps (for lick/reward ratio only)
         misses_list = []  # List for misses (texture changes minus hits)
         sensitivities = []  # List for sensitivity values
         lick_counts = []  # List for daily lick counts
@@ -3320,6 +3321,28 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     specificity = float('nan')
                     dprime = float('nan')
 
+                # ── Gap-aware reward count (lick/reward ratio denominator only) ──────
+                # Exclude reward/hits events whose timestamp falls inside a capacitive
+                # gap window.  All other reward_count uses remain unfiltered.
+                if _cap_gap_info['has_gaps'] and not (
+                    isinstance(reward_count, float) and np.isnan(reward_count)
+                ):
+                    _gaps = _cap_gap_info['gaps']
+                    _rew_in_gap = np.array([
+                        any(g[0] <= t <= g[1] for g in _gaps)
+                        for t in reward_event_times
+                    ]) if len(reward_event_times) > 0 else np.array([], dtype=bool)
+                    _hits_in_gap = np.array([
+                        any(g[0] <= t <= g[1] for g in _gaps)
+                        for t in hits_event_times
+                    ]) if len(hits_event_times) > 0 else np.array([], dtype=bool)
+                    _gap_aware_reward_count = int(
+                        np.sum(~_rew_in_gap) + np.sum(~_hits_in_gap)
+                    )
+                else:
+                    # No gaps or no trial log: use the same value as reward_count
+                    _gap_aware_reward_count = reward_count
+
                 # Convert Unix timestamp to datetime and store results
                 date = datetime.fromtimestamp(int(timestamp))
 
@@ -3416,6 +3439,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                 avg_speeds_per_bout.append(avg_speed_per_bout)
                 avg_dists_per_bout.append(avg_dist_per_bout)
                 hits.append(reward_count)
+                hits_gap_aware.append(_gap_aware_reward_count)
                 misses_list.append(misses)
                 sensitivities.append(sensitivity)
                 lick_counts.append(lick_count)
@@ -3554,6 +3578,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             'dprime': dprimes_list,
             'avg_lick_latency': avg_lick_latency_list,
             'lick_after_reward_prop': lick_after_reward_prop_list,
+            'hits_gap_aware': hits_gap_aware,
         })
         
         # Sort and remove duplicates
@@ -3695,9 +3720,9 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         if lick_reward_ratio_fig is not None:
             plt.figure(lick_reward_ratio_fig.number)
             _ratio = np.where(
-                (pd.to_numeric(df_r['hits'], errors='coerce').fillna(0) > 0),
+                (pd.to_numeric(df_r['hits_gap_aware'], errors='coerce').fillna(0) > 0),
                 pd.to_numeric(df_r['lick_count'], errors='coerce').values /
-                pd.to_numeric(df_r['hits'], errors='coerce').replace(0, np.nan).values,
+                pd.to_numeric(df_r['hits_gap_aware'], errors='coerce').replace(0, np.nan).values,
                 np.nan,
             )
             plt.plot(day_numbers, _ratio,
@@ -5451,7 +5476,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             df_r = result['df']
             ratio_array = np.full(max_sessions, np.nan)
             for session_idx, (_, row) in enumerate(df_r.iterrows()):
-                hits_val = pd.to_numeric(row['hits'], errors='coerce')
+                hits_val = pd.to_numeric(row['hits_gap_aware'], errors='coerce')
                 lick_val = pd.to_numeric(row['lick_count'], errors='coerce')
                 if pd.notna(hits_val) and hits_val > 0 and pd.notna(lick_val):
                     ratio_array[session_idx] = lick_val / hits_val
@@ -5500,7 +5525,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             df_r = result['df']
             session_ratios = []
             for _, row in df_r.iterrows():
-                hits_val = pd.to_numeric(row.get('hits', np.nan), errors='coerce')
+                hits_val = pd.to_numeric(row.get('hits_gap_aware', np.nan), errors='coerce')
                 lick_val = pd.to_numeric(row.get('lick_count', np.nan), errors='coerce')
                 if pd.notna(hits_val) and hits_val > 0 and pd.notna(lick_val):
                     session_ratios.append(lick_val / hits_val)
@@ -8381,8 +8406,8 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                 _df_r = _r['df']
                 _sess_ratios = []
                 for _, _row in _df_r.iterrows():
-                    _h = pd.to_numeric(_row.get('hits',       np.nan), errors='coerce')
-                    _l = pd.to_numeric(_row.get('lick_count', np.nan), errors='coerce')
+                    _h = pd.to_numeric(_row.get('hits_gap_aware', np.nan), errors='coerce')
+                    _l = pd.to_numeric(_row.get('lick_count',      np.nan), errors='coerce')
                     if pd.notna(_h) and _h > 0 and pd.notna(_l):
                         _sess_ratios.append(_l / _h)
                 if _sess_ratios:
