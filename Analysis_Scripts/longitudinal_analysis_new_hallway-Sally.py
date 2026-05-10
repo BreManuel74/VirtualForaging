@@ -36,7 +36,7 @@ plt.rcParams.update({
     "figure.titlesize": 10,
     "lines.linewidth": 0.9,
     "lines.markersize": 3,
-    "figure.figsize": (5, 2.5), #5, 2.5 ; 6, 2.5 for survivor ; 5.5, 2.5 weekday, 3.25. 3 time to first transition
+    "figure.figsize": (2.5, 2.5), #5, 2.5 ; 6, 2.5 for survivor ; 5.5, 2.5 weekday, 3.5, 3 time to first transition
 })
 import sys
 import pickle
@@ -6136,7 +6136,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             mean_larp_b = float(np.mean(mouse_vals))
             sem_larp_b  = float(np.std(mouse_vals, ddof=1) / np.sqrt(len(mouse_vals))) if len(mouse_vals) > 1 else 0.0
             color = condition_color_map[condition]
-            ax_larpbar.bar(ci, mean_larp_b, width=0.5, color=color, alpha=0.8,
+            ax_larpbar.bar(ci, mean_larp_b, width=0.5, color=color, alpha=0.7,
                            yerr=sem_larp_b, capsize=7, error_kw={'elinewidth': 1.5, 'capthick': 1.5})
             jitter = (_rng_larp.random(len(mouse_vals)) - 0.5) * 0.22
             for j, (mouse_name_larp, larp_val) in enumerate(entries):
@@ -6178,11 +6178,11 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     color='black', linewidth=1.2,
                 )
                 if _larp_p < 0.001:
-                    _lsig = '***'
+                    _lsig = f'*** p={_larp_p:.4f}'
                 elif _larp_p < 0.01:
-                    _lsig = '**'
+                    _lsig = f'** p={_larp_p:.3f}'
                 elif _larp_p < 0.05:
-                    _lsig = '*'
+                    _lsig = f'* p={_larp_p:.3f}'
                 else:
                     _lsig = f'ns  p={_larp_p:.3f}'
                 ax_larpbar.text(
@@ -6901,7 +6901,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             sem_sen  = (float(np.std(mouse_vals, ddof=1) / np.sqrt(len(mouse_vals)))
                         if len(mouse_vals) > 1 else 0.0)
             color = condition_color_map[condition]
-            ax_senbar.bar(ci, mean_sen, width=0.5, color=color, alpha=0.8,
+            ax_senbar.bar(ci, mean_sen, width=0.5, color=color, alpha=0.7,
                           yerr=sem_sen, capsize=7,
                           error_kw={'elinewidth': 1.5, 'capthick': 1.5})
             jitter = (_rng_senbar.random(len(mouse_vals)) - 0.5) * 0.22
@@ -6947,11 +6947,11 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                      _bk_y, _bk_y - _senbar_step * 0.2],
                     color='black', linewidth=1.2)
                 if _sp < 0.001:
-                    _bsig = '***'
+                    _bsig = f'*** p={_sp:.4f}'
                 elif _sp < 0.01:
-                    _bsig = '**'
+                    _bsig = f'** p={_sp:.3f}'
                 elif _sp < 0.05:
-                    _bsig = '*'
+                    _bsig = f'* p={_sp:.3f}'
                 else:
                     _bsig = f'ns  p={_sp:.3f}'
                 ax_senbar.text((_bx1 + _bx2) / 2.0,
