@@ -1,4 +1,4 @@
-"""Longitudinal analysis of behavioral data across multiple mice.
+﻿"""Longitudinal analysis of behavioral data across multiple mice.
 Original Author: Brenna Manuel
 
 TEST COUNTING LOGIC:
@@ -3509,7 +3509,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     correct_rejection_fig = plt.figure(figsize=(12, 6)) if 'correct_rejections' in selected_plots else None
     specificity_fig       = plt.figure(figsize=(12, 6)) if 'specificity'        in selected_plots else None
     dprime_fig            = plt.figure(figsize=(12, 6)) if 'dprime'             in selected_plots else None
-    distance_fig          = plt.figure(figsize=(12, 6)) if 'distance'           in selected_plots else None
+    distance_fig          = plt.figure(figsize=(plt.rcParams['figure.figsize'])) if 'distance'           in selected_plots else None
     bout_count_fig        = plt.figure(figsize=(12, 6)) if 'bout_count'         in selected_plots else None
     avg_bout_count_fig    = plt.figure(figsize=(12, 6)) if 'avg_bout_count'     in selected_plots else None
     rewards_per_bout_fig  = plt.figure(figsize=(12, 6)) if 'rewards_per_bout'   in selected_plots else None
@@ -4558,7 +4558,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         mouse_name      = result['mouse']
         df_r            = result['df']
         condition_color = condition_color_map[conditions[mouse_name]]
-        day_numbers     = list(range(len(df_r)))  # sequential session index, no calendar gaps
+        day_numbers     = list(range(1, len(df_r) + 1))  # sequential session index, no calendar gaps
 
         if speed_fig is not None:
             plt.figure(speed_fig.number)
@@ -4699,7 +4699,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_day - 0.5)
+        ax.set_xlim(left=0.5, right=max_day + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -4717,7 +4717,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(-0.05, 1.05)  # Sensitivity is between 0 and 1
-        ax.set_xlim(left=0, right=max_day - 0.5)
+        ax.set_xlim(left=0.5, right=max_day + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -4735,7 +4735,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)  # Lick counts cannot be negative
-        ax.set_xlim(left=0, right=max_day - 0.5)
+        ax.set_xlim(left=0.5, right=max_day + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -4753,7 +4753,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)  # Reward counts cannot be negative
-        ax.set_xlim(left=0, right=max_day - 0.5)
+        ax.set_xlim(left=0.5, right=max_day + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -4771,7 +4771,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_day - 0.5)
+        ax.set_xlim(left=0.5, right=max_day + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -4789,7 +4789,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_day - 0.5)
+        ax.set_xlim(left=0.5, right=max_day + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -4807,7 +4807,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_day - 0.5)
+        ax.set_xlim(left=0.5, right=max_day + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -4825,7 +4825,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(-0.05, 1.05)
-        ax.set_xlim(left=0, right=max_day - 0.5)
+        ax.set_xlim(left=0.5, right=max_day + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -4843,7 +4843,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.tick_params(axis='both', direction='in')
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
-        ax.set_xlim(left=0, right=max_day - 0.5)
+        ax.set_xlim(left=0.5, right=max_day + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -4861,7 +4861,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_day - 0.5)
+        ax.set_xlim(left=0.5, right=max_day + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -4878,7 +4878,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_day - 0.5)
+        ax.set_xlim(left=0.5, right=max_day + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -4895,7 +4895,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_day - 0.5)
+        ax.set_xlim(left=0.5, right=max_day + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -4912,7 +4912,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_day - 0.5)
+        ax.set_xlim(left=0.5, right=max_day + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -4930,7 +4930,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_day - 0.5)
+        ax.set_xlim(left=0.5, right=max_day + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -4947,7 +4947,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_day - 0.5)
+        ax.set_xlim(left=0.5, right=max_day + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -4965,7 +4965,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_day - 0.5)
+        ax.set_xlim(left=0.5, right=max_day + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -4983,7 +4983,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_day - 0.5)
+        ax.set_xlim(left=0.5, right=max_day + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -5001,7 +5001,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_day - 0.5)
+        ax.set_xlim(left=0.5, right=max_day + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -5063,7 +5063,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     # Plot average rewards/minute with SEM
     if avg_reward_fig is not None:
         plt.figure(avg_reward_fig.number)
-        day_numbers = np.arange(0, max_days)
+        day_numbers = np.arange(1, max_days + 1)
         plt.plot(day_numbers, mean_rewards_per_min, '-', color='black', linewidth=2, label='Mean')
         plt.fill_between(day_numbers, mean_rewards_per_min - sem_rewards_per_min, mean_rewards_per_min + sem_rewards_per_min, 
                          color='gray', alpha=0.3, label='SEM')
@@ -5078,7 +5078,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_days - 1)
+        ax.set_xlim(left=0.5, right=max_days + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(5))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(1))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -5088,7 +5088,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     # Plot sex-specific average rewards/minute with SEM
     if sex_reward_fig is not None:
         plt.figure(sex_reward_fig.number)
-        day_numbers = np.arange(0, max_days)
+        day_numbers = np.arange(1, max_days + 1)
         
         # Plot male data if available
         if len(male_rewards_per_min) > 0:
@@ -5132,7 +5132,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_days - 1)
+        ax.set_xlim(left=0.5, right=max_days + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -5165,7 +5165,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     # Plot sex-specific average speed with SEM
     if avg_sex_speed_fig is not None:
         plt.figure(avg_sex_speed_fig.number)
-        day_numbers = np.arange(0, max_days)
+        day_numbers = np.arange(1, max_days + 1)
 
         if len(male_speeds_agg) > 0:
             if np.any(~np.isnan(male_speeds_agg)):
@@ -5204,7 +5204,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_days - 1)
+        ax.set_xlim(left=0.5, right=max_days + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -5245,7 +5245,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     # Plot average licks/minute with SEM
     if avg_lick_rate_fig is not None:
         plt.figure(avg_lick_rate_fig.number)
-        day_numbers = np.arange(0, max_days)
+        day_numbers = np.arange(1, max_days + 1)
         plt.plot(day_numbers, mean_licks_per_min, '-', color='black', linewidth=2, label='Mean')
         plt.fill_between(day_numbers,
                          mean_licks_per_min - sem_licks_per_min,
@@ -5260,7 +5260,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_days - 1)
+        ax.set_xlim(left=0.5, right=max_days + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(5))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(1))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -5270,7 +5270,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     # Plot sex-specific average licks/minute with SEM
     if sex_lick_rate_fig is not None:
         plt.figure(sex_lick_rate_fig.number)
-        day_numbers = np.arange(0, max_days)
+        day_numbers = np.arange(1, max_days + 1)
         if len(male_licks_per_min) > 0:
             if np.any(~np.isnan(male_licks_per_min)):
                 with warnings.catch_warnings():
@@ -5306,7 +5306,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_days - 1)
+        ax.set_xlim(left=0.5, right=max_days + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -5334,7 +5334,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
 
     if avg_bout_count_fig is not None:
         plt.figure(avg_bout_count_fig.number)
-        day_numbers = np.arange(0, max_days)
+        day_numbers = np.arange(1, max_days + 1)
         plt.plot(day_numbers, mean_bout_counts, '-', color='black', linewidth=2, label='Mean')
         plt.fill_between(day_numbers,
                          mean_bout_counts - sem_bout_counts,
@@ -5349,7 +5349,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_days - 1)
+        ax.set_xlim(left=0.5, right=max_days + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -5383,7 +5383,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     sex_distance_fig = plt.figure(figsize=(12, 6)) if 'sex_distance' in selected_plots else None
     if sex_distance_fig is not None:
         plt.figure(sex_distance_fig.number)
-        day_numbers = np.arange(0, max_days)
+        day_numbers = np.arange(1, max_days + 1)
         if len(male_distances_m) > 0 and np.any(~np.isnan(male_distances_m)):
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore', RuntimeWarning)
@@ -5411,7 +5411,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_days - 1)
+        ax.set_xlim(left=0.5, right=max_days + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -5433,7 +5433,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     dist_array[session_idx] = row['total_distance'] / 1000.0  # mm → m
             condition_dist_groups[condition].append(dist_array)
 
-        day_numbers = np.arange(0, max_sessions)
+        day_numbers = np.arange(1, max_sessions + 1)
         for condition, dist_list in condition_dist_groups.items():
             color = condition_color_map[condition]
             padded = np.array(dist_list)
@@ -5454,7 +5454,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_days - 1)
+        ax.set_xlim(left=0.5, right=max_days + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -5478,7 +5478,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             condition_groups[condition].append(rpm_array)
 
         # Plot each condition's data
-        day_numbers = np.arange(0, max_sessions)
+        day_numbers = np.arange(1, max_sessions + 1)
         for condition, rewards_list in condition_groups.items():
             color = condition_color_map[condition]
             padded_rewards = np.array(rewards_list)
@@ -5508,7 +5508,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_days - 1)
+        ax.set_xlim(left=0.5, right=max_days + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -5531,7 +5531,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             condition_speed_groups[condition].append(speed_array)
 
         # Plot each condition's speed data
-        day_numbers = np.arange(0, max_sessions)
+        day_numbers = np.arange(1, max_sessions + 1)
         for condition, speed_list in condition_speed_groups.items():
             color = condition_color_map[condition]
             padded_speeds = np.array(speed_list)
@@ -5561,7 +5561,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_days - 1)
+        ax.set_xlim(left=0.5, right=max_days + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -5583,7 +5583,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     bc_array[session_idx] = row['bout_count']
             condition_bout_count_groups[condition].append(bc_array)
 
-        day_numbers = np.arange(0, max_sessions)
+        day_numbers = np.arange(1, max_sessions + 1)
         for condition, bc_list in condition_bout_count_groups.items():
             color = condition_color_map[condition]
             padded_bcs = np.array(bc_list)
@@ -5608,7 +5608,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_days - 1)
+        ax.set_xlim(left=0.5, right=max_days + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -5631,7 +5631,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     rpb_array[session_idx] = val
             condition_rpb_groups[condition].append(rpb_array)
 
-        day_numbers = np.arange(0, max_sessions)
+        day_numbers = np.arange(1, max_sessions + 1)
         for condition, rpb_list in condition_rpb_groups.items():
             color = condition_color_map[condition]
             padded_rpb = np.array(rpb_list)
@@ -5656,7 +5656,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_days - 1)
+        ax.set_xlim(left=0.5, right=max_days + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -5769,7 +5769,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     _fll_arr[session_idx] = val
             _cfll_groups[condition].append(_fll_arr)
 
-        day_numbers = np.arange(0, max_sessions)
+        day_numbers = np.arange(1, max_sessions + 1)
         for condition, _fll_list in _cfll_groups.items():
             color = condition_color_map[condition]
             padded_fll = np.array(_fll_list)
@@ -5794,7 +5794,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_days - 1)
+        ax.set_xlim(left=0.5, right=max_days + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -5907,7 +5907,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     _larp_arr[session_idx] = val
             _clarp_groups[condition].append(_larp_arr)
 
-        day_numbers = np.arange(0, max_sessions)
+        day_numbers = np.arange(1, max_sessions + 1)
         for condition, _larp_list in _clarp_groups.items():
             color = condition_color_map[condition]
             padded_larp = np.array(_larp_list)
@@ -5932,7 +5932,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(0, 1.05)
-        ax.set_xlim(left=0, right=max_days - 1)
+        ax.set_xlim(left=0.5, right=max_days + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -6153,7 +6153,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     bas_array[session_idx] = row['avg_speed_per_bout']
             condition_bas_groups[condition].append(bas_array)
 
-        day_numbers = np.arange(0, max_sessions)
+        day_numbers = np.arange(1, max_sessions + 1)
         for condition, bas_list in condition_bas_groups.items():
             color = condition_color_map[condition]
             padded = np.array(bas_list)
@@ -6176,7 +6176,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_days - 1)
+        ax.set_xlim(left=0.5, right=max_days + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -6198,7 +6198,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     bad_array[session_idx] = row['avg_dist_per_bout'] / 1000.0  # mm → m
             condition_bad_groups[condition].append(bad_array)
 
-        day_numbers = np.arange(0, max_sessions)
+        day_numbers = np.arange(1, max_sessions + 1)
         for condition, bad_list in condition_bad_groups.items():
             color = condition_color_map[condition]
             padded = np.array(bad_list)
@@ -6221,7 +6221,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_days - 1)
+        ax.set_xlim(left=0.5, right=max_days + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -6244,7 +6244,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             condition_lick_groups[condition].append(lick_array)
 
         # Plot each condition's lick count data
-        day_numbers = np.arange(0, max_sessions)
+        day_numbers = np.arange(1, max_sessions + 1)
         for condition, lick_list in condition_lick_groups.items():
             color = condition_color_map[condition]
             padded_licks = np.array(lick_list)
@@ -6274,7 +6274,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_days - 1)
+        ax.set_xlim(left=0.5, right=max_days + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -6296,7 +6296,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     lpm_array[session_idx] = row['lick_count'] / row['session_length']
             condition_lick_rate_groups[condition].append(lpm_array)
 
-        day_numbers = np.arange(0, max_sessions)
+        day_numbers = np.arange(1, max_sessions + 1)
         for condition, lpm_list in condition_lick_rate_groups.items():
             color = condition_color_map[condition]
             padded_lpms = np.array(lpm_list)
@@ -6321,7 +6321,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_days - 1)
+        ax.set_xlim(left=0.5, right=max_days + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -6345,7 +6345,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     ratio_array[session_idx] = lick_val / hits_val
             condition_ratio_groups[condition].append(ratio_array)
 
-        day_numbers = np.arange(0, max_sessions)
+        day_numbers = np.arange(1, max_sessions + 1)
         for condition, ratio_list in condition_ratio_groups.items():
             color = condition_color_map[condition]
             padded_ratios = np.array(ratio_list)
@@ -6370,7 +6370,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_days - 1)
+        ax.set_xlim(left=0.5, right=max_days + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -11880,20 +11880,20 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         report_lines.append(f"\nMouse: {mouse_name}")
         report_lines.append(f"  Sessions present   : {len(present)}")
         for d in present:
-            day_offset = (d - global_start).days
+            day_offset = (d - global_start).days + 1
             report_lines.append(f"    Day {day_offset:>3}  {d}")
 
         if file_errors:
             report_lines.append(f"  Incomplete sessions (missing file): {len(file_errors)}")
             for date_str, missing_types in sorted(file_errors.items()):
                 d = datetime.strptime(date_str, '%Y-%m-%d').date()
-                day_offset = (d - global_start).days
+                day_offset = (d - global_start).days + 1
                 report_lines.append(f"    Day {day_offset:>3}  {date_str}  <-- MISSING FILE(S): {', '.join(missing_types)}")
 
         if fully_missing:
             report_lines.append(f"  Fully absent dates : {len(fully_missing)}")
             for d in fully_missing:
-                day_offset = (d - global_start).days
+                day_offset = (d - global_start).days + 1
                 report_lines.append(f"    Day {day_offset:>3}  {d}  <-- NO SESSION")
 
         if not file_errors and not fully_missing:
