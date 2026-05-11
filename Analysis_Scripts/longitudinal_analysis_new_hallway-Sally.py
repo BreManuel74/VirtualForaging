@@ -3161,7 +3161,8 @@ def _plot_epoch_panels_by_level(all_results, transitions_csv_path,
                                  event_type,
                                  ylabel, title_prefix, condition_color_map,
                                  window_s=EPOCH_WINDOW_S, canonical_time=None,
-                                 reward_delivery_vline=True):
+                                 reward_delivery_vline=True,
+                                 levels_to_include=None):
     """One condition-averaged epoch figure per level, using timestamp-correct level slicing.
 
     Level boundaries are derived directly from the ``transition_ts`` column in
@@ -3353,31 +3354,32 @@ def _plot_epoch_panels_by_level(all_results, transitions_csv_path,
 
     all_levels = sorted(level_mouse_epochs.keys(), key=_lvl_sort_key)
 
-    # ── Build one figure per level ────────────────────────────────────────────
-    figs = []
+    # Filter to only the requested levels (if provided)
+    if levels_to_include is not None:
+        all_levels = [lv for lv in all_levels if lv in levels_to_include]
+
+    # ── Pass 1: compute per-level condition means/SEMs; find global y-range ──
+    # level_computed[lvl] = list of (condition, color, cond_mean, cond_err, n_mice)
+    level_computed: dict = {}
+    global_yvals: list = []
+
     for lvl in all_levels:
-        lvl_data    = level_mouse_epochs[lvl]
-        lvl_display = lvl.replace('_', ' ').title()
-
-        fig, ax = plt.subplots(figsize=plt.rcParams.get('figure.figsize', (4.0, 2.5)))
-        _yvals      = []
-        plotted_any = False
-
+        lvl_data = level_mouse_epochs[lvl]
+        lvl_entries = []
         for condition in sorted(lvl_data.keys()):
             color      = condition_color_map.get(condition, 'steelblue')
             mouse_dict = lvl_data[condition]
 
-            # Per-mouse mean across all level-segments (possibly multiple sessions)
             mouse_means = []
             for _aid, seg_means in mouse_dict.items():
-                arr = np.array(seg_means)   # (n_segments × n_pts)
+                arr = np.array(seg_means)
                 with warnings.catch_warnings():
                     warnings.simplefilter('ignore', RuntimeWarning)
                     mouse_means.append(np.nanmean(arr, axis=0))
 
             if not mouse_means:
                 continue
-            mouse_means = np.array(mouse_means)   # (n_mice × n_pts)
+            mouse_means = np.array(mouse_means)
             n_mice      = mouse_means.shape[0]
 
             with warnings.catch_warnings():
@@ -3386,20 +3388,37 @@ def _plot_epoch_panels_by_level(all_results, transitions_csv_path,
                 cond_err  = (np.nanstd(mouse_means, axis=0, ddof=1) / np.sqrt(n_mice)
                              if n_mice > 1 else np.zeros_like(cond_mean))
 
-            _yvals.extend([float(np.nanmax(cond_mean + cond_err)),
-                           float(np.nanmin(cond_mean - cond_err))])
+            global_yvals.extend([float(np.nanmax(cond_mean + cond_err)),
+                                  float(np.nanmin(cond_mean - cond_err))])
+            lvl_entries.append((condition, color, cond_mean, cond_err, n_mice))
 
+        if lvl_entries:
+            level_computed[lvl] = lvl_entries
+
+    # Shared y-axis bounds across all level panels (bottom always 0)
+    if global_yvals:
+        _global_ymax = float(np.nanmax(global_yvals))
+        _shared_ybot = 0.0
+        _shared_ytop = _global_ymax * 1.05
+    else:
+        _shared_ybot, _shared_ytop = 0.0, 1.0
+
+    # ── Pass 2: build one figure per level, all with the shared y-axis ───────
+    figs = []
+    for lvl in all_levels:
+        if lvl not in level_computed:
+            continue
+        lvl_display = lvl.replace('_', ' ').title()
+
+        fig, ax = plt.subplots(figsize=plt.rcParams.get('figure.figsize', (4.0, 2.5)))
+
+        for condition, color, cond_mean, cond_err, n_mice in level_computed[lvl]:
             ax.plot(canonical_time, cond_mean, color=color,
                     label=f'{condition} (n={n_mice})')
             ax.fill_between(canonical_time,
                             cond_mean - cond_err,
                             cond_mean + cond_err,
                             color=color, alpha=0.20)
-            plotted_any = True
-
-        if not plotted_any:
-            plt.close(fig)
-            continue
 
         ax.axvline(0, color='red', linestyle='--', label='Event (t=0)')
         if reward_delivery_vline:
@@ -3409,11 +3428,7 @@ def _plot_epoch_panels_by_level(all_results, transitions_csv_path,
         ax.set_ylabel(ylabel)
         ax.set_title(f'{title_prefix} — {lvl_display}')
         ax.set_xlim(-window_s, window_s)
-        if _yvals:
-            _ymax = float(np.nanmax(_yvals))
-            _ymin = float(np.nanmin(_yvals))
-            _bot  = _ymin * 1.05 if _ymin < 0 else 0.0
-            ax.set_ylim(_bot, _ymax * 1.05)
+        ax.set_ylim(_shared_ybot, _shared_ytop)
         ax.legend()
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
@@ -12184,11 +12199,15 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
 
 def _run_weight_correlations(root, file_paths, animal_info):
     """Load a weight CSV, match to session data by mouse ID + date, and produce
-    two correlation plots (Total Change vs reward count):
-      1. All mice on one axes, each mouse its own colour.
-      2. Two subplots split by starting condition.
+    repeated-measures correlation (rmcorr) plots:
+      1. Total Weight Change vs Reward Count — all mice.
+      2. Total Weight Change vs Reward Count — split by starting condition.
+      3. Reward Count (Day D) vs Next-Day Daily Weight Change — all mice.
+      4. Reward Count (Day D) vs Next-Day Daily Weight Change — by condition.
+
+    Uses the R ``rmcorr`` package (Bakdash & Marusich 2017).  Falls back to
+    Spearman scatter if rpy2 / rmcorr are unavailable.
     """
-    from scipy.stats import kendalltau as _kendalltau
 
     # ── Load weight CSV ───────────────────────────────────────────────────────
     weight_csv_path = filedialog.askopenfilename(
@@ -12286,20 +12305,181 @@ def _run_weight_correlations(root, file_paths, animal_info):
                      for i, m in enumerate(mice_sorted)}
     conditions_sorted = sorted(merged['condition'].unique())
 
-    def _add_corr_annotation(ax, x, y):
-        """Add Kendall's tau and p-value annotation to axes."""
-        mask = np.isfinite(x) & np.isfinite(y)
-        if mask.sum() < 3:
-            return
-        tau, p = _kendalltau(x[mask], y[mask])
-        sig = ('***' if p < 0.001 else '**' if p < 0.01
-               else '*' if p < 0.05 else 'ns')
-        ax.text(0.97, 0.05,
-                f'\u03c4 = {tau:.3f}\np = {p:.3f}  {sig}',
-                transform=ax.transAxes, ha='right', va='bottom',
-                fontsize=8.5,
+    def _compute_rmcorr(sub_df, x_col, y_col):
+        """Run rmcorr (R package) on sub_df.  Falls back gracefully on failure.
+
+        Returns a dict with keys:
+            ok (bool), r, p, ci_lo, ci_hi, slope,
+            intercepts (dict: mouse -> float), df
+        """
+        _rdf = sub_df[['mouse', x_col, y_col]].copy()
+        _rdf = _rdf.rename(columns={x_col: 'xvar', y_col: 'yvar'})
+        _rdf = _rdf.dropna(subset=['xvar', 'yvar'])
+        _rdf['mouse'] = _rdf['mouse'].astype(str)
+        _out = dict(ok=False, r=np.nan, p=np.nan, ci_lo=np.nan, ci_hi=np.nan,
+                    slope=np.nan, intercepts={}, df=np.nan)
+        if _rdf.shape[0] < 5 or _rdf['mouse'].nunique() < 3:
+            print(f"  Not enough data for rmcorr ({y_col} ~ {x_col}): "
+                  f"{_rdf.shape[0]} obs, {_rdf['mouse'].nunique()} mice.")
+            return _out
+        try:
+            import os as _osi
+            if _osi.name == 'nt':
+                _r_home = _osi.environ.get('R_HOME', '')
+                if _r_home:
+                    for _rp in [_osi.path.join(_r_home, 'bin', 'x64'),
+                                 _osi.path.join(_r_home, 'bin')]:
+                        if _osi.path.isdir(_rp):
+                            if _rp not in _osi.environ.get('PATH', ''):
+                                _osi.environ['PATH'] = _rp + _osi.pathsep + _osi.environ.get('PATH', '')
+                            try:
+                                _osi.add_dll_directory(_rp)
+                            except (AttributeError, OSError):
+                                pass
+            import rpy2.robjects as _ro
+            import rpy2.robjects.packages as _rpkgs
+            _rpkgs.importr('rmcorr')
+            import tempfile as _tmp
+            _uid  = str(id(_rdf))[-6:]
+            _tdir = _tmp.gettempdir().replace('\\', '/')
+            _fin  = f"{_tdir}/rmcorr_in_{_uid}.csv"
+            _fout = f"{_tdir}/rmcorr_out_{_uid}.csv"
+            _rdf.to_csv(_fin, index=False)
+            _ro.globalenv['r_rmc_in']  = _fin
+            _ro.globalenv['r_rmc_out'] = _fout
+            _ro.r("""
+                suppressPackageStartupMessages(library(rmcorr))
+                .d <- read.csv(r_rmc_in)
+                .d$mouse <- factor(.d$mouse)
+                .rmc <- rmcorr(participant = mouse,
+                               measure1    = xvar,
+                               measure2    = yvar,
+                               dataset     = .d)
+                .all_coefs <- stats::coef(.rmc$model)
+                .slope     <- as.numeric(.all_coefs["xvar"])
+                .lvls <- levels(.d$mouse)
+                .intercepts <- sapply(.lvls, function(.lv) {
+                    sx <- .d$xvar[.d$mouse == .lv]
+                    sy <- .d$yvar[.d$mouse == .lv]
+                    if (length(sx) == 0 || is.na(.slope)) return(NA_real_)
+                    mean(sy) - .slope * mean(sx)
+                })
+                .out_df <- data.frame(
+                    mouse     = .lvls,
+                    intercept = as.numeric(.intercepts),
+                    slope     = .slope,
+                    r_rm      = .rmc$r,
+                    p_val     = .rmc$p,
+                    ci_lo     = .rmc$CI[1],
+                    ci_hi     = .rmc$CI[2],
+                    df_rm     = .rmc$df
+                )
+                write.csv(.out_df, r_rmc_out, row.names = FALSE)
+            """)
+            _res = pd.read_csv(_fout)
+            for _fp in [_fin, _fout]:
+                try:    _osi.unlink(_fp)
+                except Exception: pass
+            _slope_val = float(_res['slope'].iloc[0])
+            _r_val     = float(_res['r_rm'].iloc[0])
+            _ints      = dict(zip(_res['mouse'].astype(str),
+                                  _res['intercept'].astype(float)))
+            if np.isnan(_slope_val) and not np.isnan(_r_val):
+                _sx = _rdf.groupby('mouse')['xvar'].apply(lambda v: v - v.mean()).std()
+                _sy = _rdf.groupby('mouse')['yvar'].apply(lambda v: v - v.mean()).std()
+                if float(_sx) > 0:
+                    _slope_val = _r_val * float(_sy) / float(_sx)
+                _ints = {
+                    str(m): (float(_rdf.loc[_rdf['mouse'] == m, 'yvar'].mean())
+                             - _slope_val * float(_rdf.loc[_rdf['mouse'] == m, 'xvar'].mean()))
+                    for m in _rdf['mouse'].unique()
+                }
+            _out.update(
+                ok=True,
+                r=_r_val,
+                p=float(_res['p_val'].iloc[0]),
+                ci_lo=float(_res['ci_lo'].iloc[0]),
+                ci_hi=float(_res['ci_hi'].iloc[0]),
+                slope=_slope_val,
+                intercepts=_ints,
+                df=float(_res['df_rm'].iloc[0]),
+            )
+            print(f"  rmcorr ({y_col} ~ {x_col}): r_rm={_out['r']:.4f}, "
+                  f"p={_out['p']:.4f}, CI=[{_out['ci_lo']:.4f}, {_out['ci_hi']:.4f}]")
+        except Exception as _exc:
+            print(f"  NOTE: rmcorr failed ({type(_exc).__name__}: {_exc}); "
+                  f"falling back to Spearman.")
+        return _out
+
+    def _draw_rmcorr_plot(ax, sub_df, x_col, y_col, x_label, y_label, title):
+        """Plot rmcorr scatter + per-mouse parallel lines + overall regression."""
+        from scipy.stats import spearmanr as _spearmanr
+        _rmc = _compute_rmcorr(sub_df, x_col, y_col)
+        _ms  = plt.rcParams.get('lines.markersize', 4)
+        # scatter dots, coloured by starting condition
+        for _m in sorted(sub_df['mouse'].unique()):
+            _sub  = sub_df[sub_df['mouse'] == _m].dropna(subset=[x_col, y_col])
+            _cond_rows = sub_df.loc[sub_df['mouse'] == _m, 'condition']
+            _mcol = _condition_to_color(_cond_rows.iloc[0]) if not _cond_rows.empty else 'gray'
+            ax.scatter(_sub[x_col], _sub[y_col],
+                       color=_mcol,
+                       s=_ms ** 2, alpha=0.80, edgecolors='none',
+                       label=_m, zorder=3)
+        _valid = sub_df[[x_col, y_col]].dropna()
+        _x_all = _valid[x_col].values
+        _y_all = _valid[y_col].values
+        _fin   = np.isfinite(_x_all) & np.isfinite(_y_all)
+        if _rmc['ok'] and not np.isnan(_rmc['slope']):
+            # per-mouse parallel regression lines, coloured by condition
+            for _m, _ic in _rmc['intercepts'].items():
+                if np.isnan(_ic):
+                    continue
+                _mdata = sub_df[sub_df['mouse'] == _m].dropna(subset=[x_col, y_col])
+                if _mdata.empty:
+                    continue
+                _cond_rows = sub_df.loc[sub_df['mouse'] == _m, 'condition']
+                _mcol = _condition_to_color(_cond_rows.iloc[0]) if not _cond_rows.empty else 'gray'
+                _xs = np.linspace(float(_mdata[x_col].min()),
+                                  float(_mdata[x_col].max()), 80)
+                ax.plot(_xs, _rmc['slope'] * _xs + _ic,
+                        color=_mcol,
+                        linewidth=0.9, alpha=0.55, zorder=2)
+            # overall rmcorr regression line (grand intercept)
+            if _fin.sum() > 1:
+                _x_pad   = (_x_all[_fin].max() - _x_all[_fin].min()) * 0.04
+                _x_line  = np.linspace(_x_all[_fin].min() - _x_pad,
+                                       _x_all[_fin].max() + _x_pad, 200)
+                _grand_ic = float(_y_all[_fin].mean()) - _rmc['slope'] * float(_x_all[_fin].mean())
+                ax.plot(_x_line, _rmc['slope'] * _x_line + _grand_ic,
+                        color='black', linewidth=1.4, zorder=4)
+            _p_str = (f"p = {_rmc['p']:.4f}" if _rmc['p'] >= 0.0001 else "p < 0.0001")
+            _ann = (f"$r_{{rm}}$ = {_rmc['r']:.3f}\n"
+                    f"{_p_str}\n"
+                    f"95% CI [{_rmc['ci_lo']:.3f}, {_rmc['ci_hi']:.3f}]\n"
+                    f"n = {sub_df['mouse'].nunique()} mice")
+        else:
+            if _fin.sum() >= 2:
+                _coef = np.polyfit(_x_all[_fin], _y_all[_fin], 1)
+                _xl   = np.linspace(_x_all[_fin].min(), _x_all[_fin].max(), 200)
+                ax.plot(_xl, np.polyval(_coef, _xl),
+                        color='dimgray', linewidth=1.2, linestyle='--', zorder=4)
+            if _fin.sum() >= 3:
+                _rho, _pv = _spearmanr(_x_all[_fin], _y_all[_fin])
+                _p_str    = (f"p = {_pv:.4f}" if _pv >= 0.0001 else "p < 0.0001")
+                _ann = (f"Spearman \u03c1 = {_rho:.3f}\n{_p_str}\n"
+                        f"n = {sub_df['mouse'].nunique()} mice\n"
+                        f"(rmcorr unavailable)")
+            else:
+                _ann = f"n = {sub_df['mouse'].nunique()} mice\n(rmcorr unavailable)"
+        ax.text(0.03, 0.97, _ann,
+                transform=ax.transAxes, va='top', ha='left', fontsize=7.5,
                 bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
-                          edgecolor='lightgray', alpha=0.8))
+                          edgecolor='lightgray', alpha=0.80))
+        ax.set_xlabel(x_label)
+        ax.set_ylabel(y_label)
+        ax.set_title(title)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
 
     def _assumptions_figure(sub_df, title,
                              x_col='total_change', y_col='reward_count',
@@ -12509,33 +12689,20 @@ def _run_weight_correlations(root, file_paths, animal_info):
         fig_assump_nd_conds = {}
         print("[WARN] No next-day daily change data found \u2014 skipping next-day correlation plots.")
 
-    # ── Plot 1: all mice combined ─────────────────────────────────────────────
+    # ── Plot 1: all mice combined (rmcorr) ───────────────────────────────────
     fig_all, ax_all = plt.subplots(figsize=(8, 6))
-    for mouse in mice_sorted:
-        sub = merged[merged['mouse'] == mouse]
-        ax_all.scatter(sub['total_change'], sub['reward_count'],
-                       color=mouse_colors[mouse], label=mouse,
-                       s=38, alpha=0.82, edgecolors='none')
-    # Overall regression line
-    all_x = merged['total_change'].values
-    all_y = merged['reward_count'].values
-    mask  = np.isfinite(all_x) & np.isfinite(all_y)
-    if mask.sum() >= 2:
-        coef = np.polyfit(all_x[mask], all_y[mask], 1)
-        x_line = np.linspace(all_x[mask].min(), all_x[mask].max(), 200)
-        ax_all.plot(x_line, np.polyval(coef, x_line),
-                    color='black', linewidth=1.5, linestyle='--', zorder=5)
-    _add_corr_annotation(ax_all, all_x, all_y)
-    ax_all.set_xlabel('Total Body Weight Change (%)')
-    ax_all.set_ylabel('Reward Count per Session')
-    ax_all.set_title('Total Weight Change vs Reward Count\n(all mice, all sessions — Kendall\'s \u03c4)')
-    ax_all.spines['top'].set_visible(False)
-    ax_all.spines['right'].set_visible(False)
+    _draw_rmcorr_plot(ax_all,
+                      merged.dropna(subset=['total_change']),
+                      'total_change', 'reward_count',
+                      'Total Body Weight Change (%)',
+                      'Reward Count per Session',
+                      'Total Weight Change vs Reward Count\n'
+                      '(all mice, all sessions \u2014 rmcorr)')
     ax_all.legend(title='Mouse', bbox_to_anchor=(1.02, 1), loc='upper left',
                   fontsize=7.5, title_fontsize=8)
     fig_all.tight_layout()
 
-    # ── Plot 2: subplots by starting condition ────────────────────────────────
+    # ── Plot 2: subplots by starting condition (rmcorr) ──────────────────────
     n_conds = len(conditions_sorted)
     fig_cond, axes_cond = plt.subplots(1, n_conds,
                                         figsize=(6 * n_conds, 6),
@@ -12543,29 +12710,16 @@ def _run_weight_correlations(root, file_paths, animal_info):
     if n_conds == 1:
         axes_cond = [axes_cond]
     for ax_c, cond in zip(axes_cond, conditions_sorted):
-        sub_cond = merged[merged['condition'] == cond]
-        for mouse in sorted(sub_cond['mouse'].unique()):
-            sub_m = sub_cond[sub_cond['mouse'] == mouse]
-            ax_c.scatter(sub_m['total_change'], sub_m['reward_count'],
-                         color=mouse_colors[mouse], label=mouse,
-                         s=38, alpha=0.82, edgecolors='none')
-        cx = sub_cond['total_change'].values
-        cy = sub_cond['reward_count'].values
-        cmask = np.isfinite(cx) & np.isfinite(cy)
-        if cmask.sum() >= 2:
-            coef_c = np.polyfit(cx[cmask], cy[cmask], 1)
-            xc_line = np.linspace(cx[cmask].min(), cx[cmask].max(), 200)
-            ax_c.plot(xc_line, np.polyval(coef_c, xc_line),
-                      color='black', linewidth=1.5, linestyle='--', zorder=5)
-        _add_corr_annotation(ax_c, cx, cy)
-        ax_c.set_xlabel('Total Body Weight Change (%)')
-        ax_c.set_ylabel('Reward Count per Session')
-        ax_c.set_title(f'Condition: {cond}')
-        ax_c.spines['top'].set_visible(False)
-        ax_c.spines['right'].set_visible(False)
+        sub_cond = merged[merged['condition'] == cond].dropna(subset=['total_change'])
+        _draw_rmcorr_plot(ax_c, sub_cond,
+                          'total_change', 'reward_count',
+                          'Total Body Weight Change (%)',
+                          'Reward Count per Session',
+                          f'Condition: {cond}')
         ax_c.legend(title='Mouse', fontsize=7.5, title_fontsize=8)
-    fig_cond.suptitle('Total Weight Change vs Reward Count by Starting Condition (Kendall\'s \u03c4)',
-                      fontsize=12, fontweight='bold')
+    fig_cond.suptitle(
+        'Total Weight Change vs Reward Count by Starting Condition (rmcorr)',
+        fontsize=12, fontweight='bold')
     fig_cond.tight_layout()
 
     # ── Plot 3: next-day daily change — all mice combined ─────────────────────
@@ -12573,34 +12727,16 @@ def _run_weight_correlations(root, file_paths, animal_info):
         fig_nd_all = fig_nd_cond = None
     else:
         fig_nd_all, ax_nd_all = plt.subplots(figsize=(8, 6))
-        for mouse in mice_sorted:
-            sub = merged_nd[merged_nd['mouse'] == mouse]
-            if sub.empty:
-                continue
-            ax_nd_all.scatter(sub['reward_count'], sub['next_day_dc'],
-                              color=mouse_colors[mouse], label=mouse,
-                              s=38, alpha=0.82, edgecolors='none')
-        nd_x  = merged_nd['reward_count'].values
-        nd_y  = merged_nd['next_day_dc'].values
-        nd_fin = np.isfinite(nd_x) & np.isfinite(nd_y)
-        if nd_fin.sum() >= 2:
-            coef_nd = np.polyfit(nd_x[nd_fin], nd_y[nd_fin], 1)
-            xl_nd   = np.linspace(nd_x[nd_fin].min(), nd_x[nd_fin].max(), 200)
-            ax_nd_all.plot(xl_nd, np.polyval(coef_nd, xl_nd),
-                           color='black', linewidth=1.5, linestyle='--', zorder=5)
-        _add_corr_annotation(ax_nd_all, nd_x, nd_y)
-        ax_nd_all.set_xlabel(_nd_x_label)
-        ax_nd_all.set_ylabel(_nd_y_label)
-        ax_nd_all.set_title(
-            'Reward Count (Day D) vs Next-Day Daily Weight Change\n'
-            '(all mice, all sessions \u2014 Kendall\'s \u03c4)')
-        ax_nd_all.spines['top'].set_visible(False)
-        ax_nd_all.spines['right'].set_visible(False)
+        _draw_rmcorr_plot(ax_nd_all, merged_nd,
+                          'reward_count', 'next_day_dc',
+                          _nd_x_label, _nd_y_label,
+                          'Reward Count (Day D) vs Next-Day Daily Weight Change\n'
+                          '(all mice, all sessions \u2014 rmcorr)')
         ax_nd_all.legend(title='Mouse', bbox_to_anchor=(1.02, 1), loc='upper left',
                          fontsize=7.5, title_fontsize=8)
         fig_nd_all.tight_layout()
 
-        # ── Plot 4: next-day daily change — by starting condition ──────────────
+        # ── Plot 4: next-day daily change — by starting condition (rmcorr) ──────
         fig_nd_cond, axes_nd_cond = plt.subplots(1, n_conds,
                                                   figsize=(6 * n_conds, 6),
                                                   sharey=False)
@@ -12608,29 +12744,14 @@ def _run_weight_correlations(root, file_paths, animal_info):
             axes_nd_cond = [axes_nd_cond]
         for ax_ndc, cond in zip(axes_nd_cond, conditions_sorted):
             sub_cond_nd = merged_nd[merged_nd['condition'] == cond]
-            for mouse in sorted(sub_cond_nd['mouse'].unique()):
-                sub_m = sub_cond_nd[sub_cond_nd['mouse'] == mouse]
-                ax_ndc.scatter(sub_m['reward_count'], sub_m['next_day_dc'],
-                               color=mouse_colors[mouse], label=mouse,
-                               s=38, alpha=0.82, edgecolors='none')
-            cndx  = sub_cond_nd['reward_count'].values
-            cndy  = sub_cond_nd['next_day_dc'].values
-            cnd_fin = np.isfinite(cndx) & np.isfinite(cndy)
-            if cnd_fin.sum() >= 2:
-                coef_ndc = np.polyfit(cndx[cnd_fin], cndy[cnd_fin], 1)
-                xl_ndc   = np.linspace(cndx[cnd_fin].min(), cndx[cnd_fin].max(), 200)
-                ax_ndc.plot(xl_ndc, np.polyval(coef_ndc, xl_ndc),
-                            color='black', linewidth=1.5, linestyle='--', zorder=5)
-            _add_corr_annotation(ax_ndc, cndx, cndy)
-            ax_ndc.set_xlabel(_nd_x_label)
-            ax_ndc.set_ylabel(_nd_y_label)
-            ax_ndc.set_title(f'Condition: {cond}')
-            ax_ndc.spines['top'].set_visible(False)
-            ax_ndc.spines['right'].set_visible(False)
+            _draw_rmcorr_plot(ax_ndc, sub_cond_nd,
+                              'reward_count', 'next_day_dc',
+                              _nd_x_label, _nd_y_label,
+                              f'Condition: {cond}')
             ax_ndc.legend(title='Mouse', fontsize=7.5, title_fontsize=8)
         fig_nd_cond.suptitle(
             'Reward Count (Day D) vs Next-Day Daily Weight Change by Condition'
-            ' (Kendall\'s \u03c4)',
+            ' (rmcorr)',
             fontsize=12, fontweight='bold')
         fig_nd_cond.tight_layout()
 
@@ -12651,14 +12772,14 @@ def _run_weight_correlations(root, file_paths, animal_info):
         [(fig_assump_all, 'weight_assumptions_all')]
         + [(fig_a, f'weight_assumptions_cond_{cond}')
            for cond, fig_a in fig_assump_conds.items()]
-        + [(fig_all,  'weight_corr_all_mice'),
-           (fig_cond, 'weight_corr_by_condition')]
+        + [(fig_all,  'weight_rmcorr_all_mice'),
+           (fig_cond, 'weight_rmcorr_by_condition')]
         + ([(fig_assump_nd_all, 'weight_nd_assumptions_all')]
            if fig_assump_nd_all else [])
         + [(fig_a, f'weight_nd_assumptions_cond_{cond}')
            for cond, fig_a in fig_assump_nd_conds.items()]
-        + ([(fig_nd_all,  'weight_nd_corr_all_mice'),
-            (fig_nd_cond, 'weight_nd_corr_by_condition')]
+        + ([(fig_nd_all,  'weight_nd_rmcorr_all_mice'),
+            (fig_nd_cond, 'weight_nd_rmcorr_by_condition')]
            if fig_nd_all else [])
     )
     for fig_obj, fname in figs_to_save:
@@ -13148,7 +13269,40 @@ def main():
         for cond in [result.get('starting_condition', '')]
     }
 
+    def _ask_level_selection(available_levels, title='Select Levels to Plot'):
+        """Show a Tkinter checklist and return the selected level names."""
+        import tkinter as _tk
+        sel_win = _tk.Toplevel(root)
+        sel_win.title(title)
+        sel_win.grab_set()
+        _tk.Label(sel_win, text='Select levels to include (shared y-axis):').pack(pady=4)
+        frame = _tk.Frame(sel_win)
+        frame.pack(fill='both', expand=True, padx=8)
+        vars_ = {}
+        for lv in available_levels:
+            v = _tk.BooleanVar(value=True)
+            _tk.Checkbutton(frame, text=lv, variable=v).pack(anchor='w')
+            vars_[lv] = v
+        result_holder = []
+        def _ok():
+            result_holder.extend([lv for lv, v in vars_.items() if v.get()])
+            sel_win.destroy()
+        _tk.Button(sel_win, text='OK', command=_ok).pack(pady=6)
+        root.wait_window(sel_win)
+        return result_holder if result_holder else available_levels
+
     if 'epoch_reward_speed_sess_by_level' in selected_plots and transitions_csv_path:
+        # Discover available levels from transitions CSV first
+        _reward_avail_levels = []
+        try:
+            _tdf = pd.read_csv(transitions_csv_path)
+            def _lsk(n): parts = n.split('_'); return int(parts[-1]) if parts[-1].isdigit() else 999
+            _reward_avail_levels = sorted(
+                {str(lv).replace('.json', '') for lv in _tdf['level'].dropna()}, key=_lsk)
+        except Exception:
+            pass
+        _reward_levels_sel = _ask_level_selection(_reward_avail_levels,
+                                                   'Select Levels — Speed Aligned to Reward Zone Entry') if _reward_avail_levels else None
         _by_lvl_reward = _plot_epoch_panels_by_level(
             all_results, transitions_csv_path,
             data_files=file_paths,
@@ -13157,11 +13311,22 @@ def main():
             title_prefix='Speed Aligned to Reward Zone Entry',
             condition_color_map=_condition_color_map_main,
             reward_delivery_vline=True,
+            levels_to_include=_reward_levels_sel,
         )
     else:
         _by_lvl_reward = []
 
     if 'epoch_delivery_speed_sess_by_level' in selected_plots and transitions_csv_path:
+        _delivery_avail_levels = []
+        try:
+            _tdf2 = pd.read_csv(transitions_csv_path)
+            def _lsk2(n): parts = n.split('_'); return int(parts[-1]) if parts[-1].isdigit() else 999
+            _delivery_avail_levels = sorted(
+                {str(lv).replace('.json', '') for lv in _tdf2['level'].dropna()}, key=_lsk2)
+        except Exception:
+            pass
+        _delivery_levels_sel = _ask_level_selection(_delivery_avail_levels,
+                                                     'Select Levels — Speed Aligned to Reward Delivery') if _delivery_avail_levels else None
         _by_lvl_delivery = _plot_epoch_panels_by_level(
             all_results, transitions_csv_path,
             data_files=file_paths,
@@ -13170,6 +13335,7 @@ def main():
             title_prefix='Speed Aligned to Reward Delivery',
             condition_color_map=_condition_color_map_main,
             reward_delivery_vline=True,
+            levels_to_include=_delivery_levels_sel,
         )
     else:
         _by_lvl_delivery = []
