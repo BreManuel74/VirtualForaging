@@ -1207,12 +1207,29 @@ def plot_average_traces_reward(reward_zone_trials, trial_log_df, cap_time, cap_v
     mean_event_vals = np.nanmean(cap_event_windows_padded, axis=0)
     sem_event_vals = np.nanstd(cap_event_windows_padded, axis=0, ddof=1) / np.sqrt(np.sum(~np.isnan(cap_event_windows_padded), axis=0))
     
-    # Create combined subplot figure
-    num_plots = 3 if pupil_time is not None else 2
-    fig, axs = plt.subplots(num_plots, 1, figsize=(12, 10 if num_plots == 2 else 14), sharex=True)
+    # Create speed windows aligned to reward delivery events
+    speed_event_windows = []
+    for rt in reward_event_times_flat:
+        mask = (speed_time >= rt - window) & (speed_time <= rt + window)
+        speed_segment = speed_val[mask]
+        speed_event_windows.append(speed_segment)
     
-    if num_plots == 2:
-        axs = [axs[0], axs[1]]
+    max_speed_event_len = max(len(seg) for seg in speed_event_windows)
+    speed_event_windows_padded = np.array([
+        np.pad(seg.astype(float), (0, max_speed_event_len - len(seg)), constant_values=np.nan)
+        for seg in speed_event_windows
+    ])
+    
+    aligned_time_speed_event = np.linspace(-window, window, max_speed_event_len)
+    mean_speed_event = np.nanmean(speed_event_windows_padded, axis=0)
+    sem_speed_event = np.nanstd(speed_event_windows_padded, axis=0, ddof=1) / np.sqrt(np.sum(~np.isnan(speed_event_windows_padded), axis=0))
+    
+    # Create combined subplot figure
+    num_plots = 4 if pupil_time is not None else 3
+    fig, axs = plt.subplots(num_plots, 1, figsize=(12, 14 if num_plots == 3 else 18), sharex=True)
+    
+    if num_plots == 3:
+        axs = [axs[0], axs[1], axs[2]]
     
     # Plot 1: Treadmill Speed aligned to reward zone entry
     n_rewards_speed = speed_windows_padded.shape[0]
@@ -1245,7 +1262,21 @@ def plot_average_traces_reward(reward_zone_trials, trial_log_df, cap_time, cap_v
     axs[1].spines['top'].set_visible(False)
     axs[1].spines['right'].set_visible(False)
     
-    # Plot 3: Pupil diameter (if available)
+    # Plot 3: Treadmill Speed aligned to reward delivery events
+    n_speed_event = speed_event_windows_padded.shape[0]
+    axs[2].plot(aligned_time_speed_event, mean_speed_event, color='purple', label=f'Mean Speed (n={n_speed_event})')
+    axs[2].fill_between(aligned_time_speed_event, mean_speed_event - sem_speed_event,
+                        mean_speed_event + sem_speed_event, color='purple', alpha=0.2, label='SEM')
+    axs[2].axvline(0, color='red', linestyle='--', label='Reward Delivery (t=0)')
+    axs[2].set_ylabel('Treadmill Speed (cm/s)')
+    axs[2].set_title('Treadmill Speed Aligned to Reward Delivery')
+    axs[2].legend()
+    axs[2].set_xlim(-5, 5)
+    axs[2].set_ylim(bottom=0)
+    axs[2].spines['top'].set_visible(False)
+    axs[2].spines['right'].set_visible(False)
+    
+    # Plot 4: Pupil diameter (if available)
     if pupil_time is not None:
         # Pupil aligned to zone entry
         pupil_zone_windows = []
@@ -1321,20 +1352,20 @@ def plot_average_traces_reward(reward_zone_trials, trial_log_df, cap_time, cap_v
         save_figure(fig_pupil, "pupil_diameter_reward_combined", output_folder)
         plt.show()
     else:
-        axs[1].set_xlabel('Time from Reward Event (s)')
+        axs[2].set_xlabel('Time from Reward Delivery (s)')
     
     # Set x-axis formatting for main figure
     for ax in axs:
         ax.set_xticks(np.arange(-5, 6, 1))
     
-    if num_plots == 2:
+    if num_plots == 3:
         axs[-1].set_xlabel('Time (s)')
     
     plt.tight_layout()
     save_figure(fig, "reward_zone_analysis_capacitive_treadmill", output_folder)
     plt.show()
     
-    print(f"Average trace plots created: {n_rewards_speed} zone entries, {n_rewards_event} reward events")
+    print(f"Average trace plots created: {n_rewards_speed} zone entries, {n_rewards_event} reward events, {n_speed_event} speed-delivery epochs")
 
 
 def plot_average_traces_puff(puff_zone_trials, trial_log_df, cap_time, cap_val,
@@ -1456,7 +1487,7 @@ def plot_average_traces_puff(puff_zone_trials, trial_log_df, cap_time, cap_val,
     axs[0].set_title(f'Average Treadmill Speed Aligned to Puff Zone Entry Times (n={n_puff_events})')
     axs[0].legend()
     axs[0].set_xlim(-5, 5)
-    axs[0].set_ylim(bottom=0)
+    axs[0].set_ylim(bottom= 0)
     axs[0].spines['top'].set_visible(False)
     axs[0].spines['right'].set_visible(False)
     
@@ -2141,19 +2172,32 @@ def test_speed_bimodality_hits_vs_misses(reward_zone_trials, cap_time, cap_val, 
     fast_cluster_speeds_diag = all_speeds[cluster_labels == fast_cluster]
     
     print(f"\nCluster speed ranges (DIAGNOSTIC):")
-    print(f"  Slow cluster: {np.min(slow_cluster_speeds_diag):.2f} - {np.max(slow_cluster_speeds_diag):.2f} cm/s")
-    print(f"  Fast cluster: {np.min(fast_cluster_speeds_diag):.2f} - {np.max(fast_cluster_speeds_diag):.2f} cm/s")
-    print(f"  Overlap range: {max(np.min(slow_cluster_speeds_diag), np.min(fast_cluster_speeds_diag)):.2f} - "
-          f"{min(np.max(slow_cluster_speeds_diag), np.max(fast_cluster_speeds_diag)):.2f} cm/s")
+    if len(slow_cluster_speeds_diag) > 0:
+        print(f"  Slow cluster: {np.min(slow_cluster_speeds_diag):.2f} - {np.max(slow_cluster_speeds_diag):.2f} cm/s")
+    else:
+        print(f"  Slow cluster: (empty)")
+    if len(fast_cluster_speeds_diag) > 0:
+        print(f"  Fast cluster: {np.min(fast_cluster_speeds_diag):.2f} - {np.max(fast_cluster_speeds_diag):.2f} cm/s")
+    else:
+        print(f"  Fast cluster: (empty)")
+    if len(slow_cluster_speeds_diag) > 0 and len(fast_cluster_speeds_diag) > 0:
+        print(f"  Overlap range: {max(np.min(slow_cluster_speeds_diag), np.min(fast_cluster_speeds_diag)):.2f} - "
+              f"{min(np.max(slow_cluster_speeds_diag), np.max(fast_cluster_speeds_diag)):.2f} cm/s")
     
     # Show percentiles
     print(f"\nCluster percentiles:")
-    print(f"  Slow cluster: 25th={np.percentile(slow_cluster_speeds_diag, 25):.2f}, "
-          f"50th={np.percentile(slow_cluster_speeds_diag, 50):.2f}, "
-          f"75th={np.percentile(slow_cluster_speeds_diag, 75):.2f}")
-    print(f"  Fast cluster: 25th={np.percentile(fast_cluster_speeds_diag, 25):.2f}, "
-          f"50th={np.percentile(fast_cluster_speeds_diag, 50):.2f}, "
-          f"75th={np.percentile(fast_cluster_speeds_diag, 75):.2f}")
+    if len(slow_cluster_speeds_diag) > 0:
+        print(f"  Slow cluster: 25th={np.percentile(slow_cluster_speeds_diag, 25):.2f}, "
+              f"50th={np.percentile(slow_cluster_speeds_diag, 50):.2f}, "
+              f"75th={np.percentile(slow_cluster_speeds_diag, 75):.2f}")
+    else:
+        print(f"  Slow cluster: (empty)")
+    if len(fast_cluster_speeds_diag) > 0:
+        print(f"  Fast cluster: 25th={np.percentile(fast_cluster_speeds_diag, 25):.2f}, "
+              f"50th={np.percentile(fast_cluster_speeds_diag, 50):.2f}, "
+              f"75th={np.percentile(fast_cluster_speeds_diag, 75):.2f}")
+    else:
+        print(f"  Fast cluster: (empty)")
     
     # ========================================================================
     # TEST 3: CLUSTER PURITY ANALYSIS
@@ -2982,19 +3026,24 @@ def analyze_simulated_probe_events(trial_log_df, probe_revert_array, all_revert_
         print("Warning: No valid data windows for simulated probe analysis.")
         return
     
-    # Pad segments
-    max_sim_len = max(len(seg) for seg in cap_sim_windows)
-    cap_sim_windows_padded = np.array([
-        np.pad(seg.astype(float), (0, max_sim_len - len(seg)), constant_values=np.nan)
-        for seg in cap_sim_windows
-    ])
-    
     # --- Treadmill Speed aligned to simulated probes ---
     speed_sim_windows = []
     for sim_probe_time in simulated_probe_times:
         mask = (speed_time >= sim_probe_time - window) & (speed_time <= sim_probe_time + window)
         speed_segment = speed_val[mask]
         speed_sim_windows.append(speed_segment)
+    
+    # Calculate max length across BOTH capacitive and speed segments
+    max_sim_len = max(
+        max(len(seg) for seg in cap_sim_windows),
+        max(len(seg) for seg in speed_sim_windows) if speed_sim_windows else 0
+    )
+    
+    # Pad segments to same length
+    cap_sim_windows_padded = np.array([
+        np.pad(seg.astype(float), (0, max_sim_len - len(seg)), constant_values=np.nan)
+        for seg in cap_sim_windows
+    ])
     
     speed_sim_windows_padded = np.array([
         np.pad(seg.astype(float), (0, max_sim_len - len(seg)), constant_values=np.nan)
