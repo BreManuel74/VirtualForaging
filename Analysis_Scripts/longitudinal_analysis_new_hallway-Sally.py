@@ -106,7 +106,7 @@ SESSION_CACHE_DIR = os.path.join(script_dir, '.session_cache')
 if not os.path.exists(SESSION_CACHE_DIR):
     os.makedirs(SESSION_CACHE_DIR)
 
-_SESSION_CACHE_VERSION = 7  # bump this to invalidate all cached sessions after code changes
+_SESSION_CACHE_VERSION = 10  # bump this to invalidate all cached sessions after code changes
 
 # ── Levels-analysis treadmill/lick cache (separate from main session cache) ───
 _LEVELS_SESS_CACHE_DIR = os.path.join(SESSION_CACHE_DIR, 'levels')
@@ -900,6 +900,168 @@ def _filter_event_times_by_gaps(event_times, gap_info, window_s=EPOCH_WINDOW_S):
     ]
 
 
+# ── Shuffle Z-score helpers ──────────────────────────────────────────────────
+
+def _compute_post_entry_slowing_zscores(
+    speed_epoch_session_means,
+    speed_epoch_session_indices,
+    n_sessions: int,
+    n_shuffles: int = 200,
+    post_window: tuple = (0.5, 2.5),
+    seed: int = 42,
+) -> 'np.ndarray':
+    """Compute per-session post-entry slowing Z-score from session-mean speed epoch traces.
+
+    For each session's mean epoch trace (±EPOCH_WINDOW_S around reward zone entry),
+    the real post-entry window mean is compared to a null distribution built by
+    circularly shifting the trace by random offsets.  Circular shift preserves the
+    overall speed distribution and temporal autocorrelation of the epoch while
+    breaking the alignment to zone entry.
+
+    Parameters
+    ----------
+    speed_epoch_session_means : np.ndarray, shape (n_with_data, n_timebins)
+    speed_epoch_session_indices : np.ndarray, shape (n_with_data,) — 0-based session indices
+    n_sessions : total number of sessions in results_df for this mouse
+    n_shuffles : number of circular-shift permutations per session
+    post_window : (t_start, t_end) in seconds — window to measure post-entry speed
+    seed : random seed for reproducibility
+
+    Returns
+    -------
+    z_arr : np.ndarray, shape (n_sessions,)
+        Negative Z → post-entry speed is LOWER than the shuffle null (slowing inside zone).
+        Positive Z → post-entry speed is HIGHER than the shuffle null (faster than chance).
+        NaN for sessions without speed epoch data.
+    """
+    z_arr = np.full(n_sessions, np.nan)
+    if speed_epoch_session_means is None or len(speed_epoch_session_means) == 0:
+        return z_arr
+
+    post_mask = (
+        (EPOCH_CANONICAL_TIME >= post_window[0]) &
+        (EPOCH_CANONICAL_TIME <= post_window[1])
+    )
+    if not np.any(post_mask):
+        return z_arr
+
+    rng = np.random.default_rng(seed)
+    for i in range(len(speed_epoch_session_means)):
+        trace = speed_epoch_session_means[i]
+        valid = trace[~np.isnan(trace)]
+        if len(valid) < 2:
+            continue
+        real_post = np.nanmean(trace[post_mask])
+        if np.isnan(real_post):
+            continue
+        n_timebins = len(trace)
+        shifts = rng.integers(1, n_timebins, size=n_shuffles)
+        shuf_posts = np.array([
+            np.nanmean(np.roll(trace, int(s))[post_mask])
+            for s in shifts
+        ])
+        shuf_mean = float(np.nanmean(shuf_posts))
+        shuf_std  = float(np.nanstd(shuf_posts, ddof=1))
+        if shuf_std > 0:
+            # Standard Z-score: negative = real < null = slower than chance (slowing)
+            z = (real_post - shuf_mean) / shuf_std
+        else:
+            z = 0.0
+        sess_idx = (
+            int(speed_epoch_session_indices[i])
+            if speed_epoch_session_indices is not None
+            else i
+        )
+        if sess_idx < n_sessions:
+            z_arr[sess_idx] = z
+    return z_arr
+
+
+def _compute_true_zone_zscores(
+    treadmill_paths,
+    zone_periods_per_session,
+    session_indices_or_none,
+    n_sessions: int,
+    n_shuffles: int = 200,
+    seed: int = 42,
+) -> 'np.ndarray':
+    """Compute per-session slowing Z-score using true zone occupancy periods.
+
+    For each session the mean uniformly-resampled treadmill speed (cm/s) during
+    ALL actual zone windows is compared against a circular-shift null.
+    For reward zones the window end is clipped to the reward delivery time
+    (if one occurred) so that post-reward stopping/drinking is excluded.
+
+    Parameters
+    ----------
+    treadmill_paths : list of (str | None), length == len(zone_periods_per_session)
+        Raw treadmill CSV path for each session; None / non-file entries are skipped.
+    zone_periods_per_session : list of list-of-(entry, exit) tuples
+        Reward or punishment zone occupancy windows (seconds) for each session.
+    session_indices_or_none : None | list of int
+        None  → list position is the session index (one entry per session, same
+                order as results_df).
+        list  → explicit 0-based session index for each entry (legacy mapping).
+    n_sessions : int  total sessions for this mouse
+    n_shuffles, seed : shuffle parameters
+
+    Returns
+    -------
+    z_arr : np.ndarray, shape (n_sessions,)
+        Negative Z → speed inside zone is LOWER than shuffle null (slowing).
+        Positive Z → speed inside zone is HIGHER than shuffle null (faster than chance).
+        NaN for sessions without treadmill data or zone periods.
+    """
+    z_arr = np.full(n_sessions, np.nan)
+    if not treadmill_paths or not zone_periods_per_session:
+        return z_arr
+
+    rng = np.random.default_rng(seed)
+    for i, (tm_path, zone_periods) in enumerate(
+            zip(treadmill_paths, zone_periods_per_session)):
+        if not zone_periods:
+            continue
+        if not isinstance(tm_path, str) or not os.path.isfile(tm_path):
+            continue
+        try:
+            _tm = pd.read_csv(tm_path)
+            t_arr, sp_arr = uniformly_sample_treadmill(_tm)
+        except Exception:
+            continue
+        if len(sp_arr) < 2:
+            continue
+        # Build sample-level mask covering all zone occupancy windows
+        zone_mask = np.zeros(len(sp_arr), dtype=bool)
+        for entry, exit_ in zone_periods:
+            zone_mask |= (t_arr >= entry) & (t_arr <= exit_)
+        if not np.any(zone_mask):
+            continue
+        real_mean = float(np.nanmean(sp_arr[zone_mask]))
+        if np.isnan(real_mean):
+            continue
+        n_bins = len(sp_arr)
+        shifts = rng.integers(1, n_bins, size=n_shuffles)
+        shuf_means = np.array([
+            float(np.nanmean(np.roll(sp_arr, int(s))[zone_mask]))
+            for s in shifts
+        ])
+        shuf_mean = float(np.nanmean(shuf_means))
+        shuf_std  = float(np.nanstd(shuf_means, ddof=1))
+        if shuf_std > 0:
+            # Standard Z-score: negative = real < null = slower than chance (slowing)
+            z = (real_mean - shuf_mean) / shuf_std
+        else:
+            z = 0.0
+        sess_idx = (
+            int(session_indices_or_none[i])
+            if session_indices_or_none is not None
+            else i
+        )
+        if sess_idx < n_sessions:
+            z_arr[sess_idx] = z
+    return z_arr
+
+
 # ── RV-cohort helpers ─────────────────────────────────────────────────────────
 
 def _is_rv_cohort(mouse_name: str) -> bool:
@@ -989,6 +1151,7 @@ _ALL_PLOT_KEYS = {
     'avg_reward', 'sex_reward', 'avg_sex_speed',
     'distance', 'sex_distance', 'condition_distance',
     'condition_distance_bar', 'total_distance_bar',
+    'immobility_prop', 'level_immobility_prop',
     'condition_reward', 'condition_speed', 'condition_lick', 'condition_bar', 'condition_speed_bar',
     'condition_sensitivity', 'condition_sensitivity_bar',
     'levels', 'level_speed', 'level_speed_condition',
@@ -1011,6 +1174,12 @@ _ALL_PLOT_KEYS = {
     'lick_after_reward_prop', 'lick_after_reward_prop_bar',
     'epoch_delivery_speed_sess', 'epoch_delivery_cap_sess', 'epoch_delivery_lick_sess',
     'epoch_delivery_cap_diff_entry',
+    'condition_shuffle_zscore', 'condition_shuffle_zscore_bar',
+    'level_shuffle_zscore',
+    'condition_punish_shuffle_zscore', 'condition_punish_shuffle_zscore_bar',
+    'level_punish_shuffle_zscore', 'level_punish_shuffle_zscore_line',
+    'level_punish_shuffle_zscore_cond',
+    'level_shuffle_zscore_line', 'level_shuffle_zscore_cond',
     'epoch_reward_speed_sess_by_level', 'epoch_delivery_speed_sess_by_level',
     'epoch_reward_speed', 'epoch_reward_cap',
     'epoch_reward_speed_sess', 'epoch_reward_cap_sess',
@@ -1081,6 +1250,8 @@ _PLOT_LABELS = [
     ('sex_reward',          'Aggregate: Sex-specific average reward rate'),
     ('avg_sex_speed',      'Aggregate: Sex-specific average speed'),
     ('distance',            'Individual: Total distance per session (m)'),
+    ('immobility_prop',     'Individual: Proportion of session time immobile (raw speed = 0 cm/s for ≥ 2 s)'),
+    ('level_immobility_prop', 'Level: Immobility proportion by level — individual mice (requires transitions CSV)'),
     ('bout_count',               'Individual: Locomotion bout count per session'),
     ('avg_bout_count',           'Aggregate: Average bout count across all mice'),
     ('condition_bout_count',     'Condition: Bout count over time by condition'),
@@ -1099,6 +1270,17 @@ _PLOT_LABELS = [
     ('epoch_delivery_cap_sess',   'Epoch: Capacitive value (z-score) — session-averaged, aligned to reward DELIVERY time (gap-excluded; per-mouse + condition)'),
     ('epoch_delivery_lick_sess',  'Epoch: Lick count — session-averaged, aligned to reward DELIVERY time (gap-excluded; per-mouse + condition)'),
     ('epoch_delivery_cap_diff_entry', 'Epoch: Capacitive (z-scored) — post-minus-pre reward delivery difference bar chart (1 s windows), by condition (Mann-Whitney U)'),
+    ('condition_shuffle_zscore',     'Shuffle: Zone speed Z-score (reward zone) — line plot over sessions by condition (circular-shift permutation; −ve = slower than chance inside zone)'),
+    ('condition_shuffle_zscore_bar', 'Shuffle: Zone speed Z-score (reward zone) — collapsed bar chart, one avg per mouse by condition (Mann-Whitney U)'),
+    ('level_shuffle_zscore',         'Shuffle: Zone speed Z-score (reward zone) by level — grouped bar chart by condition (requires transitions CSV)'),
+    ('condition_punish_shuffle_zscore',     'Shuffle: Zone speed Z-score (punishment zone) — line plot over sessions by condition (circular-shift permutation; −ve = slower than chance inside zone)'),
+    ('condition_punish_shuffle_zscore_bar', 'Shuffle: Zone speed Z-score (punishment zone) — collapsed bar chart, one avg per mouse by condition (Mann-Whitney U)'),
+    ('level_punish_shuffle_zscore',         'Shuffle: Zone speed Z-score (punishment zone) by level — grouped bar chart by condition (requires transitions CSV)'),
+    ('level_shuffle_zscore_line',           'Shuffle: Zone speed Z-score (reward zone) by level — individual mouse line plot, colored by condition (requires transitions CSV)'),
+    ('level_shuffle_zscore_cond',           'Shuffle: Zone speed Z-score (reward zone) by level — condition mean ± SEM line plot (requires transitions CSV)'),
+    ('level_punish_shuffle_zscore_line',    'Shuffle: Zone speed Z-score (punishment zone) by level — individual mouse line plot, colored by condition (requires transitions CSV)'),
+    ('level_punish_shuffle_zscore_cond',    'Shuffle: Zone speed Z-score (punishment zone) by level — condition mean ± SEM line plot (requires transitions CSV)'),
+
     ('epoch_reward_speed_sess_by_level',    'Epoch: Treadmill speed — session-averaged, aligned to reward zone entry, one panel per level (by condition, only mice at each level)'),
     ('epoch_delivery_speed_sess_by_level',  'Epoch: Treadmill speed — session-averaged, aligned to reward DELIVERY, one panel per level (by condition, only mice at each level)'),
     ('sex_distance',        'Aggregate: Sex-specific average distance per session (m)'),
@@ -3671,6 +3853,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     specificity_fig       = plt.figure(figsize=(12, 6)) if 'specificity'        in selected_plots else None
     dprime_fig            = plt.figure(figsize=(12, 6)) if 'dprime'             in selected_plots else None
     distance_fig          = plt.figure(figsize=(plt.rcParams['figure.figsize'])) if 'distance'           in selected_plots else None
+    immobility_prop_fig   = plt.figure(figsize=(12, 6))                          if 'immobility_prop'    in selected_plots else None
     bout_count_fig        = plt.figure(figsize=(12, 6)) if 'bout_count'         in selected_plots else None
     avg_bout_count_fig    = plt.figure(figsize=(12, 6)) if 'avg_bout_count'     in selected_plots else None
     rewards_per_bout_fig  = plt.figure(figsize=(12, 6)) if 'rewards_per_bout'   in selected_plots else None
@@ -3744,6 +3927,10 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         delivery_lick_epoch_session_means_all  = []  # per-session mean lick trace aligned to reward delivery
         avg_lick_latency_list                  = []  # per-session avg first-lick latency after reward delivery (s)
         lick_after_reward_prop_list            = []  # per-session proportion of reward deliveries with ≥1 lick in 2 s post-delivery window
+        immobility_prop_list                   = []  # per-session proportion of session time spent immobile (raw speed = 0 cm/s for ≥ 2 s)
+        _treadmill_paths_all                   = []  # treadmill file path per session (or None)
+        _reward_zone_periods_all               = []  # list of (entry, exit) pairs per session (reward zones)
+        _punish_zone_periods_all               = []  # list of (entry, exit) pairs per session (punish zones)
 
         # Process each date's data
         for _sess_idx, (timestamp, row) in enumerate(df.iterrows()):
@@ -3801,6 +3988,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     dprime                  = _c['dprime']
                     _first_lick_lat         = _c['first_lick_lat']
                     _lick_after_rew_prop    = _c['lick_after_rew_prop']
+                    immobility_prop         = _c.get('immobility_prop', float('nan'))
 
                     # Accumulate punishment zone percentage deltas
                     _mouse_punish_count      += _c.get('punish_count_delta', 0)
@@ -3827,6 +4015,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     dprimes_list.append(dprime)
                     avg_lick_latency_list.append(_first_lick_lat)
                     lick_after_reward_prop_list.append(_lick_after_rew_prop)
+                    immobility_prop_list.append(immobility_prop)
 
                     # Restore epoch matrices and append to accumulator lists
                     _sp_mat_c = _c.get('sp_epoch_mat')
@@ -3886,6 +4075,11 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     if _dlk_mean_c is not None:
                         delivery_lick_epoch_session_means_all.append(_dlk_mean_c)
 
+                    # Zone periods for true-zone shuffle Z-score
+                    _treadmill_paths_all.append(row.get('treadmill') or None)
+                    _reward_zone_periods_all.append(_c.get('reward_zone_periods', []))
+                    _punish_zone_periods_all.append(_c.get('punish_zone_periods', []))
+
                     continue  # skip all normal processing for this session
                 # ── End cache HIT ─────────────────────────────────────────────────
 
@@ -3944,6 +4138,24 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     # Bout detection on filtered speed (mm/s → cm/s)
                     _time_arr = treadmill_data['global_time'].values
                     _speed_cm = _speed_filt / 10.0
+                    # Immobility: raw speed == 0 cm/s for ≥ 2 continuous seconds
+                    _speed_raw_cm = np.asarray(_speed_raw, dtype=float) / 10.0
+                    _immo_mask = _speed_raw_cm <= 0.0
+                    _sess_dur_s = (float(_time_arr[-1] - _time_arr[0])
+                                   if len(_time_arr) > 1 else 0.0)
+                    _immo_total_s = 0.0
+                    if _sess_dur_s > 0 and np.any(_immo_mask):
+                        _pad_m = np.concatenate([[False], _immo_mask, [False]])
+                        _dm    = np.diff(_pad_m.astype(np.int8))
+                        _i_starts = np.where(_dm == 1)[0]
+                        _i_ends   = np.where(_dm == -1)[0]
+                        for _is_i, _ie_i in zip(_i_starts, _i_ends):
+                            _t0_im = _time_arr[_is_i]
+                            _t1_im = _time_arr[min(_ie_i, len(_time_arr) - 1)]
+                            if (_t1_im - _t0_im) >= 2.0:
+                                _immo_total_s += _t1_im - _t0_im
+                    immobility_prop = (float(_immo_total_s / _sess_dur_s)
+                                       if _sess_dur_s > 0 else float('nan'))
                     _bouts = detect_locomotion_bouts(_time_arr, _speed_cm)
                     _session_bouts = _bouts  # saved for rewards_per_bout computation below
                     bout_count = len(_bouts)
@@ -3974,6 +4186,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     bout_count = float('nan')
                     avg_speed_per_bout = float('nan')
                     avg_dist_per_bout  = float('nan')
+                    immobility_prop = float('nan')
                     _session_bouts = []
 
                 # ── Capacitive-derived metrics ────────────────────────────
@@ -4338,6 +4551,50 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                         _lick_after_rew_prop = float('nan')
                 lick_after_reward_prop_list.append(_lick_after_rew_prop)
 
+                # ── Zone periods for true-zone shuffle Z-score ────────────────────
+                _reward_periods_sess = []
+                _punish_periods_sess = []
+                if (trial_log is not None
+                        and 'texture_change_time' in trial_log.columns
+                        and 'texture_history' in trial_log.columns):
+                    _sess_end_t = (float(treadmill_data['global_time'].max())
+                                   if treadmill_data is not None else 0.0)
+                    _tz_entry = pd.to_numeric(
+                        trial_log['texture_change_time'], errors='coerce').values
+                    _revert_col = ('texture_revert'
+                                   if 'texture_revert' in trial_log.columns else None)
+                    _tz_exit = (pd.to_numeric(
+                                    trial_log[_revert_col], errors='coerce'
+                                ).fillna(_sess_end_t).values
+                                if _revert_col else
+                                np.full(len(trial_log), _sess_end_t))
+                    _tz_th = trial_log['texture_history'].fillna('').values
+                    # For reward zones: clip end to reward delivery time so that
+                    # post-reward stopping (drinking) is excluded from speed measurement.
+                    _rew_ev_col = ('reward_event' if 'reward_event' in trial_log.columns else None)
+                    _hits_ev_col = ('hits_event' if 'hits_event' in trial_log.columns else None)
+                    _tz_rew_ev = (pd.to_numeric(trial_log[_rew_ev_col], errors='coerce').values
+                                  if _rew_ev_col else np.full(len(trial_log), np.nan))
+                    _tz_hits_ev = (pd.to_numeric(trial_log[_hits_ev_col], errors='coerce').values
+                                   if _hits_ev_col else np.full(len(trial_log), np.nan))
+                    for _ze, _zx, _zth, _zre, _zhe in zip(
+                            _tz_entry, _tz_exit, _tz_th, _tz_rew_ev, _tz_hits_ev):
+                        if _ze is None or (isinstance(_ze, float) and np.isnan(_ze)):
+                            continue
+                        if _zth == 'assets/reward_mean100.jpg':
+                            # Use earliest reward delivery time as zone end, if present
+                            _rew_times = [t for t in (_zre, _zhe)
+                                          if t is not None and not (isinstance(t, float) and np.isnan(t))
+                                          and float(t) > float(_ze)]
+                            if _rew_times:
+                                _zx = min(float(_zx), min(float(t) for t in _rew_times))
+                            _reward_periods_sess.append((float(_ze), float(_zx)))
+                        elif _zth == 'assets/punish_mean100.jpg':
+                            _punish_periods_sess.append((float(_ze), float(_zx)))
+                _treadmill_paths_all.append(row.get('treadmill') or None)
+                _reward_zone_periods_all.append(_reward_periods_sess)
+                _punish_zone_periods_all.append(_punish_periods_sess)
+
                 dates.append(date)
                 speeds.append(avg_speed)
                 total_distances.append(total_distance)
@@ -4356,6 +4613,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                 correct_rejections_list.append(correct_rejection_count)
                 specificities_list.append(specificity)
                 dprimes_list.append(dprime)
+                immobility_prop_list.append(immobility_prop)
 
                 # ── Pre-sample continuous signals once (shared for both epoch blocks) ─
                 # Avoids reading and interpolating the same large arrays twice per session.
@@ -4550,6 +4808,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                         'dprime':                    dprime,
                         'first_lick_lat':            _first_lick_lat,
                         'lick_after_rew_prop':       _lick_after_rew_prop,
+                        'immobility_prop':           immobility_prop,
                         'punish_count_delta':        _sess_punish_count_delta,
                         'total_zone_count_delta':    _sess_total_zone_count_delta,
                         'sp_epoch_mat':              _cache_sp_mat,
@@ -4561,6 +4820,8 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                         'delivery_sp_epoch_mean':    _cache_dsp_mean,
                         'delivery_cp_epoch_mean':    _cache_dcp_mean,
                         'delivery_lk_epoch_mean':    _cache_dlk_mean,
+                        'reward_zone_periods':        _reward_periods_sess,
+                        'punish_zone_periods':        _punish_periods_sess,
                     })
                 except Exception as _cache_err:
                     print(f"  [WARN] {date_str}: session cache save failed — {_cache_err}")
@@ -4591,6 +4852,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             'avg_lick_latency': avg_lick_latency_list,
             'lick_after_reward_prop': lick_after_reward_prop_list,
             'hits_gap_aware': hits_gap_aware,
+            'immobility_prop': immobility_prop_list,
         })
         
         # Sort and remove duplicates
@@ -4702,6 +4964,9 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             'delivery_lick_epoch_session_means':  delivery_lick_epoch_session_means,
             'pct_punish_zones':                   _pct_punish_zones,
             'avg_lick_latency_list':              avg_lick_latency_list,
+            'treadmill_paths':                    _treadmill_paths_all,
+            'reward_zone_periods':                _reward_zone_periods_all,
+            'punish_zone_periods':                _punish_zone_periods_all,
         })
 
     # ── Date-aligned per-mouse plots ─────────────────────────────────────────
@@ -4778,6 +5043,14 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             dist_m = df_r['total_distance'] / 1000.0
             plt.plot(day_numbers, dist_m,
                 f'{markers[mouse_name]}-', color=condition_color, markersize=plt.rcParams['lines.markersize'], label='_no_legend')
+
+        if immobility_prop_fig is not None:
+            plt.figure(immobility_prop_fig.number)
+            _immo_vals = pd.to_numeric(df_r.get('immobility_prop', pd.Series(dtype=float)),
+                                       errors='coerce')
+            plt.plot(day_numbers, _immo_vals,
+                f'{markers[mouse_name]}-', color=condition_color,
+                markersize=plt.rcParams['lines.markersize'], label=mouse_name)
 
         if bout_count_fig is not None:
             plt.figure(bout_count_fig.number)
@@ -5055,6 +5328,25 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
         ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+
+    # Configure immobility proportion plot
+    if immobility_prop_fig is not None:
+        plt.figure(immobility_prop_fig.number)
+        plt.title('Immobility Proportion Over Time\n(raw speed = 0 cm/s for \u2265 2 s)')
+        plt.xlabel('Training Day')
+        plt.ylabel('Proportion of session time immobile')
+        plt.grid(False)
+        ax = plt.gca()
+        ax.tick_params(axis='both', direction='in')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.set_ylim(0, 1.0)
+        ax.set_xlim(left=0.5, right=max_day + 0.5)
+        ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
+        ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
+        ax.tick_params(axis='x', which='minor', direction='in')
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+        plt.legend(frameon=False, fontsize=plt.rcParams['legend.fontsize'])
 
     if bout_count_fig is not None:
         plt.figure(bout_count_fig.number)
@@ -10274,6 +10566,17 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     epoch_del_cap_per_mouse_fig   = epoch_del_cap_cond_fig   = None
     epoch_del_lick_per_mouse_fig  = epoch_del_lick_cond_fig  = None
     epoch_del_cap_diff_entry_fig  = None
+    condition_shuffle_zscore_fig     = None
+    condition_shuffle_zscore_bar_fig = None
+    level_shuffle_zscore_fig         = None
+    condition_punish_shuffle_zscore_fig     = None
+    condition_punish_shuffle_zscore_bar_fig = None
+    level_punish_shuffle_zscore_fig         = None
+    level_shuffle_zscore_line_fig           = None
+    level_shuffle_zscore_cond_fig           = None
+    level_punish_shuffle_zscore_line_fig    = None
+    level_punish_shuffle_zscore_cond_fig    = None
+    level_immobility_prop_fig               = None
     _epoch_keys = {'epoch_delivery_speed_sess', 'epoch_delivery_cap_sess', 'epoch_delivery_lick_sess',
                    'epoch_delivery_cap_diff_entry',
                    'epoch_reward_speed', 'epoch_reward_cap',
@@ -12201,6 +12504,986 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                 )
                 epoch_reward_speed_diff_entry_1s_fig.tight_layout()
 
+    # ── Shuffle Z-score: pre-entry slowing specificity (circular-shift permutation) ──
+    _shuf_plot_keys = {'condition_shuffle_zscore', 'condition_shuffle_zscore_bar',
+                       'level_shuffle_zscore', 'level_shuffle_zscore_line',
+                       'level_shuffle_zscore_cond'}
+    if _shuf_plot_keys & set(selected_plots):
+        # Compute per-session shuffle Z-scores using true zone occupancy periods
+        _any_shuf_data = False
+        for _r in all_results:
+            _r['_shuffle_zscores'] = _compute_true_zone_zscores(
+                _r.get('treadmill_paths', []),
+                _r.get('reward_zone_periods', []),
+                session_indices_or_none=None,
+                n_sessions=len(_r['df']),
+                n_shuffles=200,
+                seed=42,
+            )
+            if not np.all(np.isnan(_r['_shuffle_zscores'])):
+                _any_shuf_data = True
+        if not _any_shuf_data:
+            print("  [WARN] shuffle_zscore: no treadmill/zone data found — skipping shuffle plots")
+        else:
+            # ── Line plot: mean ± SEM Z-score per condition over training days ──
+            if 'condition_shuffle_zscore' in selected_plots:
+                condition_shuffle_zscore_fig = plt.figure(figsize=plt.rcParams['figure.figsize'])
+                _shuf_groups: dict = {}
+                for _r in all_results:
+                    _cond = _r['starting_condition']
+                    _zs   = _r['_shuffle_zscores']
+                    _arr  = np.full(max_sessions, np.nan)
+                    for _si in range(min(len(_zs), len(_r['df']), max_sessions)):
+                        if not np.isnan(_zs[_si]):
+                            _arr[_si] = _zs[_si]
+                    _shuf_groups.setdefault(_cond, []).append(_arr)
+
+                _day_nums_shuf = np.arange(1, max_sessions + 1)
+                for _cond, _arrays in _shuf_groups.items():
+                    _color   = condition_color_map.get(_cond, '#7f7f7f')
+                    _padded  = np.array(_arrays)
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _n_mice_shuf = np.sum(~np.isnan(_padded), axis=0)
+                        _mean_shuf   = np.where(_n_mice_shuf > 0, np.nanmean(_padded, axis=0), np.nan)
+                        _sem_shuf    = np.where(
+                            _n_mice_shuf > 1,
+                            np.nanstd(_padded, axis=0) / np.sqrt(_n_mice_shuf),
+                            0,
+                        )
+                    plt.figure(condition_shuffle_zscore_fig.number)
+                    plt.plot(_day_nums_shuf, _mean_shuf, '-', color=_color,
+                             linewidth=plt.rcParams['lines.linewidth'],
+                             label=f'{_cond} (n={len(_arrays)})')
+                    plt.fill_between(_day_nums_shuf,
+                                     _mean_shuf - _sem_shuf,
+                                     _mean_shuf + _sem_shuf,
+                                     color=_color, alpha=0.2)
+
+                plt.figure(condition_shuffle_zscore_fig.number)
+                plt.axhline(0, color='gray', linestyle='--', linewidth=0.8, zorder=1)
+                plt.title('Zone Speed Z-Score by Condition (Reward Zone)')
+                plt.xlabel('Training Day')
+                plt.ylabel('Zone Speed Z-Score (mean \u00b1 SEM)\n(negative = slower than chance; positive = faster)')
+                _ax_shuf_line = plt.gca()
+                _ax_shuf_line.tick_params(axis='both', direction='in')
+                _ax_shuf_line.spines['top'].set_visible(False)
+                _ax_shuf_line.spines['right'].set_visible(False)
+                _ax_shuf_line.set_xlim(left=1, right=max_days + 0.5)
+                _ax_shuf_line.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
+                _ax_shuf_line.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
+                _ax_shuf_line.tick_params(axis='x', which='minor', direction='in')
+                _ax_shuf_line.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+                plt.legend(frameon=False)
+                condition_shuffle_zscore_fig.tight_layout()
+
+            # ── Bar chart: per-mouse mean Z-score collapsed by condition (Mann-Whitney U) ──
+            if 'condition_shuffle_zscore_bar' in selected_plots:
+                _shuf_bar_data: dict = {}
+                for _r in all_results:
+                    _cond = _r['starting_condition']
+                    _zs   = _r['_shuffle_zscores']
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _mouse_z_mean = float(np.nanmean(_zs))
+                    if not np.isnan(_mouse_z_mean):
+                        _shuf_bar_data.setdefault(_cond, []).append((_r['mouse'], _mouse_z_mean))
+
+                if _shuf_bar_data:
+                    _shuf_conds_bar = sorted(_shuf_bar_data.keys())
+                    _n_shuf_conds_b = len(_shuf_conds_bar)
+                    condition_shuffle_zscore_bar_fig, _ax_szbar = plt.subplots(
+                        figsize=plt.rcParams.get('figure.figsize', (3.0, 2.5)))
+                    _rng_szbar    = np.random.default_rng(seed=42)
+                    _all_szbar_v  = []
+                    for _ci, _cond in enumerate(_shuf_conds_bar):
+                        _color_szb   = condition_color_map.get(_cond, '#7f7f7f')
+                        _entries_szb = _shuf_bar_data[_cond]
+                        _n_szb       = len(_entries_szb)
+                        _zvals_szb   = [e[1] for e in _entries_szb]
+                        with warnings.catch_warnings():
+                            warnings.simplefilter('ignore', RuntimeWarning)
+                            _mn_szb  = float(np.nanmean(_zvals_szb))
+                            _sem_szb = (float(np.nanstd(_zvals_szb, ddof=1) / np.sqrt(_n_szb))
+                                        if _n_szb > 1 else 0.0)
+                        _all_szbar_v.extend(_zvals_szb + [_mn_szb + _sem_szb, _mn_szb - _sem_szb])
+                        _ax_szbar.bar(_ci, _mn_szb, width=0.5, color=_color_szb, alpha=0.7,
+                                      yerr=_sem_szb, capsize=7,
+                                      error_kw={'elinewidth': 1.5, 'capthick': 1.5})
+                        _jitter_szb = (_rng_szbar.random(_n_szb) - 0.5) * 0.22
+                        for _j, (_mname_szb, _zv_szb) in enumerate(_entries_szb):
+                            _ax_szbar.plot(_ci + _jitter_szb[_j], _zv_szb, 'o',
+                                           color='white', markeredgecolor=_color_szb,
+                                           markeredgewidth=plt.rcParams['lines.linewidth'],
+                                           markersize=plt.rcParams['lines.markersize'], zorder=3)
+                    _ax_szbar.axhline(0, color='black', linestyle='--', linewidth=0.8, zorder=1)
+                    _ax_szbar.set_xticks(np.arange(_n_shuf_conds_b))
+                    _ax_szbar.set_xticklabels(_shuf_conds_bar)
+                    _ax_szbar.set_xlabel('Starting Condition')
+                    _ax_szbar.set_ylabel('Zone Speed Z-Score\n(mean \u00b1 SEM)')
+                    if _all_szbar_v:
+                        _ymax_szb = float(np.nanmax(_all_szbar_v))
+                        _ymin_szb = float(np.nanmin(_all_szbar_v))
+                        _pad_szb  = max(abs(_ymax_szb), abs(_ymin_szb)) * 0.12 or 0.1
+                        _ax_szbar.set_ylim(_ymin_szb - _pad_szb, _ymax_szb + _pad_szb)
+                    _ax_szbar.tick_params(axis='both', direction='in')
+                    _ax_szbar.spines['top'].set_visible(False)
+                    _ax_szbar.spines['right'].set_visible(False)
+
+                    # ── Mann-Whitney U pairwise brackets ─────────────────────────
+                    import itertools as _it_szbar
+                    _szbar_pairs = list(_it_szbar.combinations(range(_n_shuf_conds_b), 2))
+                    _ylim_szb = list(_ax_szbar.get_ylim())
+                    _step_szb = (_ylim_szb[1] - _ylim_szb[0]) * 0.14
+                    _base_szb = _ylim_szb[1]
+                    for _pi_szb, (_ia_szb, _ib_szb) in enumerate(_szbar_pairs):
+                        _va_szb = [e[1] for e in _shuf_bar_data[_shuf_conds_bar[_ia_szb]]]
+                        _vb_szb = [e[1] for e in _shuf_bar_data[_shuf_conds_bar[_ib_szb]]]
+                        if len(_va_szb) < 2 or len(_vb_szb) < 2:
+                            continue
+                        _u_szb, _p_szb = mannwhitneyu(_va_szb, _vb_szb, alternative='two-sided')
+                        print(f'  [SHUFFLE Z-SCORE] {_shuf_conds_bar[_ia_szb]} vs '
+                              f'{_shuf_conds_bar[_ib_szb]}: U={_u_szb:.1f}, p={_p_szb:.4f}')
+                        _sig_szb = (f'p = {_p_szb:.2e}***' if _p_szb < 0.001 else
+                                    f'p = {_p_szb:.3f}**'  if _p_szb < 0.01  else
+                                    f'p = {_p_szb:.3f}*'   if _p_szb < 0.05  else
+                                    f'p = {_p_szb:.3f} (ns)')
+                        _bh_szb = _base_szb + _step_szb * (_pi_szb + 0.6)
+                        _ax_szbar.plot([_ia_szb, _ia_szb, _ib_szb, _ib_szb],
+                                       [_bh_szb - _step_szb * 0.15, _bh_szb,
+                                        _bh_szb, _bh_szb - _step_szb * 0.15],
+                                       color='black')
+                        _ax_szbar.text((_ia_szb + _ib_szb) / 2, _bh_szb + _step_szb * 0.05,
+                                       _sig_szb, ha='center', va='bottom')
+                    if _szbar_pairs:
+                        _ax_szbar.set_ylim(_ylim_szb[0],
+                                           _base_szb + _step_szb * (len(_szbar_pairs) + 1.5))
+                    condition_shuffle_zscore_bar_fig.suptitle(
+                        'Zone Speed Specificity (Reward Zone) \u2014 Circular-Shift Permutation\n'
+                        'Mean Z-Score per Mouse by Condition (negative = slower than chance inside reward zone)',
+                    )
+                    condition_shuffle_zscore_bar_fig.tight_layout()
+
+            # ── Level bar chart: mean Z-score per level per condition ────────
+            if 'level_shuffle_zscore' in selected_plots and transitions_csv_path:
+                _lev_z_by_cond: dict = {}  # condition -> level -> [z_scores]
+                try:
+                    _tdf_shuf = pd.read_csv(transitions_csv_path)
+                    _tdf_shuf['date'] = pd.to_datetime(_tdf_shuf['date'])
+                    for _r in all_results:
+                        _mname_lsz = _r['mouse']
+                        _cond_lsz  = _r['starting_condition']
+                        _zs_lsz    = _r['_shuffle_zscores']
+                        _df_r_lsz  = _r['df']
+                        # Get transitions for this mouse
+                        _mt_lsz = _tdf_shuf[
+                            _tdf_shuf['animal_id'].str.strip().str.lower() ==
+                            _mname_lsz.strip().lower()
+                        ] if 'animal_id' in _tdf_shuf.columns else pd.DataFrame()
+                        if _mt_lsz.empty:
+                            continue
+                        # Build date -> last level mapping for this mouse
+                        _date_to_lev_lsz: dict = {}
+                        _grp_col = 'session_num' if 'session_num' in _mt_lsz.columns else 'date'
+                        for _sn_lsz, _sg_lsz in _mt_lsz.groupby(_grp_col):
+                            _sg_lsz = (_sg_lsz.sort_values('transition_ts')
+                                       if 'transition_ts' in _sg_lsz.columns else _sg_lsz)
+                            _last_lev_lsz = str(_sg_lsz.iloc[-1]['level']).replace('.json', '')
+                            _sess_dt_lsz  = pd.Timestamp(_sg_lsz.iloc[0]['date']).normalize()
+                            _date_to_lev_lsz[_sess_dt_lsz] = _last_lev_lsz
+                        # Assign each session's Z-score to its level
+                        for _si_lsz, _row_lsz in enumerate(_df_r_lsz.itertuples()):
+                            if _si_lsz >= len(_zs_lsz) or np.isnan(_zs_lsz[_si_lsz]):
+                                continue
+                            _sess_dt_k = pd.Timestamp(_row_lsz.date).normalize()
+                            _lev_lsz   = _date_to_lev_lsz.get(_sess_dt_k)
+                            if _lev_lsz is None:
+                                continue
+                            _lev_z_by_cond.setdefault(_cond_lsz, {}).setdefault(
+                                _lev_lsz, []).append(float(_zs_lsz[_si_lsz]))
+                except Exception as _lev_shuf_err:
+                    print(f'  [WARN] level_shuffle_zscore: failed to map sessions to levels '
+                          f'— {_lev_shuf_err}')
+                    _lev_z_by_cond = {}
+
+                if _lev_z_by_cond:
+                    def _lsk_shuf(n):
+                        parts = n.split('_')
+                        return int(parts[-1]) if parts[-1].isdigit() else 999
+                    _all_levs_shuf = sorted(
+                        {lv for cd in _lev_z_by_cond.values() for lv in cd},
+                        key=_lsk_shuf,
+                    )
+                    _shuf_conds_lev  = sorted(_lev_z_by_cond.keys())
+                    _n_levs_shuf     = len(_all_levs_shuf)
+                    _n_conds_lev_shuf = len(_shuf_conds_lev)
+                    _width_lev_shuf  = 0.8 / max(_n_conds_lev_shuf, 1)
+                    _x_lev_shuf      = np.arange(_n_levs_shuf)
+                    level_shuffle_zscore_fig, _ax_lsz = plt.subplots(
+                        figsize=(max(4.0, _n_levs_shuf * 0.9), 2.5))
+                    for _ci, _cond in enumerate(_shuf_conds_lev):
+                        _color_lsz = condition_color_map.get(_cond, '#7f7f7f')
+                        _offsets_lsz = (_x_lev_shuf +
+                                        (_ci - (_n_conds_lev_shuf - 1) / 2.0) * _width_lev_shuf)
+                        _means_lsz = []
+                        _sems_lsz  = []
+                        for _lv in _all_levs_shuf:
+                            _lvz = _lev_z_by_cond.get(_cond, {}).get(_lv, [])
+                            if _lvz:
+                                _means_lsz.append(float(np.nanmean(_lvz)))
+                                _sems_lsz.append(
+                                    float(np.nanstd(_lvz, ddof=1) / np.sqrt(len(_lvz)))
+                                    if len(_lvz) > 1 else 0.0
+                                )
+                            else:
+                                _means_lsz.append(np.nan)
+                                _sems_lsz.append(0.0)
+                        _ax_lsz.bar(_offsets_lsz, _means_lsz, width=_width_lev_shuf * 0.9,
+                                    color=_color_lsz, alpha=0.7,
+                                    yerr=_sems_lsz, capsize=5,
+                                    error_kw={'elinewidth': 1.5, 'capthick': 1.5},
+                                    label=_cond)
+                    _ax_lsz.axhline(0, color='black', linestyle='--', linewidth=0.8, zorder=1)
+                    _ax_lsz.set_xticks(_x_lev_shuf)
+                    _ax_lsz.set_xticklabels(_all_levs_shuf, rotation=30, ha='right')
+                    _ax_lsz.set_xlabel('Level')
+                    _ax_lsz.set_ylabel('Zone Speed Z-Score\n(mean \u00b1 SEM)')
+                    _ax_lsz.tick_params(axis='both', direction='in')
+                    _ax_lsz.spines['top'].set_visible(False)
+                    _ax_lsz.spines['right'].set_visible(False)
+                    _ax_lsz.legend(frameon=False)
+                    level_shuffle_zscore_fig.suptitle(
+                        'Zone Speed Z-Score by Level and Condition (Reward Zone)\n'
+                        '(circular-shift permutation; negative = slower than chance inside zone)',
+                    )
+                    level_shuffle_zscore_fig.tight_layout()
+
+            # ── Level line plot: per-mouse mean Z per level (reward zone) ────
+            if 'level_shuffle_zscore_line' in selected_plots and transitions_csv_path:
+                _lev_z_mouse_rw: dict = {}  # (mouse, level) -> [z_scores]
+                try:
+                    _tdf_shuf_ln = pd.read_csv(transitions_csv_path)
+                    _tdf_shuf_ln['date'] = pd.to_datetime(_tdf_shuf_ln['date'])
+                    for _r in all_results:
+                        _mname_lln = _r['mouse']
+                        _zs_lln    = _r['_shuffle_zscores']
+                        _df_r_lln  = _r['df']
+                        _mt_lln = (_tdf_shuf_ln[
+                            _tdf_shuf_ln['animal_id'].str.strip().str.lower() ==
+                            _mname_lln.strip().lower()
+                        ] if 'animal_id' in _tdf_shuf_ln.columns else pd.DataFrame())
+                        if _mt_lln.empty:
+                            continue
+                        _date_to_lev_lln: dict = {}
+                        _grp_col_lln = ('session_num' if 'session_num' in _mt_lln.columns
+                                        else 'date')
+                        for _sn_lln, _sg_lln in _mt_lln.groupby(_grp_col_lln):
+                            _sg_lln = (_sg_lln.sort_values('transition_ts')
+                                       if 'transition_ts' in _sg_lln.columns else _sg_lln)
+                            _last_lev_lln = str(_sg_lln.iloc[-1]['level']).replace('.json', '')
+                            _sess_dt_lln  = pd.Timestamp(_sg_lln.iloc[0]['date']).normalize()
+                            _date_to_lev_lln[_sess_dt_lln] = _last_lev_lln
+                        for _si_lln, _row_lln in enumerate(_df_r_lln.itertuples()):
+                            if _si_lln >= len(_zs_lln) or np.isnan(_zs_lln[_si_lln]):
+                                continue
+                            _sess_dt_k_lln = pd.Timestamp(_row_lln.date).normalize()
+                            _lev_lln = _date_to_lev_lln.get(_sess_dt_k_lln)
+                            if _lev_lln is None:
+                                continue
+                            _lev_z_mouse_rw.setdefault((_mname_lln, _lev_lln), []).append(
+                                float(_zs_lln[_si_lln]))
+                except Exception as _lln_err:
+                    print(f'  [WARN] level_shuffle_zscore_line: {_lln_err}')
+                    _lev_z_mouse_rw = {}
+
+                if _lev_z_mouse_rw:
+                    def _lsk_shuf_ln(n):
+                        parts = n.split('_')
+                        return int(parts[-1]) if parts[-1].isdigit() else 999
+                    _all_levs_shuf_ln = sorted(
+                        {lv for (_, lv) in _lev_z_mouse_rw}, key=_lsk_shuf_ln)
+                    _all_mice_shuf_ln = sorted({mn for (mn, _) in _lev_z_mouse_rw})
+                    level_shuffle_zscore_line_fig = plt.figure(
+                        figsize=plt.rcParams['figure.figsize'], constrained_layout=True)
+                    for _mname_ln in _all_mice_shuf_ln:
+                        _cond_ln  = next(
+                            (_r['starting_condition'] for _r in all_results
+                             if _r['mouse'] == _mname_ln), 'Unknown')
+                        _color_ln = condition_color_map.get(_cond_ln, '#7f7f7f')
+                        _x_ln, _y_ln = [], []
+                        for _lv_idx_ln, _lv_ln in enumerate(_all_levs_shuf_ln):
+                            _vals_ln = _lev_z_mouse_rw.get((_mname_ln, _lv_ln))
+                            if _vals_ln:
+                                with warnings.catch_warnings():
+                                    warnings.simplefilter('ignore', RuntimeWarning)
+                                    _y_ln.append(float(np.nanmean(_vals_ln)))
+                                _x_ln.append(_lv_idx_ln + 1)
+                        if _x_ln:
+                            plt.figure(level_shuffle_zscore_line_fig.number)
+                            plt.plot(_x_ln, _y_ln, '-o',
+                                     color=_color_ln,
+                                     linewidth=plt.rcParams['lines.linewidth'],
+                                     markersize=plt.rcParams['lines.markersize'],
+                                     label=_mname_ln)
+                    _ax_lln = plt.gca()
+                    _ax_lln.axhline(0, color='black', linestyle='--',
+                                    linewidth=0.8, zorder=1)
+                    _ax_lln.set_xticks(range(1, len(_all_levs_shuf_ln) + 1))
+                    _ax_lln.set_xticklabels(
+                        [lv.replace('level_', 'L').replace('.json', '')
+                         for lv in _all_levs_shuf_ln],
+                        rotation=45, ha='right',
+                    )
+                    _ax_lln.set_title(
+                        'Zone Speed Z-Score by Level \u2014 Individual Mice (Reward Zone)')
+                    _ax_lln.set_xlabel('Level')
+                    _ax_lln.set_ylabel(
+                        'Zone Speed Z-Score\n(negative = slower than chance inside zone)')
+                    _ax_lln.tick_params(axis='both', direction='in')
+                    _ax_lln.spines['top'].set_visible(False)
+                    _ax_lln.spines['right'].set_visible(False)
+                    plt.legend(frameon=False, fontsize=plt.rcParams['legend.fontsize'])
+
+            # ── Level condition line: mean ± SEM per condition (reward zone) ─
+            if 'level_shuffle_zscore_cond' in selected_plots and transitions_csv_path:
+                # Reuse _lev_z_mouse_rw if it was computed, otherwise rebuild
+                _lev_z_cond_rw: dict = {}  # condition -> level -> [per-mouse means]
+                _src_rw = _lev_z_mouse_rw if '_lev_z_mouse_rw' in dir() else {}
+                if not _src_rw:
+                    # rebuild from scratch using same CSV already loaded
+                    try:
+                        _tdf_scl = pd.read_csv(transitions_csv_path)
+                        _tdf_scl['date'] = pd.to_datetime(_tdf_scl['date'])
+                        for _r in all_results:
+                            _mn_scl = _r['mouse']
+                            _zs_scl = _r['_shuffle_zscores']
+                            _df_scl = _r['df']
+                            _mt_scl = (_tdf_scl[
+                                _tdf_scl['animal_id'].str.strip().str.lower() ==
+                                _mn_scl.strip().lower()
+                            ] if 'animal_id' in _tdf_scl.columns else pd.DataFrame())
+                            if _mt_scl.empty:
+                                continue
+                            _d2l_scl: dict = {}
+                            _gc_scl = ('session_num' if 'session_num' in _mt_scl.columns
+                                       else 'date')
+                            for _, _sg_scl in _mt_scl.groupby(_gc_scl):
+                                _sg_scl = (_sg_scl.sort_values('transition_ts')
+                                           if 'transition_ts' in _sg_scl.columns else _sg_scl)
+                                _d2l_scl[pd.Timestamp(_sg_scl.iloc[0]['date']).normalize()] = \
+                                    str(_sg_scl.iloc[-1]['level']).replace('.json', '')
+                            for _si_scl, _row_scl in enumerate(_df_scl.itertuples()):
+                                if _si_scl >= len(_zs_scl) or np.isnan(_zs_scl[_si_scl]):
+                                    continue
+                                _lv_scl = _d2l_scl.get(
+                                    pd.Timestamp(_row_scl.date).normalize())
+                                if _lv_scl:
+                                    _src_rw.setdefault((_mn_scl, _lv_scl), []).append(
+                                        float(_zs_scl[_si_scl]))
+                    except Exception as _scl_err:
+                        print(f'  [WARN] level_shuffle_zscore_cond: {_scl_err}')
+
+                # Aggregate per-mouse means then group by condition
+                for (_mn_scl2, _lv_scl2), _vals_scl in _src_rw.items():
+                    _cond_scl = next(
+                        (_r['starting_condition'] for _r in all_results
+                         if _r['mouse'] == _mn_scl2), None)
+                    if _cond_scl is None:
+                        continue
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _mm_scl = float(np.nanmean(_vals_scl))
+                    if not np.isnan(_mm_scl):
+                        _lev_z_cond_rw.setdefault(_cond_scl, {}).setdefault(
+                            _lv_scl2, []).append(_mm_scl)
+
+                if _lev_z_cond_rw:
+                    def _lsk_scl(n):
+                        parts = n.split('_')
+                        return int(parts[-1]) if parts[-1].isdigit() else 999
+                    _all_levs_scl = sorted(
+                        {lv for cd in _lev_z_cond_rw.values() for lv in cd},
+                        key=_lsk_scl)
+                    _conds_scl    = sorted(_lev_z_cond_rw.keys())
+                    level_shuffle_zscore_cond_fig = plt.figure(
+                        figsize=plt.rcParams['figure.figsize'], constrained_layout=True)
+                    for _cond_scl3 in _conds_scl:
+                        _color_scl = condition_color_map.get(_cond_scl3, '#7f7f7f')
+                        _x_scl, _mean_scl, _sem_scl = [], [], []
+                        for _lv_idx_scl, _lv_scl3 in enumerate(_all_levs_scl):
+                            _vals_c = _lev_z_cond_rw.get(_cond_scl3, {}).get(_lv_scl3, [])
+                            if _vals_c:
+                                with warnings.catch_warnings():
+                                    warnings.simplefilter('ignore', RuntimeWarning)
+                                    _mn_v = float(np.nanmean(_vals_c))
+                                    _se_v = (float(np.nanstd(_vals_c, ddof=1) /
+                                                   np.sqrt(len(_vals_c)))
+                                             if len(_vals_c) > 1 else 0.0)
+                                _x_scl.append(_lv_idx_scl + 1)
+                                _mean_scl.append(_mn_v)
+                                _sem_scl.append(_se_v)
+                        if _x_scl:
+                            _x_arr = np.array(_x_scl)
+                            _m_arr = np.array(_mean_scl)
+                            _s_arr = np.array(_sem_scl)
+                            plt.figure(level_shuffle_zscore_cond_fig.number)
+                            plt.plot(_x_arr, _m_arr, '-o',
+                                     color=_color_scl,
+                                     linewidth=plt.rcParams['lines.linewidth'],
+                                     markersize=plt.rcParams['lines.markersize'],
+                                     label=f'{_cond_scl3} (n={len(_lev_z_cond_rw[_cond_scl3].get(_all_levs_scl[0], _vals_c))})')
+                            plt.fill_between(_x_arr, _m_arr - _s_arr, _m_arr + _s_arr,
+                                             color=_color_scl, alpha=0.2)
+                    _ax_scl = plt.gca()
+                    _ax_scl.axhline(0, color='black', linestyle='--',
+                                    linewidth=0.8, zorder=1)
+                    _ax_scl.set_xticks(range(1, len(_all_levs_scl) + 1))
+                    _ax_scl.set_xticklabels(
+                        [lv.replace('level_', 'L').replace('.json', '')
+                         for lv in _all_levs_scl],
+                        rotation=45, ha='right',
+                    )
+                    _ax_scl.set_title(
+                        'Zone Speed Z-Score by Level \u2014 By Condition (Reward Zone)')
+                    _ax_scl.set_xlabel('Level')
+                    _ax_scl.set_ylabel(
+                        'Zone Speed Z-Score\n(mean \u00b1 SEM; negative = slower than chance)')
+                    _ax_scl.tick_params(axis='both', direction='in')
+                    _ax_scl.spines['top'].set_visible(False)
+                    _ax_scl.spines['right'].set_visible(False)
+                    plt.legend(frameon=False, fontsize=plt.rcParams['legend.fontsize'])
+
+    # ── Punishment zone: post-entry speed Z-score (circular-shift permutation) ──
+    _punish_shuf_plot_keys = {'condition_punish_shuffle_zscore',
+                              'condition_punish_shuffle_zscore_bar',
+                              'level_punish_shuffle_zscore',
+                              'level_punish_shuffle_zscore_line',
+                              'level_punish_shuffle_zscore_cond'}
+    if _punish_shuf_plot_keys & set(selected_plots):
+        _any_punish_shuf = False
+        for _r in all_results:
+            _r['_punish_shuffle_zscores'] = _compute_true_zone_zscores(
+                _r.get('treadmill_paths', []),
+                _r.get('punish_zone_periods', []),
+                session_indices_or_none=None,
+                n_sessions=len(_r['df']),
+                n_shuffles=200,
+                seed=42,
+            )
+            if not np.all(np.isnan(_r['_punish_shuffle_zscores'])):
+                _any_punish_shuf = True
+        if not _any_punish_shuf:
+            print("  [WARN] punish_shuffle_zscore: no punishment zone speed epoch data — skipping")
+        else:
+            # ── Line plot ──────────────────────────────────────────────────────
+            if 'condition_punish_shuffle_zscore' in selected_plots:
+                condition_punish_shuffle_zscore_fig = plt.figure(
+                    figsize=plt.rcParams['figure.figsize'])
+                _pshuf_groups: dict = {}
+                for _r in all_results:
+                    _cond = _r['starting_condition']
+                    _zs   = _r['_punish_shuffle_zscores']
+                    _arr  = np.full(max_sessions, np.nan)
+                    for _si in range(min(len(_zs), len(_r['df']), max_sessions)):
+                        if not np.isnan(_zs[_si]):
+                            _arr[_si] = _zs[_si]
+                    _pshuf_groups.setdefault(_cond, []).append(_arr)
+
+                _day_nums_pshuf = np.arange(1, max_sessions + 1)
+                for _cond, _arrays in _pshuf_groups.items():
+                    _color   = condition_color_map.get(_cond, '#7f7f7f')
+                    _padded  = np.array(_arrays)
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _n_mice_pshuf = np.sum(~np.isnan(_padded), axis=0)
+                        _mean_pshuf   = np.where(
+                            _n_mice_pshuf > 0, np.nanmean(_padded, axis=0), np.nan)
+                        _sem_pshuf    = np.where(
+                            _n_mice_pshuf > 1,
+                            np.nanstd(_padded, axis=0) / np.sqrt(_n_mice_pshuf),
+                            0,
+                        )
+                    plt.figure(condition_punish_shuffle_zscore_fig.number)
+                    plt.plot(_day_nums_pshuf, _mean_pshuf, '-', color=_color,
+                             linewidth=plt.rcParams['lines.linewidth'],
+                             label=f'{_cond} (n={len(_arrays)})')
+                    plt.fill_between(_day_nums_pshuf,
+                                     _mean_pshuf - _sem_pshuf,
+                                     _mean_pshuf + _sem_pshuf,
+                                     color=_color, alpha=0.2)
+
+                plt.figure(condition_punish_shuffle_zscore_fig.number)
+                plt.axhline(0, color='gray', linestyle='--', linewidth=0.8, zorder=1)
+                plt.title('Zone Speed Z-Score by Condition (Punishment Zone)')
+                plt.xlabel('Training Day')
+                plt.ylabel('Zone Speed Z-Score (mean \u00b1 SEM)\n(negative = slower than chance; positive = faster)')
+                _ax_pshuf_line = plt.gca()
+                _ax_pshuf_line.tick_params(axis='both', direction='in')
+                _ax_pshuf_line.spines['top'].set_visible(False)
+                _ax_pshuf_line.spines['right'].set_visible(False)
+                _ax_pshuf_line.set_xlim(left=1, right=max_days + 0.5)
+                _ax_pshuf_line.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
+                _ax_pshuf_line.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
+                _ax_pshuf_line.tick_params(axis='x', which='minor', direction='in')
+                _ax_pshuf_line.xaxis.set_major_formatter(
+                    plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+                plt.legend(frameon=False)
+                condition_punish_shuffle_zscore_fig.tight_layout()
+
+            # ── Bar chart ──────────────────────────────────────────────────────
+            if 'condition_punish_shuffle_zscore_bar' in selected_plots:
+                _pshuf_bar_data: dict = {}
+                for _r in all_results:
+                    _cond = _r['starting_condition']
+                    _zs   = _r['_punish_shuffle_zscores']
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _mouse_pz_mean = float(np.nanmean(_zs))
+                    if not np.isnan(_mouse_pz_mean):
+                        _pshuf_bar_data.setdefault(_cond, []).append(
+                            (_r['mouse'], _mouse_pz_mean))
+
+                if _pshuf_bar_data:
+                    _pshuf_conds_bar = sorted(_pshuf_bar_data.keys())
+                    _n_pshuf_conds_b = len(_pshuf_conds_bar)
+                    condition_punish_shuffle_zscore_bar_fig, _ax_pszbar = plt.subplots(
+                        figsize=plt.rcParams.get('figure.figsize', (3.0, 2.5)))
+                    _rng_pszbar   = np.random.default_rng(seed=42)
+                    _all_pszbar_v = []
+                    for _ci, _cond in enumerate(_pshuf_conds_bar):
+                        _color_pszb   = condition_color_map.get(_cond, '#7f7f7f')
+                        _entries_pszb = _pshuf_bar_data[_cond]
+                        _n_pszb       = len(_entries_pszb)
+                        _zvals_pszb   = [e[1] for e in _entries_pszb]
+                        with warnings.catch_warnings():
+                            warnings.simplefilter('ignore', RuntimeWarning)
+                            _mn_pszb  = float(np.nanmean(_zvals_pszb))
+                            _sem_pszb = (float(np.nanstd(_zvals_pszb, ddof=1) / np.sqrt(_n_pszb))
+                                         if _n_pszb > 1 else 0.0)
+                        _all_pszbar_v.extend(
+                            _zvals_pszb + [_mn_pszb + _sem_pszb, _mn_pszb - _sem_pszb])
+                        _ax_pszbar.bar(_ci, _mn_pszb, width=0.5, color=_color_pszb, alpha=0.7,
+                                       yerr=_sem_pszb, capsize=7,
+                                       error_kw={'elinewidth': 1.5, 'capthick': 1.5})
+                        _jitter_pszb = (_rng_pszbar.random(_n_pszb) - 0.5) * 0.22
+                        for _j, (_mname_pszb, _zv_pszb) in enumerate(_entries_pszb):
+                            _ax_pszbar.plot(_ci + _jitter_pszb[_j], _zv_pszb, 'o',
+                                            color='white', markeredgecolor=_color_pszb,
+                                            markeredgewidth=plt.rcParams['lines.linewidth'],
+                                            markersize=plt.rcParams['lines.markersize'], zorder=3)
+                    _ax_pszbar.axhline(0, color='black', linestyle='--', linewidth=0.8, zorder=1)
+                    _ax_pszbar.set_xticks(np.arange(_n_pshuf_conds_b))
+                    _ax_pszbar.set_xticklabels(_pshuf_conds_bar)
+                    _ax_pszbar.set_xlabel('Starting Condition')
+                    _ax_pszbar.set_ylabel(
+                        'Zone Speed Z-Score\n(mean \u00b1 SEM, punishment zone)')
+                    if _all_pszbar_v:
+                        _ymax_pszb = float(np.nanmax(_all_pszbar_v))
+                        _ymin_pszb = float(np.nanmin(_all_pszbar_v))
+                        _pad_pszb  = max(abs(_ymax_pszb), abs(_ymin_pszb)) * 0.12 or 0.1
+                        _ax_pszbar.set_ylim(_ymin_pszb - _pad_pszb, _ymax_pszb + _pad_pszb)
+                    _ax_pszbar.tick_params(axis='both', direction='in')
+                    _ax_pszbar.spines['top'].set_visible(False)
+                    _ax_pszbar.spines['right'].set_visible(False)
+
+                    import itertools as _it_pszbar
+                    _pszbar_pairs = list(_it_pszbar.combinations(range(_n_pshuf_conds_b), 2))
+                    _ylim_pszb = list(_ax_pszbar.get_ylim())
+                    _step_pszb = (_ylim_pszb[1] - _ylim_pszb[0]) * 0.14
+                    _base_pszb = _ylim_pszb[1]
+                    for _pi_pszb, (_ia_pszb, _ib_pszb) in enumerate(_pszbar_pairs):
+                        _va_pszb = [e[1] for e in _pshuf_bar_data[_pshuf_conds_bar[_ia_pszb]]]
+                        _vb_pszb = [e[1] for e in _pshuf_bar_data[_pshuf_conds_bar[_ib_pszb]]]
+                        if len(_va_pszb) < 2 or len(_vb_pszb) < 2:
+                            continue
+                        _u_pszb, _p_pszb = mannwhitneyu(
+                            _va_pszb, _vb_pszb, alternative='two-sided')
+                        print(f'  [PUNISH SHUFFLE Z] {_pshuf_conds_bar[_ia_pszb]} vs '
+                              f'{_pshuf_conds_bar[_ib_pszb]}: U={_u_pszb:.1f}, p={_p_pszb:.4f}')
+                        _sig_pszb = (f'p = {_p_pszb:.2e}***' if _p_pszb < 0.001 else
+                                     f'p = {_p_pszb:.3f}**'  if _p_pszb < 0.01  else
+                                     f'p = {_p_pszb:.3f}*'   if _p_pszb < 0.05  else
+                                     f'p = {_p_pszb:.3f} (ns)')
+                        _bh_pszb = _base_pszb + _step_pszb * (_pi_pszb + 0.6)
+                        _ax_pszbar.plot(
+                            [_ia_pszb, _ia_pszb, _ib_pszb, _ib_pszb],
+                            [_bh_pszb - _step_pszb * 0.15, _bh_pszb,
+                             _bh_pszb, _bh_pszb - _step_pszb * 0.15],
+                            color='black')
+                        _ax_pszbar.text(
+                            (_ia_pszb + _ib_pszb) / 2, _bh_pszb + _step_pszb * 0.05,
+                            _sig_pszb, ha='center', va='bottom')
+                    if _pszbar_pairs:
+                        _ax_pszbar.set_ylim(
+                            _ylim_pszb[0],
+                            _base_pszb + _step_pszb * (len(_pszbar_pairs) + 1.5))
+                    condition_punish_shuffle_zscore_bar_fig.suptitle(
+                        'Zone Speed Z-Score (Punishment Zone) \u2014 Circular-Shift Permutation\n'
+                        'Mean Z-Score per Mouse by Condition (negative = slower than chance inside zone)',
+                    )
+                    condition_punish_shuffle_zscore_bar_fig.tight_layout()
+
+            # ── Level bar chart ────────────────────────────────────────────────
+            if 'level_punish_shuffle_zscore' in selected_plots and transitions_csv_path:
+                _lev_pz_by_cond: dict = {}
+                try:
+                    _tdf_pshuf = pd.read_csv(transitions_csv_path)
+                    _tdf_pshuf['date'] = pd.to_datetime(_tdf_pshuf['date'])
+                    for _r in all_results:
+                        _mname_lpz = _r['mouse']
+                        _cond_lpz  = _r['starting_condition']
+                        _zs_lpz    = _r['_punish_shuffle_zscores']
+                        _df_r_lpz  = _r['df']
+                        _mt_lpz = (_tdf_pshuf[
+                            _tdf_pshuf['animal_id'].str.strip().str.lower() ==
+                            _mname_lpz.strip().lower()
+                        ] if 'animal_id' in _tdf_pshuf.columns else pd.DataFrame())
+                        if _mt_lpz.empty:
+                            continue
+                        _date_to_lev_lpz: dict = {}
+                        _grp_col_lpz = ('session_num' if 'session_num' in _mt_lpz.columns
+                                        else 'date')
+                        for _sn_lpz, _sg_lpz in _mt_lpz.groupby(_grp_col_lpz):
+                            _sg_lpz = (_sg_lpz.sort_values('transition_ts')
+                                       if 'transition_ts' in _sg_lpz.columns else _sg_lpz)
+                            _last_lev_lpz = str(_sg_lpz.iloc[-1]['level']).replace('.json', '')
+                            _sess_dt_lpz  = pd.Timestamp(_sg_lpz.iloc[0]['date']).normalize()
+                            _date_to_lev_lpz[_sess_dt_lpz] = _last_lev_lpz
+                        for _si_lpz, _row_lpz in enumerate(_df_r_lpz.itertuples()):
+                            if _si_lpz >= len(_zs_lpz) or np.isnan(_zs_lpz[_si_lpz]):
+                                continue
+                            _sess_dt_lpz_k = pd.Timestamp(_row_lpz.date).normalize()
+                            _lev_lpz = _date_to_lev_lpz.get(_sess_dt_lpz_k)
+                            if _lev_lpz is None:
+                                continue
+                            _lev_pz_by_cond.setdefault(_cond_lpz, {}).setdefault(
+                                _lev_lpz, []).append(float(_zs_lpz[_si_lpz]))
+                except Exception as _lpz_err:
+                    print(f'  [WARN] level_punish_shuffle_zscore: {_lpz_err}')
+                    _lev_pz_by_cond = {}
+
+                if _lev_pz_by_cond:
+                    def _lsk_pshuf(n):
+                        parts = n.split('_')
+                        return int(parts[-1]) if parts[-1].isdigit() else 999
+                    _all_levs_pshuf = sorted(
+                        {lv for cd in _lev_pz_by_cond.values() for lv in cd},
+                        key=_lsk_pshuf,
+                    )
+                    _pshuf_conds_lev  = sorted(_lev_pz_by_cond.keys())
+                    _n_levs_pshuf     = len(_all_levs_pshuf)
+                    _n_conds_lpz      = len(_pshuf_conds_lev)
+                    _width_lev_pshuf  = 0.8 / max(_n_conds_lpz, 1)
+                    _x_lev_pshuf      = np.arange(_n_levs_pshuf)
+                    level_punish_shuffle_zscore_fig, _ax_lpz = plt.subplots(
+                        figsize=(max(4.0, _n_levs_pshuf * 0.9), 2.5))
+                    for _ci, _cond in enumerate(_pshuf_conds_lev):
+                        _color_lpz   = condition_color_map.get(_cond, '#7f7f7f')
+                        _offsets_lpz = (_x_lev_pshuf +
+                                        (_ci - (_n_conds_lpz - 1) / 2.0) * _width_lev_pshuf)
+                        _means_lpz = []
+                        _sems_lpz  = []
+                        for _lv in _all_levs_pshuf:
+                            _lvz = _lev_pz_by_cond.get(_cond, {}).get(_lv, [])
+                            if _lvz:
+                                _means_lpz.append(float(np.nanmean(_lvz)))
+                                _sems_lpz.append(
+                                    float(np.nanstd(_lvz, ddof=1) / np.sqrt(len(_lvz)))
+                                    if len(_lvz) > 1 else 0.0
+                                )
+                            else:
+                                _means_lpz.append(np.nan)
+                                _sems_lpz.append(0.0)
+                        _ax_lpz.bar(_offsets_lpz, _means_lpz,
+                                    width=_width_lev_pshuf * 0.9,
+                                    color=_color_lpz, alpha=0.7,
+                                    yerr=_sems_lpz, capsize=5,
+                                    error_kw={'elinewidth': 1.5, 'capthick': 1.5},
+                                    label=_cond)
+                    _ax_lpz.axhline(0, color='black', linestyle='--', linewidth=0.8, zorder=1)
+                    _ax_lpz.set_xticks(_x_lev_pshuf)
+                    _ax_lpz.set_xticklabels(_all_levs_pshuf, rotation=30, ha='right')
+                    _ax_lpz.set_xlabel('Level')
+                    _ax_lpz.set_ylabel(
+                        'Post-Entry Speed Z-Score\n(mean \u00b1 SEM, punishment zone)')
+                    _ax_lpz.tick_params(axis='both', direction='in')
+                    _ax_lpz.spines['top'].set_visible(False)
+                    _ax_lpz.spines['right'].set_visible(False)
+                    _ax_lpz.legend(frameon=False)
+                    level_punish_shuffle_zscore_fig.suptitle(
+                        'Zone Speed Z-Score by Level and Condition (Punishment Zone)\n'
+                        '(circular-shift permutation; negative = slower than chance inside zone)',
+                    )
+                    level_punish_shuffle_zscore_fig.tight_layout()
+
+            # ── Level line plot: per-mouse mean Z per level (punishment zone) ─
+            if 'level_punish_shuffle_zscore_line' in selected_plots and transitions_csv_path:
+                _lev_z_mouse_pn: dict = {}  # (mouse, level) -> [z_scores]
+                try:
+                    _tdf_pshuf_ln = pd.read_csv(transitions_csv_path)
+                    _tdf_pshuf_ln['date'] = pd.to_datetime(_tdf_pshuf_ln['date'])
+                    for _r in all_results:
+                        _mname_pln = _r['mouse']
+                        _zs_pln    = _r['_punish_shuffle_zscores']
+                        _df_r_pln  = _r['df']
+                        _mt_pln = (_tdf_pshuf_ln[
+                            _tdf_pshuf_ln['animal_id'].str.strip().str.lower() ==
+                            _mname_pln.strip().lower()
+                        ] if 'animal_id' in _tdf_pshuf_ln.columns else pd.DataFrame())
+                        if _mt_pln.empty:
+                            continue
+                        _date_to_lev_pln: dict = {}
+                        _grp_col_pln = ('session_num' if 'session_num' in _mt_pln.columns
+                                        else 'date')
+                        for _sn_pln, _sg_pln in _mt_pln.groupby(_grp_col_pln):
+                            _sg_pln = (_sg_pln.sort_values('transition_ts')
+                                       if 'transition_ts' in _sg_pln.columns else _sg_pln)
+                            _last_lev_pln = str(_sg_pln.iloc[-1]['level']).replace('.json', '')
+                            _sess_dt_pln  = pd.Timestamp(_sg_pln.iloc[0]['date']).normalize()
+                            _date_to_lev_pln[_sess_dt_pln] = _last_lev_pln
+                        for _si_pln, _row_pln in enumerate(_df_r_pln.itertuples()):
+                            if _si_pln >= len(_zs_pln) or np.isnan(_zs_pln[_si_pln]):
+                                continue
+                            _sess_dt_k_pln = pd.Timestamp(_row_pln.date).normalize()
+                            _lev_pln = _date_to_lev_pln.get(_sess_dt_k_pln)
+                            if _lev_pln is None:
+                                continue
+                            _lev_z_mouse_pn.setdefault((_mname_pln, _lev_pln), []).append(
+                                float(_zs_pln[_si_pln]))
+                except Exception as _pln_err:
+                    print(f'  [WARN] level_punish_shuffle_zscore_line: {_pln_err}')
+                    _lev_z_mouse_pn = {}
+
+                if _lev_z_mouse_pn:
+                    def _lsk_pshuf_ln(n):
+                        parts = n.split('_')
+                        return int(parts[-1]) if parts[-1].isdigit() else 999
+                    _all_levs_pshuf_ln = sorted(
+                        {lv for (_, lv) in _lev_z_mouse_pn}, key=_lsk_pshuf_ln)
+                    _all_mice_pshuf_ln = sorted({mn for (mn, _) in _lev_z_mouse_pn})
+                    level_punish_shuffle_zscore_line_fig = plt.figure(
+                        figsize=plt.rcParams['figure.figsize'], constrained_layout=True)
+                    for _mname_pln2 in _all_mice_pshuf_ln:
+                        _cond_pln2  = next(
+                            (_r['starting_condition'] for _r in all_results
+                             if _r['mouse'] == _mname_pln2), 'Unknown')
+                        _color_pln2 = condition_color_map.get(_cond_pln2, '#7f7f7f')
+                        _x_pln, _y_pln = [], []
+                        for _lv_idx_pln, _lv_pln2 in enumerate(_all_levs_pshuf_ln):
+                            _vals_pln = _lev_z_mouse_pn.get((_mname_pln2, _lv_pln2))
+                            if _vals_pln:
+                                with warnings.catch_warnings():
+                                    warnings.simplefilter('ignore', RuntimeWarning)
+                                    _y_pln.append(float(np.nanmean(_vals_pln)))
+                                _x_pln.append(_lv_idx_pln + 1)
+                        if _x_pln:
+                            plt.figure(level_punish_shuffle_zscore_line_fig.number)
+                            plt.plot(_x_pln, _y_pln, '-o',
+                                     color=_color_pln2,
+                                     linewidth=plt.rcParams['lines.linewidth'],
+                                     markersize=plt.rcParams['lines.markersize'],
+                                     label=_mname_pln2)
+                    _ax_pln = plt.gca()
+                    _ax_pln.axhline(0, color='black', linestyle='--',
+                                    linewidth=0.8, zorder=1)
+                    _ax_pln.set_xticks(range(1, len(_all_levs_pshuf_ln) + 1))
+                    _ax_pln.set_xticklabels(
+                        [lv.replace('level_', 'L').replace('.json', '')
+                         for lv in _all_levs_pshuf_ln],
+                        rotation=45, ha='right',
+                    )
+                    _ax_pln.set_title(
+                        'Zone Speed Z-Score by Level \u2014 Individual Mice (Punishment Zone)')
+                    _ax_pln.set_xlabel('Level')
+                    _ax_pln.set_ylabel(
+                        'Zone Speed Z-Score\n(negative = slower than chance inside zone)')
+                    _ax_pln.tick_params(axis='both', direction='in')
+                    _ax_pln.spines['top'].set_visible(False)
+                    _ax_pln.spines['right'].set_visible(False)
+                    plt.legend(frameon=False, fontsize=plt.rcParams['legend.fontsize'])
+
+            # ── Level condition line: mean ± SEM per condition (punishment zone) ─
+            if 'level_punish_shuffle_zscore_cond' in selected_plots and transitions_csv_path:
+                _lev_z_cond_pw: dict = {}  # condition -> level -> [per-mouse means]
+                _src_pw = _lev_z_mouse_pw if '_lev_z_mouse_pw' in dir() else {}
+                if not _src_pw:
+                    try:
+                        _tdf_scp = pd.read_csv(transitions_csv_path)
+                        _tdf_scp['date'] = pd.to_datetime(_tdf_scp['date'])
+                        for _r in all_results:
+                            _mn_scp = _r['mouse']
+                            _zs_scp = _r['_punish_shuffle_zscores']
+                            _df_scp = _r['df']
+                            _mt_scp = (_tdf_scp[
+                                _tdf_scp['animal_id'].str.strip().str.lower() ==
+                                _mn_scp.strip().lower()
+                            ] if 'animal_id' in _tdf_scp.columns else pd.DataFrame())
+                            if _mt_scp.empty:
+                                continue
+                            _d2l_scp: dict = {}
+                            _gc_scp = ('session_num' if 'session_num' in _mt_scp.columns
+                                       else 'date')
+                            for _, _sg_scp in _mt_scp.groupby(_gc_scp):
+                                _sg_scp = (_sg_scp.sort_values('transition_ts')
+                                           if 'transition_ts' in _sg_scp.columns else _sg_scp)
+                                _d2l_scp[pd.Timestamp(_sg_scp.iloc[0]['date']).normalize()] = \
+                                    str(_sg_scp.iloc[-1]['level']).replace('.json', '')
+                            for _si_scp, _row_scp in enumerate(_df_scp.itertuples()):
+                                if _si_scp >= len(_zs_scp) or np.isnan(_zs_scp[_si_scp]):
+                                    continue
+                                _lv_scp = _d2l_scp.get(
+                                    pd.Timestamp(_row_scp.date).normalize())
+                                if _lv_scp:
+                                    _src_pw.setdefault((_mn_scp, _lv_scp), []).append(
+                                        float(_zs_scp[_si_scp]))
+                    except Exception as _scp_err:
+                        print(f'  [WARN] level_punish_shuffle_zscore_cond: {_scp_err}')
+
+                for (_mn_scp2, _lv_scp2), _vals_scp in _src_pw.items():
+                    _cond_scp = next(
+                        (_r['starting_condition'] for _r in all_results
+                         if _r['mouse'] == _mn_scp2), None)
+                    if _cond_scp is None:
+                        continue
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _mm_scp = float(np.nanmean(_vals_scp))
+                    if not np.isnan(_mm_scp):
+                        _lev_z_cond_pw.setdefault(_cond_scp, {}).setdefault(
+                            _lv_scp2, []).append(_mm_scp)
+
+                if _lev_z_cond_pw:
+                    def _lsk_scp(n):
+                        parts = n.split('_')
+                        return int(parts[-1]) if parts[-1].isdigit() else 999
+                    _all_levs_scp = sorted(
+                        {lv for cd in _lev_z_cond_pw.values() for lv in cd},
+                        key=_lsk_scp)
+                    _conds_scp    = sorted(_lev_z_cond_pw.keys())
+                    level_punish_shuffle_zscore_cond_fig = plt.figure(
+                        figsize=plt.rcParams['figure.figsize'], constrained_layout=True)
+                    for _cond_scp3 in _conds_scp:
+                        _color_scp = condition_color_map.get(_cond_scp3, '#7f7f7f')
+                        _x_scp, _mean_scp, _sem_scp = [], [], []
+                        for _lv_idx_scp, _lv_scp3 in enumerate(_all_levs_scp):
+                            _vals_cp = _lev_z_cond_pw.get(_cond_scp3, {}).get(_lv_scp3, [])
+                            if _vals_cp:
+                                with warnings.catch_warnings():
+                                    warnings.simplefilter('ignore', RuntimeWarning)
+                                    _mn_vp = float(np.nanmean(_vals_cp))
+                                    _se_vp = (float(np.nanstd(_vals_cp, ddof=1) /
+                                                    np.sqrt(len(_vals_cp)))
+                                              if len(_vals_cp) > 1 else 0.0)
+                                _x_scp.append(_lv_idx_scp + 1)
+                                _mean_scp.append(_mn_vp)
+                                _sem_scp.append(_se_vp)
+                        if _x_scp:
+                            _x_arp = np.array(_x_scp)
+                            _m_arp = np.array(_mean_scp)
+                            _s_arp = np.array(_sem_scp)
+                            plt.figure(level_punish_shuffle_zscore_cond_fig.number)
+                            plt.plot(_x_arp, _m_arp, '-o',
+                                     color=_color_scp,
+                                     linewidth=plt.rcParams['lines.linewidth'],
+                                     markersize=plt.rcParams['lines.markersize'],
+                                     label=f'{_cond_scp3} (n={len(_lev_z_cond_pw[_cond_scp3].get(_all_levs_scp[0], _vals_cp))})')
+                            plt.fill_between(_x_arp, _m_arp - _s_arp, _m_arp + _s_arp,
+                                             color=_color_scp, alpha=0.2)
+                    _ax_scp = plt.gca()
+                    _ax_scp.axhline(0, color='black', linestyle='--',
+                                    linewidth=0.8, zorder=1)
+                    _ax_scp.set_xticks(range(1, len(_all_levs_scp) + 1))
+                    _ax_scp.set_xticklabels(
+                        [lv.replace('level_', 'L').replace('.json', '')
+                         for lv in _all_levs_scp],
+                        rotation=45, ha='right',
+                    )
+                    _ax_scp.set_title(
+                        'Zone Speed Z-Score by Level \u2014 By Condition (Punishment Zone)')
+                    _ax_scp.set_xlabel('Level')
+                    _ax_scp.set_ylabel(
+                        'Zone Speed Z-Score\n(mean \u00b1 SEM; negative = slower than chance)')
+                    _ax_scp.tick_params(axis='both', direction='in')
+                    _ax_scp.spines['top'].set_visible(False)
+                    _ax_scp.spines['right'].set_visible(False)
+                    plt.legend(frameon=False, fontsize=plt.rcParams['legend.fontsize'])
+
+    # ── Per-level immobility proportion — individual mice ────────────────────
+    if 'level_immobility_prop' in selected_plots and transitions_csv_path:
+        try:
+            _tdf_immo = pd.read_csv(transitions_csv_path)
+            _tdf_immo['date'] = pd.to_datetime(_tdf_immo['date'])
+            # Build (mouse, level) -> [immobility_prop values] mapping
+            _lev_immo: dict = {}  # (mouse, level) -> [float]
+            for _r in all_results:
+                _mn_im = _r['mouse']
+                _df_im = _r['df']
+                _mt_im = (_tdf_immo[
+                    _tdf_immo['animal_id'].str.strip().str.lower() ==
+                    _mn_im.strip().lower()
+                ] if 'animal_id' in _tdf_immo.columns else pd.DataFrame())
+                if _mt_im.empty:
+                    continue
+                _d2l_im: dict = {}
+                _gc_im = ('session_num' if 'session_num' in _mt_im.columns else 'date')
+                for _, _sg_im in _mt_im.groupby(_gc_im):
+                    _sg_im = (_sg_im.sort_values('transition_ts')
+                              if 'transition_ts' in _sg_im.columns else _sg_im)
+                    _d2l_im[pd.Timestamp(_sg_im.iloc[0]['date']).normalize()] = \
+                        str(_sg_im.iloc[-1]['level']).replace('.json', '')
+                for _row_im in _df_im.itertuples():
+                    _lv_im = _d2l_im.get(pd.Timestamp(_row_im.date).normalize())
+                    if _lv_im and hasattr(_row_im, 'immobility_prop'):
+                        _val_im = float(_row_im.immobility_prop)
+                        if not np.isnan(_val_im):
+                            _lev_immo.setdefault((_mn_im, _lv_im), []).append(_val_im)
+            if _lev_immo:
+                def _lsk_im(n):
+                    parts = n.split('_')
+                    return int(parts[-1]) if parts[-1].isdigit() else 999
+                _all_levs_im = sorted({lv for (_, lv) in _lev_immo}, key=_lsk_im)
+                _all_mice_im = sorted({mn for (mn, _) in _lev_immo})
+                level_immobility_prop_fig = plt.figure(
+                    figsize=plt.rcParams['figure.figsize'], constrained_layout=True)
+                for _mn_im2 in _all_mice_im:
+                    _cond_im = next(
+                        (_r['starting_condition'] for _r in all_results
+                         if _r['mouse'] == _mn_im2), None)
+                    _color_im = condition_color_map.get(_cond_im, 'gray') if _cond_im else 'gray'
+                    _x_im, _y_im = [], []
+                    for _lv_idx_im, _lv_im2 in enumerate(_all_levs_im):
+                        _vals_im = _lev_immo.get((_mn_im2, _lv_im2), [])
+                        if _vals_im:
+                            with warnings.catch_warnings():
+                                warnings.simplefilter('ignore', RuntimeWarning)
+                                _x_im.append(_lv_idx_im + 1)
+                                _y_im.append(float(np.nanmean(_vals_im)))
+                    if _x_im:
+                        plt.plot(_x_im, _y_im, '-o',
+                                 color=_color_im,
+                                 linewidth=plt.rcParams['lines.linewidth'],
+                                 markersize=plt.rcParams['lines.markersize'],
+                                 label=_mn_im2)
+                _ax_im = plt.gca()
+                _ax_im.set_xticks(range(1, len(_all_levs_im) + 1))
+                _ax_im.set_xticklabels(
+                    [lv.replace('level_', 'L').replace('.json', '')
+                     for lv in _all_levs_im],
+                    rotation=45, ha='right',
+                )
+                _ax_im.set_title(
+                    'Immobility Proportion by Level \u2014 Individual Mice\n'
+                    '(raw speed = 0 cm/s for \u2265 2 s)')
+                _ax_im.set_xlabel('Level')
+                _ax_im.set_ylabel('Proportion of session time immobile')
+                _ax_im.set_ylim(0, 1.0)
+                _ax_im.tick_params(axis='both', direction='in')
+                _ax_im.spines['top'].set_visible(False)
+                _ax_im.spines['right'].set_visible(False)
+                plt.legend(frameon=False, fontsize=plt.rcParams['legend.fontsize'])
+        except Exception as _immo_err:
+            print(f'  [WARN] level_immobility_prop: {_immo_err}')
+
     # Create the level-based analysis plots
     level_reward_fig = level_speed_collapsed_fig = level_speed_condition_fig = None
     level_lick_collapsed_fig = level_lick_condition_fig = None
@@ -12292,7 +13575,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     # Print weekday alignment table so the user can verify Mon→Tue→Thu→Fri cycle
     print_session_weekday_alignment(all_results)
 
-    return speed_fig, sensitivity_fig, lick_fig, reward_fig, lick_reward_ratio_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, avg_sex_speed_fig, distance_fig, bout_count_fig, avg_bout_count_fig, rewards_per_bout_fig, first_lick_latency_fig, condition_rewards_per_bout_fig, condition_rewards_per_bout_bar_fig, condition_first_lick_latency_fig, condition_first_lick_latency_bar_fig, condition_lick_after_reward_prop_fig, condition_lick_after_reward_prop_bar_fig, weekday_reward_bar_fig, weekday_reward_bar_condition_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_lick_reward_ratio_fig, condition_lick_reward_ratio_bar_fig, condition_punish_zone_pct_bar_fig, condition_bar_fig, condition_speed_bar_fig, condition_sensitivity_fig, condition_sensitivity_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_sensitivity_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, last_level_bar_fig, level_survivor_fig, time_to_level2_fig, epoch_del_speed_per_mouse_fig, epoch_del_speed_cond_fig, epoch_del_cap_per_mouse_fig, epoch_del_cap_cond_fig, epoch_del_lick_per_mouse_fig, epoch_del_lick_cond_fig, epoch_del_cap_diff_entry_fig, epoch_speed_per_mouse_fig, epoch_speed_cond_fig, epoch_cap_per_mouse_fig, epoch_cap_cond_fig, epoch_speed_sess_per_mouse_fig, epoch_speed_sess_cond_fig, epoch_cap_sess_per_mouse_fig, epoch_cap_sess_cond_fig, epoch_speed_early_per_mouse_fig, epoch_speed_late_per_mouse_fig, epoch_speed_early_cond_fig, epoch_speed_late_cond_fig, epoch_cap_early_per_mouse_fig, epoch_cap_late_per_mouse_fig, epoch_cap_early_cond_fig, epoch_cap_late_cond_fig, epoch_speed_early_ev_per_mouse_fig, epoch_speed_late_ev_per_mouse_fig, epoch_speed_early_ev_cond_fig, epoch_speed_late_ev_cond_fig, epoch_cap_early_ev_per_mouse_fig, epoch_cap_late_ev_per_mouse_fig, epoch_cap_early_ev_cond_fig, epoch_cap_late_ev_cond_fig, epoch_speed_early_ev_cond_clean_fig, epoch_speed_late_ev_cond_clean_fig, epoch_cap_early_ev_cond_clean_fig, epoch_cap_late_ev_cond_clean_fig, epoch_speed_sess_cond_clean_fig, epoch_cap_sess_cond_clean_fig, epoch_speed_early_cond_clean_fig, epoch_speed_late_cond_clean_fig, epoch_cap_early_cond_clean_fig, epoch_cap_late_cond_clean_fig, punish_speed_per_mouse_fig, punish_speed_cond_fig, punish_cap_per_mouse_fig, punish_cap_cond_fig, punish_speed_sess_per_mouse_fig, punish_speed_sess_cond_fig, punish_cap_sess_per_mouse_fig, punish_cap_sess_cond_fig, punish_speed_sess_cond_clean_fig, punish_cap_sess_cond_clean_fig, sex_speed_fig, sex_distance_indiv_fig, sex_reward_indiv_fig, epoch_speed_sess_sex_per_mouse_fig, epoch_speed_sess_sex_fig, epoch_cap_sess_sex_per_mouse_fig, epoch_cap_sess_sex_fig, epoch_punish_speed_sess_sex_per_mouse_fig, epoch_punish_speed_sess_sex_fig, epoch_punish_cap_sess_sex_per_mouse_fig, epoch_punish_cap_sess_sex_fig, epoch_reward_speed_pre_post_fig, epoch_reward_speed_diff_fig, epoch_reward_cap_pre_post_fig, epoch_reward_cap_diff_fig, epoch_reward_speed_pre_post_entry_fig, epoch_reward_speed_diff_entry_fig, epoch_reward_speed_pre_post_entry_1s_fig, epoch_reward_speed_diff_entry_1s_fig, epoch_reward_lick_count_sess_per_mouse_fig, epoch_reward_lick_count_sess_cond_fig, epoch_reward_lick_count_sess_cond_clean_fig, epoch_punish_lick_count_sess_per_mouse_fig, epoch_punish_lick_count_sess_cond_fig, epoch_punish_speed_pre_post_fig, epoch_punish_speed_diff_fig, epoch_punish_speed_pre_post_entry_fig, epoch_punish_speed_diff_entry_fig, epoch_punish_cap_pre_post_fig, epoch_punish_cap_diff_fig, epoch_punish_cap_pre_post_entry_fig, epoch_punish_cap_diff_entry_fig, expl_speed_histogram_fig, expl_speed_distfit_fig, expl_speed_boxplot_fig, expl_speed_rm_anova_resid_fig, expl_cap_histogram_fig, expl_cap_boxplot_fig, expl_cap_rm_anova_resid_fig, expl_cap_distfit_fig, expl_lick_distfit_fig, expl_lick_boxplot_fig, expl_lick_rm_anova_resid_fig, expl_lick_rate_distfit_fig, expl_lick_reward_ratio_distfit_fig, all_results, _level_stats_data
+    return speed_fig, sensitivity_fig, lick_fig, reward_fig, lick_reward_ratio_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, avg_sex_speed_fig, distance_fig, immobility_prop_fig, bout_count_fig, avg_bout_count_fig, rewards_per_bout_fig, first_lick_latency_fig, condition_rewards_per_bout_fig, condition_rewards_per_bout_bar_fig, condition_first_lick_latency_fig, condition_first_lick_latency_bar_fig, condition_lick_after_reward_prop_fig, condition_lick_after_reward_prop_bar_fig, weekday_reward_bar_fig, weekday_reward_bar_condition_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_lick_reward_ratio_fig, condition_lick_reward_ratio_bar_fig, condition_punish_zone_pct_bar_fig, condition_bar_fig, condition_speed_bar_fig, condition_sensitivity_fig, condition_sensitivity_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_sensitivity_fig, level_immobility_prop_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, last_level_bar_fig, level_survivor_fig, time_to_level2_fig, epoch_del_speed_per_mouse_fig, epoch_del_speed_cond_fig, epoch_del_cap_per_mouse_fig, epoch_del_cap_cond_fig, epoch_del_lick_per_mouse_fig, epoch_del_lick_cond_fig, epoch_del_cap_diff_entry_fig, condition_shuffle_zscore_fig, condition_shuffle_zscore_bar_fig, level_shuffle_zscore_fig, level_shuffle_zscore_line_fig, level_shuffle_zscore_cond_fig, condition_punish_shuffle_zscore_fig, condition_punish_shuffle_zscore_bar_fig, level_punish_shuffle_zscore_fig, level_punish_shuffle_zscore_line_fig, level_punish_shuffle_zscore_cond_fig, epoch_speed_per_mouse_fig, epoch_speed_cond_fig, epoch_cap_per_mouse_fig, epoch_cap_cond_fig, epoch_speed_sess_per_mouse_fig, epoch_speed_sess_cond_fig, epoch_cap_sess_per_mouse_fig, epoch_cap_sess_cond_fig, epoch_speed_early_per_mouse_fig, epoch_speed_late_per_mouse_fig, epoch_speed_early_cond_fig, epoch_speed_late_cond_fig, epoch_cap_early_per_mouse_fig, epoch_cap_late_per_mouse_fig, epoch_cap_early_cond_fig, epoch_cap_late_cond_fig, epoch_speed_early_ev_per_mouse_fig, epoch_speed_late_ev_per_mouse_fig, epoch_speed_early_ev_cond_fig, epoch_speed_late_ev_cond_fig, epoch_cap_early_ev_per_mouse_fig, epoch_cap_late_ev_per_mouse_fig, epoch_cap_early_ev_cond_fig, epoch_cap_late_ev_cond_fig, epoch_speed_early_ev_cond_clean_fig, epoch_speed_late_ev_cond_clean_fig, epoch_cap_early_ev_cond_clean_fig, epoch_cap_late_ev_cond_clean_fig, epoch_speed_sess_cond_clean_fig, epoch_cap_sess_cond_clean_fig, epoch_speed_early_cond_clean_fig, epoch_speed_late_cond_clean_fig, epoch_cap_early_cond_clean_fig, epoch_cap_late_cond_clean_fig, punish_speed_per_mouse_fig, punish_speed_cond_fig, punish_cap_per_mouse_fig, punish_cap_cond_fig, punish_speed_sess_per_mouse_fig, punish_speed_sess_cond_fig, punish_cap_sess_per_mouse_fig, punish_cap_sess_cond_fig, punish_speed_sess_cond_clean_fig, punish_cap_sess_cond_clean_fig, sex_speed_fig, sex_distance_indiv_fig, sex_reward_indiv_fig, epoch_speed_sess_sex_per_mouse_fig, epoch_speed_sess_sex_fig, epoch_cap_sess_sex_per_mouse_fig, epoch_cap_sess_sex_fig, epoch_punish_speed_sess_sex_per_mouse_fig, epoch_punish_speed_sess_sex_fig, epoch_punish_cap_sess_sex_per_mouse_fig, epoch_punish_cap_sess_sex_fig, epoch_reward_speed_pre_post_fig, epoch_reward_speed_diff_fig, epoch_reward_cap_pre_post_fig, epoch_reward_cap_diff_fig, epoch_reward_speed_pre_post_entry_fig, epoch_reward_speed_diff_entry_fig, epoch_reward_speed_pre_post_entry_1s_fig, epoch_reward_speed_diff_entry_1s_fig, epoch_reward_lick_count_sess_per_mouse_fig, epoch_reward_lick_count_sess_cond_fig, epoch_reward_lick_count_sess_cond_clean_fig, epoch_punish_lick_count_sess_per_mouse_fig, epoch_punish_lick_count_sess_cond_fig, epoch_punish_speed_pre_post_fig, epoch_punish_speed_diff_fig, epoch_punish_speed_pre_post_entry_fig, epoch_punish_speed_diff_entry_fig, epoch_punish_cap_pre_post_fig, epoch_punish_cap_diff_fig, epoch_punish_cap_pre_post_entry_fig, epoch_punish_cap_diff_entry_fig, expl_speed_histogram_fig, expl_speed_distfit_fig, expl_speed_boxplot_fig, expl_speed_rm_anova_resid_fig, expl_cap_histogram_fig, expl_cap_boxplot_fig, expl_cap_rm_anova_resid_fig, expl_cap_distfit_fig, expl_lick_distfit_fig, expl_lick_boxplot_fig, expl_lick_rm_anova_resid_fig, expl_lick_rate_distfit_fig, expl_lick_reward_ratio_distfit_fig, all_results, _level_stats_data
 
 def _run_weight_correlations(root, file_paths, animal_info):
     """Load a weight CSV, match to session data by mouse ID + date, and produce
@@ -13052,7 +14335,14 @@ def main():
                                           'last_level_bar', 'level_survivor',
                                           'time_to_level2', 'level_sensitivity',
                                           'epoch_reward_speed_sess_by_level',
-                                          'epoch_delivery_speed_sess_by_level')):
+                                          'epoch_delivery_speed_sess_by_level',
+                                          'level_shuffle_zscore',
+                                          'level_shuffle_zscore_line',
+                                          'level_shuffle_zscore_cond',
+                                          'level_punish_shuffle_zscore',
+                                          'level_punish_shuffle_zscore_line',
+                                          'level_punish_shuffle_zscore_cond',
+                                          'level_immobility_prop')):
         transitions_csv_path = filedialog.askopenfilename(
             title='Select transitions CSV (from level_sorter.py) — cancel to skip level plot',
             filetypes=[('CSV files', '*.csv'), ('All files', '*.*')],
@@ -13064,7 +14354,7 @@ def main():
             print("No transitions CSV selected — level plot will be empty.")
 
     # Analyze data and plot results
-    speed_fig, sensitivity_fig, lick_fig, reward_fig, lick_reward_ratio_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, avg_sex_speed_fig, distance_fig, bout_count_fig, avg_bout_count_fig, rewards_per_bout_fig, first_lick_latency_fig, condition_rewards_per_bout_fig, condition_rewards_per_bout_bar_fig, condition_first_lick_latency_fig, condition_first_lick_latency_bar_fig, condition_lick_after_reward_prop_fig, condition_lick_after_reward_prop_bar_fig, weekday_reward_bar_fig, weekday_reward_bar_condition_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_lick_reward_ratio_fig, condition_lick_reward_ratio_bar_fig, condition_punish_zone_pct_bar_fig, condition_bar_fig, condition_speed_bar_fig, condition_sensitivity_fig, condition_sensitivity_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_sensitivity_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, last_level_bar_fig, level_survivor_fig, time_to_level2_fig, epoch_del_speed_per_mouse_fig, epoch_del_speed_cond_fig, epoch_del_cap_per_mouse_fig, epoch_del_cap_cond_fig, epoch_del_lick_per_mouse_fig, epoch_del_lick_cond_fig, epoch_del_cap_diff_entry_fig, epoch_speed_per_mouse_fig, epoch_speed_cond_fig, epoch_cap_per_mouse_fig, epoch_cap_cond_fig, epoch_speed_sess_per_mouse_fig, epoch_speed_sess_cond_fig, epoch_cap_sess_per_mouse_fig, epoch_cap_sess_cond_fig, epoch_speed_early_per_mouse_fig, epoch_speed_late_per_mouse_fig, epoch_speed_early_cond_fig, epoch_speed_late_cond_fig, epoch_cap_early_per_mouse_fig, epoch_cap_late_per_mouse_fig, epoch_cap_early_cond_fig, epoch_cap_late_cond_fig, epoch_speed_early_ev_per_mouse_fig, epoch_speed_late_ev_per_mouse_fig, epoch_speed_early_ev_cond_fig, epoch_speed_late_ev_cond_fig, epoch_cap_early_ev_per_mouse_fig, epoch_cap_late_ev_per_mouse_fig, epoch_cap_early_ev_cond_fig, epoch_cap_late_ev_cond_fig, epoch_speed_early_ev_cond_clean_fig, epoch_speed_late_ev_cond_clean_fig, epoch_cap_early_ev_cond_clean_fig, epoch_cap_late_ev_cond_clean_fig, epoch_speed_sess_cond_clean_fig, epoch_cap_sess_cond_clean_fig, epoch_speed_early_cond_clean_fig, epoch_speed_late_cond_clean_fig, epoch_cap_early_cond_clean_fig, epoch_cap_late_cond_clean_fig, punish_speed_per_mouse_fig, punish_speed_cond_fig, punish_cap_per_mouse_fig, punish_cap_cond_fig, punish_speed_sess_per_mouse_fig, punish_speed_sess_cond_fig, punish_cap_sess_per_mouse_fig, punish_cap_sess_cond_fig, punish_speed_sess_cond_clean_fig, punish_cap_sess_cond_clean_fig, sex_speed_fig, sex_distance_indiv_fig, sex_reward_indiv_fig, epoch_speed_sess_sex_per_mouse_fig, epoch_speed_sess_sex_fig, epoch_cap_sess_sex_per_mouse_fig, epoch_cap_sess_sex_fig, epoch_punish_speed_sess_sex_per_mouse_fig, epoch_punish_speed_sess_sex_fig, epoch_punish_cap_sess_sex_per_mouse_fig, epoch_punish_cap_sess_sex_fig, epoch_reward_speed_pre_post_fig, epoch_reward_speed_diff_fig, epoch_reward_cap_pre_post_fig, epoch_reward_cap_diff_fig, epoch_reward_speed_pre_post_entry_fig, epoch_reward_speed_diff_entry_fig, epoch_reward_speed_pre_post_entry_1s_fig, epoch_reward_speed_diff_entry_1s_fig, epoch_reward_lick_count_sess_per_mouse_fig, epoch_reward_lick_count_sess_cond_fig, epoch_reward_lick_count_sess_cond_clean_fig, epoch_punish_lick_count_sess_per_mouse_fig, epoch_punish_lick_count_sess_cond_fig, epoch_punish_speed_pre_post_fig, epoch_punish_speed_diff_fig, epoch_punish_speed_pre_post_entry_fig, epoch_punish_speed_diff_entry_fig, epoch_punish_cap_pre_post_fig, epoch_punish_cap_diff_fig, epoch_punish_cap_pre_post_entry_fig, epoch_punish_cap_diff_entry_fig, expl_speed_histogram_fig, expl_speed_distfit_fig, expl_speed_boxplot_fig, expl_speed_rm_anova_resid_fig, expl_cap_histogram_fig, expl_cap_boxplot_fig, expl_cap_rm_anova_resid_fig, expl_cap_distfit_fig, expl_lick_distfit_fig, expl_lick_boxplot_fig, expl_lick_rm_anova_resid_fig, expl_lick_rate_distfit_fig, expl_lick_reward_ratio_distfit_fig, all_results, _level_stats_data = analyze_mouse_data(
+    speed_fig, sensitivity_fig, lick_fig, reward_fig, lick_reward_ratio_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, avg_sex_speed_fig, distance_fig, immobility_prop_fig, bout_count_fig, avg_bout_count_fig, rewards_per_bout_fig, first_lick_latency_fig, condition_rewards_per_bout_fig, condition_rewards_per_bout_bar_fig, condition_first_lick_latency_fig, condition_first_lick_latency_bar_fig, condition_lick_after_reward_prop_fig, condition_lick_after_reward_prop_bar_fig, weekday_reward_bar_fig, weekday_reward_bar_condition_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_lick_reward_ratio_fig, condition_lick_reward_ratio_bar_fig, condition_punish_zone_pct_bar_fig, condition_bar_fig, condition_speed_bar_fig, condition_sensitivity_fig, condition_sensitivity_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_sensitivity_fig, level_immobility_prop_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, last_level_bar_fig, level_survivor_fig, time_to_level2_fig, epoch_del_speed_per_mouse_fig, epoch_del_speed_cond_fig, epoch_del_cap_per_mouse_fig, epoch_del_cap_cond_fig, epoch_del_lick_per_mouse_fig, epoch_del_lick_cond_fig, epoch_del_cap_diff_entry_fig, condition_shuffle_zscore_fig, condition_shuffle_zscore_bar_fig, level_shuffle_zscore_fig, level_shuffle_zscore_line_fig, level_shuffle_zscore_cond_fig, condition_punish_shuffle_zscore_fig, condition_punish_shuffle_zscore_bar_fig, level_punish_shuffle_zscore_fig, level_punish_shuffle_zscore_line_fig, level_punish_shuffle_zscore_cond_fig, epoch_speed_per_mouse_fig, epoch_speed_cond_fig, epoch_cap_per_mouse_fig, epoch_cap_cond_fig, epoch_speed_sess_per_mouse_fig, epoch_speed_sess_cond_fig, epoch_cap_sess_per_mouse_fig, epoch_cap_sess_cond_fig, epoch_speed_early_per_mouse_fig, epoch_speed_late_per_mouse_fig, epoch_speed_early_cond_fig, epoch_speed_late_cond_fig, epoch_cap_early_per_mouse_fig, epoch_cap_late_per_mouse_fig, epoch_cap_early_cond_fig, epoch_cap_late_cond_fig, epoch_speed_early_ev_per_mouse_fig, epoch_speed_late_ev_per_mouse_fig, epoch_speed_early_ev_cond_fig, epoch_speed_late_ev_cond_fig, epoch_cap_early_ev_per_mouse_fig, epoch_cap_late_ev_per_mouse_fig, epoch_cap_early_ev_cond_fig, epoch_cap_late_ev_cond_fig, epoch_speed_early_ev_cond_clean_fig, epoch_speed_late_ev_cond_clean_fig, epoch_cap_early_ev_cond_clean_fig, epoch_cap_late_ev_cond_clean_fig, epoch_speed_sess_cond_clean_fig, epoch_cap_sess_cond_clean_fig, epoch_speed_early_cond_clean_fig, epoch_speed_late_cond_clean_fig, epoch_cap_early_cond_clean_fig, epoch_cap_late_cond_clean_fig, punish_speed_per_mouse_fig, punish_speed_cond_fig, punish_cap_per_mouse_fig, punish_cap_cond_fig, punish_speed_sess_per_mouse_fig, punish_speed_sess_cond_fig, punish_cap_sess_per_mouse_fig, punish_cap_sess_cond_fig, punish_speed_sess_cond_clean_fig, punish_cap_sess_cond_clean_fig, sex_speed_fig, sex_distance_indiv_fig, sex_reward_indiv_fig, epoch_speed_sess_sex_per_mouse_fig, epoch_speed_sess_sex_fig, epoch_cap_sess_sex_per_mouse_fig, epoch_cap_sess_sex_fig, epoch_punish_speed_sess_sex_per_mouse_fig, epoch_punish_speed_sess_sex_fig, epoch_punish_cap_sess_sex_per_mouse_fig, epoch_punish_cap_sess_sex_fig, epoch_reward_speed_pre_post_fig, epoch_reward_speed_diff_fig, epoch_reward_cap_pre_post_fig, epoch_reward_cap_diff_fig, epoch_reward_speed_pre_post_entry_fig, epoch_reward_speed_diff_entry_fig, epoch_reward_speed_pre_post_entry_1s_fig, epoch_reward_speed_diff_entry_1s_fig, epoch_reward_lick_count_sess_per_mouse_fig, epoch_reward_lick_count_sess_cond_fig, epoch_reward_lick_count_sess_cond_clean_fig, epoch_punish_lick_count_sess_per_mouse_fig, epoch_punish_lick_count_sess_cond_fig, epoch_punish_speed_pre_post_fig, epoch_punish_speed_diff_fig, epoch_punish_speed_pre_post_entry_fig, epoch_punish_speed_diff_entry_fig, epoch_punish_cap_pre_post_fig, epoch_punish_cap_diff_fig, epoch_punish_cap_pre_post_entry_fig, epoch_punish_cap_diff_entry_fig, expl_speed_histogram_fig, expl_speed_distfit_fig, expl_speed_boxplot_fig, expl_speed_rm_anova_resid_fig, expl_cap_histogram_fig, expl_cap_boxplot_fig, expl_cap_rm_anova_resid_fig, expl_cap_distfit_fig, expl_lick_distfit_fig, expl_lick_boxplot_fig, expl_lick_rm_anova_resid_fig, expl_lick_rate_distfit_fig, expl_lick_reward_ratio_distfit_fig, all_results, _level_stats_data = analyze_mouse_data(
         file_paths, markers, starting_conditions,
         transitions_csv_path=transitions_csv_path,
         selected_plots=selected_plots,
@@ -13075,7 +14365,7 @@ def main():
         speed_fig, sensitivity_fig, lick_fig, reward_fig, lick_reward_ratio_fig,
         false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig,
         avg_reward_fig, sex_reward_fig, avg_sex_speed_fig,
-        distance_fig, bout_count_fig, avg_bout_count_fig, rewards_per_bout_fig, first_lick_latency_fig, condition_rewards_per_bout_fig, condition_rewards_per_bout_bar_fig, condition_first_lick_latency_fig, condition_first_lick_latency_bar_fig, condition_lick_after_reward_prop_fig, condition_lick_after_reward_prop_bar_fig, weekday_reward_bar_fig, weekday_reward_bar_condition_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig,
+        distance_fig, immobility_prop_fig, bout_count_fig, avg_bout_count_fig, rewards_per_bout_fig, first_lick_latency_fig, condition_rewards_per_bout_fig, condition_rewards_per_bout_bar_fig, condition_first_lick_latency_fig, condition_first_lick_latency_bar_fig, condition_lick_after_reward_prop_fig, condition_lick_after_reward_prop_bar_fig, weekday_reward_bar_fig, weekday_reward_bar_condition_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig,
         condition_distance_bar_fig, total_distance_bar_fig,
         avg_lick_rate_fig, sex_lick_rate_fig,
         condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_lick_reward_ratio_fig, condition_lick_reward_ratio_bar_fig,
@@ -13093,6 +14383,16 @@ def main():
         epoch_del_cap_per_mouse_fig,   epoch_del_cap_cond_fig,
         epoch_del_lick_per_mouse_fig,  epoch_del_lick_cond_fig,
         epoch_del_cap_diff_entry_fig,
+        condition_shuffle_zscore_fig,
+        condition_shuffle_zscore_bar_fig,
+        level_shuffle_zscore_fig,
+        level_shuffle_zscore_line_fig,
+        level_shuffle_zscore_cond_fig,
+        condition_punish_shuffle_zscore_fig,
+        condition_punish_shuffle_zscore_bar_fig,
+        level_punish_shuffle_zscore_fig,
+        level_punish_shuffle_zscore_line_fig,
+        level_punish_shuffle_zscore_cond_fig,
         epoch_speed_per_mouse_fig, epoch_speed_cond_fig,
         epoch_cap_per_mouse_fig, epoch_cap_cond_fig,
         epoch_speed_sess_per_mouse_fig, epoch_speed_sess_cond_fig,
@@ -13192,6 +14492,7 @@ def main():
         (sex_reward_fig,        'sex_reward',          'Sex-specific average rewards plot'),
         (avg_sex_speed_fig,     'avg_sex_speed',       'Sex-specific average speed plot'),
         (distance_fig,          'distance',            'Distance per session plot'),
+        (immobility_prop_fig,   'immobility_prop',     'Immobility proportion per session — individual mice'),
         (bout_count_fig,         'bout_count',          'Locomotion bout count plot'),
         (avg_bout_count_fig,     'avg_bout_count',      'Average bout count across all mice plot'),
         (rewards_per_bout_fig,            'rewards_per_bout',            'Average rewards per locomotion bout per session plot'),
@@ -13235,8 +14536,9 @@ def main():
         (level_speed_condition_fig,     'level_speed_condition', 'Level-based average speed — by condition'),
         (level_lick_collapsed_fig,      'level_lick',            'Level-based average lick rate — collapsed'),
         (level_lick_condition_fig,      'level_lick_condition',  'Level-based average lick rate — by condition'),
-        (level_sensitivity_fig,         'level_sensitivity',     'Sensitivity by level — individual mice'),
-        (level_dist_collapsed_fig,      'level_dist',            'Level-based distance — collapsed'),
+        (level_sensitivity_fig,         'level_sensitivity',       'Sensitivity by level — individual mice'),
+        (level_immobility_prop_fig,     'level_immobility_prop',   'Immobility proportion by level — individual mice'),
+        (level_dist_collapsed_fig,      'level_dist',              'Level-based distance — collapsed'),
         (level_dist_condition_fig,      'level_dist_condition',  'Level-based distance — by condition'),
         (level_dist_condition_excl_last_fig, 'level_dist_condition_excl_last', 'Level-based distance — by condition, last level excluded'),
         (level_bout_collapsed_fig,   'level_bout',           'Level-based bout count — collapsed'),
@@ -13255,6 +14557,16 @@ def main():
         (epoch_del_lick_per_mouse_fig,  'epoch_delivery_lick_sess_per_mouse',  'Lick count epoch aligned to reward delivery — per mouse'),
         (epoch_del_lick_cond_fig,       'epoch_delivery_lick_sess_condition',  'Lick count epoch aligned to reward delivery — by condition'),
         (epoch_del_cap_diff_entry_fig,  'epoch_delivery_cap_diff_entry_neg1to0s_vs_0to1s', 'Post- vs pre-delivery capacitive difference by condition (1 s windows, Mann-Whitney U)'),
+        (condition_shuffle_zscore_fig,     'condition_shuffle_zscore',     'Zone speed Z-score (reward zone) — line plot by condition (circular-shift permutation)'),
+        (condition_shuffle_zscore_bar_fig, 'condition_shuffle_zscore_bar', 'Zone speed Z-score (reward zone) — collapsed bar chart by condition (Mann-Whitney U)'),
+        (level_shuffle_zscore_fig,         'level_shuffle_zscore',         'Zone speed Z-score (reward zone) by level and condition'),
+        (level_shuffle_zscore_line_fig,    'level_shuffle_zscore_line',    'Zone speed Z-score (reward zone) by level — individual mouse lines'),
+        (level_shuffle_zscore_cond_fig,    'level_shuffle_zscore_cond',    'Zone speed Z-score (reward zone) by level — condition mean \u00b1 SEM line plot'),
+        (condition_punish_shuffle_zscore_fig,     'condition_punish_shuffle_zscore',     'Zone speed Z-score (punishment zone) — line plot by condition'),
+        (condition_punish_shuffle_zscore_bar_fig, 'condition_punish_shuffle_zscore_bar', 'Zone speed Z-score (punishment zone) — collapsed bar chart by condition (Mann-Whitney U)'),
+        (level_punish_shuffle_zscore_fig,         'level_punish_shuffle_zscore',         'Zone speed Z-score (punishment zone) by level and condition'),
+        (level_punish_shuffle_zscore_line_fig,    'level_punish_shuffle_zscore_line',    'Zone speed Z-score (punishment zone) by level — individual mouse lines'),
+        (level_punish_shuffle_zscore_cond_fig,    'level_punish_shuffle_zscore_cond',    'Zone speed Z-score (punishment zone) by level — condition mean \u00b1 SEM line plot'),
         (epoch_speed_per_mouse_fig,      'epoch_reward_speed_per_mouse',           'Speed epoch (event) — per mouse'),
         (epoch_speed_cond_fig,           'epoch_reward_speed_condition',           'Speed epoch (event) — by condition'),
         (epoch_cap_per_mouse_fig,        'epoch_reward_cap_per_mouse',             'Capacitive epoch (event) — per mouse'),
