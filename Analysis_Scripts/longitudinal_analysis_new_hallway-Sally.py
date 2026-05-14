@@ -43,6 +43,10 @@ import pickle
 import hashlib
 import warnings
 import math
+import subprocess
+import shutil
+import tempfile
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor as _TPE
 
 # Add Analysis_Scripts to path to import lick detection algorithm
@@ -2973,6 +2977,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
     level_progression_indiv_fig = None
     level_progression_condition_fig = None
     level_progression_bar_fig = None
+    _prog_by_animal: dict = {}  # animal_id -> [(session_rank, level_num)]
     if animal_session_ending_level:
         # Build per-animal ordered (session_rank, level_num) with condition lookup
         _prog_animal_cond = {
@@ -3214,7 +3219,8 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
         'condition_level_bout':          condition_level_bout,
         'condition_level_bout_avg_spd':  condition_level_bout_avg_spd,
         'condition_level_bout_avg_dist': condition_level_bout_avg_dist_lvl,
-    } if condition_level_data else None
+        'level_progression':             _prog_by_animal,
+    } if (condition_level_data or _prog_by_animal) else None
 
     return level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_sensitivity_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, last_level_bar_fig, level_survivor_fig, time_to_level2_fig, level_progression_indiv_fig, level_progression_condition_fig, level_progression_bar_fig, _level_stats
 
@@ -5206,6 +5212,8 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         # The schedule is always: Mon → Tue → Thu → Fri → Mon → ...
         _DOW_CYCLE = ['Monday', 'Tuesday', 'Thursday', 'Friday']
         results_df['weekday'] = [_DOW_CYCLE[i % 4] for i in range(len(results_df))]
+        # Assign training week (4 sessions per week: sessions 1-4 = week 1, etc.)
+        results_df['week'] = [i // 4 + 1 for i in range(len(results_df))]
         
         # Remove the first date as requested for hits, misses, and sensitivity analysis
         results_df.loc[1:, 'hits'] = results_df.loc[1:, 'hits']  # Keep only hits after first date
@@ -14067,6 +14075,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     report_dir = output_dir if output_dir else os.path.dirname(os.path.abspath(data_files[0]))
     timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
     report_path = os.path.join(report_dir, f"missing_data_report_{timestamp_str}.txt")
+    os.makedirs(report_dir, exist_ok=True)
     with open(report_path, "w", encoding="utf-8") as f:
         f.write(report_text + "\n")
     print(f"\nMissing data report saved to: {report_path}")
@@ -14709,6 +14718,551 @@ def _ask_mode(root):
     return result[0]
 
 
+# =============================================================================
+# R-BASED nparLD: NONPARAMETRIC TWO-WAY REPEATED-MEASURES ANOVA
+# Design: Condition (between-subjects) x Week (within-subjects)
+# =============================================================================
+
+def run_nparld_condition_week_r(
+    all_results,
+    measure: str = 'sensitivity',
+    output_dir=None,
+) -> dict:
+    """
+    Nonparametric equivalent of a two-way repeated-measures ANOVA via R nparLD.
+
+    Design  : F1-LD-F1 (one between-subjects factor x one within-subjects factor)
+    Between : Condition  (starting_condition from master CSV)
+    Within  : Week       (sessions 1-4 = week 1, 5-8 = week 2, etc.)
+    Response: per-animal per-week mean of ``measure``
+
+    Requires R with the nparLD package installed.
+
+    Returns
+    -------
+    dict with keys: 'r_output', 'report_path', 'n_subjects', 'conditions', 'weeks'
+    """
+    import glob as _glob
+
+    # ── Build combined weekly-mean dataset ────────────────────────────────────
+    frames = []
+    for result in all_results:
+        df = result['df'].copy()
+        if 'week' not in df.columns:
+            # Fallback: derive week if column was not added at construction time
+            df['week'] = [i // 4 + 1 for i in range(len(df))]
+        if measure not in df.columns:
+            print(f"  [WARNING] '{measure}' not found for {result['mouse']} — skipping")
+            continue
+        df['ID'] = result['mouse']
+        df['Condition'] = result['starting_condition']
+        sub = df[['ID', 'Condition', 'week', measure]].dropna(subset=[measure])
+        frames.append(sub)
+
+    if not frames:
+        print(f"  [ERROR] No data available for measure '{measure}'.")
+        return {}
+
+    combined = pd.concat(frames, ignore_index=True)
+    combined = combined.rename(columns={'week': 'Week', measure: 'Response'})
+
+    # Per-animal per-week mean
+    weekly = (
+        combined
+        .groupby(['ID', 'Condition', 'Week'], as_index=False)['Response']
+        .mean()
+    )
+
+    # Complete-case filter: keep only animals present in every Week
+    week_counts = weekly.groupby('ID')['Week'].nunique()
+    all_weeks_n = weekly['Week'].nunique()
+    complete_ids = week_counts[week_counts == all_weeks_n].index
+    n_dropped = weekly['ID'].nunique() - len(complete_ids)
+    if n_dropped:
+        print(f"  [NOTE] Dropped {n_dropped} animal(s) with incomplete weekly records; "
+              f"{len(complete_ids)} retained")
+    weekly = weekly[weekly['ID'].isin(complete_ids)].copy()
+
+    if weekly.empty or len(complete_ids) < 3:
+        print(f"  [ERROR] Insufficient complete-case animals ({len(complete_ids)}) for nparLD.")
+        return {}
+
+    week_levels = sorted(weekly['Week'].unique())
+    condition_levels = sorted(weekly['Condition'].unique())
+    n_subjects = int(weekly['ID'].nunique())
+
+    print(f"\nnparLD: {n_subjects} subjects x {len(week_levels)} weeks x {len(condition_levels)} conditions")
+    print(f"  Conditions : {condition_levels}")
+    print(f"  Weeks      : {week_levels}")
+
+    # ── Write temp CSV ────────────────────────────────────────────────────────
+    tmp_csv = Path(tempfile.mktemp(suffix='.csv'))
+    weekly[['ID', 'Condition', 'Week', 'Response']].to_csv(str(tmp_csv), index=False)
+
+    _csv_r     = str(tmp_csv).replace('\\', '/')
+    _wk_levels = ', '.join(str(w) for w in week_levels)
+    _co_levels = ', '.join(f'"{c}"' for c in condition_levels)
+
+    r_script = (
+        'options(warn=1)\n'
+        'if (!require("nparLD", quietly=TRUE, warn.conflicts=FALSE)) {\n'
+        '  install.packages("nparLD", repos="https://cran.r-project.org", quiet=TRUE)\n'
+        '  library(nparLD)\n'
+        '}\n'
+        '\n'
+        f'data <- read.csv("{_csv_r}")\n'
+        f'data$Week      <- factor(data$Week,      levels=c({_wk_levels}))\n'
+        f'data$Condition <- factor(data$Condition, levels=c({_co_levels}))\n'
+        'data$ID        <- factor(data$ID)\n'
+        '\n'
+        'cat("\\n================================================================\\n")\n'
+        f'cat("nparLD: {measure} -- Condition x Week (F1-LD-F1 design)\\n")\n'
+        'cat("================================================================\\n")\n'
+        'cat("N subjects  :", nlevels(data$ID), "\\n")\n'
+        'cat("Conditions  :", paste(levels(data$Condition), collapse=", "), "\\n")\n'
+        'cat("Weeks       :", paste(levels(data$Week),      collapse=", "), "\\n\\n")\n'
+        '\n'
+        'result <- f1.ld.f1(\n'
+        '  y          = data$Response,\n'
+        '  time       = data$Week,\n'
+        '  group      = data$Condition,\n'
+        '  subject    = data$ID,\n'
+        '  time.name  = "Week",\n'
+        '  group.name = "Condition",\n'
+        '  description = FALSE\n'
+        ')\n'
+        '\n'
+        '# Helper functions (used throughout for formatting)\n'
+        'sig_fn <- function(p) {\n'
+        '  if(is.na(p)) return("")\n'
+        '  if(p<0.001) return("***")\n'
+        '  if(p<0.01)  return("**")\n'
+        '  if(p<0.05)  return("*")\n'
+        '  if(p<0.1)   return(".")\n'
+        '  return("")\n'
+        '}\n'
+        'fmt_p <- function(p) {\n'
+        '  if(is.na(p)) return("      NA")\n'
+        '  if(p<0.0001) return("< 0.0001")\n'
+        '  sprintf("%.6f", p)\n'
+        '}\n'
+        '\n'
+        'cat("\\n--- ANOVA-Type Statistic (ATS) ---\\n")\n'
+        'cat(sprintf("  %-22s  %10s  %8s  %12s  %s\\n", "Effect", "ATS", "df", "p-value", "Sig"))\n'
+        'cat("  ", strrep("-", 58), "\\n", sep="")\n'
+        'ats_df <- result$ANOVA.test\n'
+        'for (i in seq_len(nrow(ats_df))) {\n'
+        '  eff <- rownames(ats_df)[i]\n'
+        '  pv  <- ats_df[i, ncol(ats_df)]\n'
+        '  cat(sprintf("  %-22s  %10.4f  %8.4f  %12s  %s\\n",\n'
+        '              eff, ats_df[i,1], ats_df[i,2], fmt_p(pv), sig_fn(pv)))\n'
+        '}\n'
+        '\n'
+        'cat("\\n--- ATS with Box approximation ---\\n")\n'
+        'cat(sprintf("  %-22s  %10s  %7s  %8s  %12s  %s\\n",\n'
+        '            "Effect", "ATS", "df1", "df2", "p-value", "Sig"))\n'
+        'cat("  ", strrep("-", 68), "\\n", sep="")\n'
+        'box_df <- result$ANOVA.test.mod.Box\n'
+        'for (i in seq_len(nrow(box_df))) {\n'
+        '  eff <- rownames(box_df)[i]\n'
+        '  pv  <- box_df[i, ncol(box_df)]\n'
+        '  cat(sprintf("  %-22s  %10.4f  %7.4f  %8.4f  %12s  %s\\n",\n'
+        '              eff, box_df[i,1], box_df[i,2], box_df[i,3], fmt_p(pv), sig_fn(pv)))\n'
+        '}\n'
+        '\n'
+        'cat("\\n--- Wald-Type Statistic (WTS) ---\\n")\n'
+        'cat(sprintf("  %-22s  %10s  %8s  %12s  %s\\n", "Effect", "WTS", "df", "p-value", "Sig"))\n'
+        'cat("  ", strrep("-", 58), "\\n", sep="")\n'
+        'wts_df <- result$Wald.test\n'
+        'for (i in seq_len(nrow(wts_df))) {\n'
+        '  eff <- rownames(wts_df)[i]\n'
+        '  pv  <- wts_df[i, ncol(wts_df)]\n'
+        '  cat(sprintf("  %-22s  %10.4f  %8.4f  %12s  %s\\n",\n'
+        '              eff, wts_df[i,1], wts_df[i,2], fmt_p(pv), sig_fn(pv)))\n'
+        '}\n'
+        '\n'
+        'cat("\\n--- Relative Treatment Effects (RTE) ---\\n")\n'
+        'print(result$RTE)\n'
+        '\n'
+        'cat("\\n================================================================\\n")\n'
+        'cat("POST-HOC: Between-condition (Mann-Whitney U, Holm corrected)\\n")\n'
+        'cat("  (per-animal mean across all weeks)\\n")\n'
+        'cat("================================================================\\n")\n'
+        'per_animal <- aggregate(Response ~ ID + Condition, data=data, FUN=mean)\n'
+        'conds_all  <- levels(per_animal$Condition)\n'
+        'if (length(conds_all) >= 2) {\n'
+        '  pairs_all <- combn(length(conds_all), 2)\n'
+        '  p_raw_all <- apply(pairs_all, 2, function(idx) {\n'
+        '    x <- per_animal$Response[per_animal$Condition == conds_all[idx[1]]]\n'
+        '    y <- per_animal$Response[per_animal$Condition == conds_all[idx[2]]]\n'
+        '    if (length(x)<1 || length(y)<1) return(NA_real_)\n'
+        '    tryCatch(wilcox.test(x, y, exact=FALSE)$p.value, error=function(e) NA_real_)\n'
+        '  })\n'
+        '  p_holm_all <- p.adjust(p_raw_all, method="holm")\n'
+        '  cat(sprintf("  %-22s  %-22s  %10s  %10s  %s\\n",\n'
+        '              "Group A", "Group B", "p_raw", "p_holm", "Sig"))\n'
+        '  cat("  ", strrep("-", 68), "\\n", sep="")\n'
+        '  n_all_pairs <- ncol(pairs_all)\n'
+        '  for (k in seq_len(n_all_pairs)) {\n'
+        '    ca    <- conds_all[pairs_all[1,k]]\n'
+        '    cb    <- conds_all[pairs_all[2,k]]\n'
+        '    na_ca <- sum(!is.na(per_animal$Response[per_animal$Condition==ca]))\n'
+        '    nb_cb <- sum(!is.na(per_animal$Response[per_animal$Condition==cb]))\n'
+        '    if (is.na(p_raw_all[k])) {\n'
+        '      cat(sprintf("  %-22s  %-22s  %10s  %10s\\n",\n'
+        '                  paste0(ca," (n=",na_ca,")"), paste0(cb," (n=",nb_cb,")"),\n'
+        '                  "NA", "NA"))\n'
+        '    } else {\n'
+        '      cat(sprintf("  %-22s  %-22s  %10.6f  %10.6f  %s\\n",\n'
+        '                  paste0(ca," (n=",na_ca,")"), paste0(cb," (n=",nb_cb,")"),\n'
+        '                  p_raw_all[k], p_holm_all[k], sig_fn(p_holm_all[k])))\n'
+        '    }\n'
+        '  }\n'
+        '} else {\n'
+        '  cat("  (only 1 condition -- no pairwise test)\\n")\n'
+        '}\n'
+        '\n'
+        'cat("\\n================================================================\\n")\n'
+        'cat("POST-HOC: Between-condition comparisons at each week\\n")\n'
+        'cat("  (Mann-Whitney U, Holm corrected within each week)\\n")\n'
+        'cat("================================================================\\n")\n'
+        'for (wk in levels(data$Week)) {\n'
+        '  sub <- data[data$Week == wk, ]\n'
+        '  cat("\\nWeek:", wk, "\\n")\n'
+        '  conds <- levels(sub$Condition)\n'
+        '  if (length(conds) < 2) { cat("  (only 1 condition -- no pairwise test)\\n"); next }\n'
+        '  pairs_idx <- combn(length(conds), 2)\n'
+        '  p_raw <- apply(pairs_idx, 2, function(idx) {\n'
+        '    x <- sub$Response[sub$Condition == conds[idx[1]]]\n'
+        '    y <- sub$Response[sub$Condition == conds[idx[2]]]\n'
+        '    if (length(x) < 1 || length(y) < 1) return(NA_real_)\n'
+        '    tryCatch(\n'
+        '      wilcox.test(x, y, exact=FALSE)$p.value,\n'
+        '      error = function(e) NA_real_\n'
+        '    )\n'
+        '  })\n'
+        '  p_holm <- p.adjust(p_raw, method="holm")\n'
+        '  n_pairs <- ncol(pairs_idx)\n'
+        '  for (k in seq_len(n_pairs)) {\n'
+        '    ca <- conds[pairs_idx[1, k]]\n'
+        '    cb <- conds[pairs_idx[2, k]]\n'
+        '    na_ca <- sum(!is.na(sub$Response[sub$Condition == ca]))\n'
+        '    nb_cb <- sum(!is.na(sub$Response[sub$Condition == cb]))\n'
+        '    if (is.na(p_raw[k])) {\n'
+        '      cat(sprintf("  %s (n=%d) vs %s (n=%d) : NA\\n", ca, na_ca, cb, nb_cb))\n'
+        '    } else {\n'
+        '      sig <- sig_fn(p_holm[k])\n'
+        '      cat(sprintf("  %s (n=%d) vs %s (n=%d) : p_raw=%.6f  p_holm=%.6f  %s\\n",\n'
+        '                  ca, na_ca, cb, nb_cb, p_raw[k], p_holm[k], sig))\n'
+        '    }\n'
+        '  }\n'
+        '}\n'
+        '\n'
+        'cat("\\n================================================================\\n")\n'
+        'cat("OMNIBUS SUMMARY -- ATS\\n")\n'
+        'cat("================================================================\\n")\n'
+        'cat(sprintf("  %-22s  %10s  %8s  %12s  %s\\n", "Effect", "ATS", "df", "p-value", "Sig"))\n'
+        'cat("  ", strrep("-", 58), "\\n", sep="")\n'
+        'for (i in seq_len(nrow(ats_df))) {\n'
+        '  eff <- rownames(ats_df)[i]\n'
+        '  pv  <- ats_df[i, ncol(ats_df)]\n'
+        '  cat(sprintf("  %-22s  %10.4f  %8.4f  %12s  %s\\n",\n'
+        '              eff, ats_df[i,1], ats_df[i,2], fmt_p(pv), sig_fn(pv)))\n'
+        '}\n'
+        '\n'
+        'cat("\\n================================================================\\n")\n'
+        'cat("END\\n")\n'
+        '\n'
+        '# Machine-readable line for Python BH-FDR collection (do not remove)\n'
+        'p_cond  <- ats_df["Condition",      ncol(ats_df)]\n'
+        'p_week  <- ats_df["Week",           ncol(ats_df)]\n'
+        'p_inter <- ats_df["Condition:Week", ncol(ats_df)]\n'
+        'cat(sprintf("__ATS_PVALS__ Condition=%.15g Week=%.15g Interaction=%.15g\\n",\n'
+        '            p_cond, p_week, p_inter))\n'
+    )
+
+    tmp_r = Path(tempfile.mktemp(suffix='.R'))
+    tmp_r.write_text(r_script, encoding='utf-8')
+
+    # ── Locate Rscript ────────────────────────────────────────────────────────
+    rscript = shutil.which('Rscript') or shutil.which('Rscript.exe')
+    if rscript is None:
+        for _pat in (
+            r'C:\Program Files\R\R-*\bin\Rscript.exe',
+            r'C:\Program Files\R\R-*\bin\x64\Rscript.exe',
+        ):
+            _m = sorted(_glob.glob(_pat))
+            if _m:
+                rscript = _m[-1]
+                break
+
+    if rscript is None:
+        print("ERROR: 'Rscript' not found. Install R and add to PATH.")
+        tmp_csv.unlink(missing_ok=True)
+        tmp_r.unlink(missing_ok=True)
+        return {}
+
+    r_output = ''
+    try:
+        proc = subprocess.run(
+            [rscript, '--vanilla', str(tmp_r)],
+            capture_output=True, text=True, timeout=300,
+        )
+        r_output = proc.stdout
+        r_stderr = proc.stderr.strip()
+        if proc.returncode != 0:
+            print(f"R exited with code {proc.returncode}.")
+        if r_stderr:
+            non_trivial = [
+                ln for ln in r_stderr.splitlines()
+                if not ln.startswith('Loading') and ln.strip()
+            ]
+            if non_trivial:
+                print("R messages:\n" + '\n'.join(non_trivial))
+    except FileNotFoundError:
+        print("ERROR: 'Rscript' not found. Install R and add to the system PATH.")
+        return {}
+    except subprocess.TimeoutExpired:
+        print("ERROR: R script timed out after 300 s.")
+        return {}
+    finally:
+        tmp_csv.unlink(missing_ok=True)
+        tmp_r.unlink(missing_ok=True)
+
+    # ── Parse ATS p-values from machine-readable line ─────────────────────────
+    import re as _re
+    _pv_match = _re.search(
+        r'__ATS_PVALS__ Condition=(\S+) Week=(\S+) Interaction=(\S+)',
+        r_output,
+    )
+    ats_pvalues = {}
+    if _pv_match:
+        try:
+            ats_pvalues = {
+                'Condition':      float(_pv_match.group(1)),
+                'Week':           float(_pv_match.group(2)),
+                'Condition:Week': float(_pv_match.group(3)),
+            }
+        except ValueError:
+            pass
+    # Strip the machine-readable line before display/save
+    r_output_clean = _re.sub(r'__ATS_PVALS__[^\n]*\n?', '', r_output)
+
+    print(r_output_clean)
+
+    # ── Save report ───────────────────────────────────────────────────────────
+    report_path = None
+    if r_output.strip() and output_dir is not None:
+        os.makedirs(output_dir, exist_ok=True)
+        _ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        report_path = os.path.join(
+            output_dir, f'nparld_condition_week_{measure}_{_ts}.txt'
+        )
+        header_lines = [
+            '=' * 72,
+            f'nparLD: {measure} -- Condition x Week (F1-LD-F1 nonparametric ANOVA)',
+            '=' * 72,
+            f'Generated   : {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
+            f'Measure     : {measure}',
+            f'Conditions  : {", ".join(str(c) for c in condition_levels)}',
+            f'Weeks       : {week_levels}',
+            f'N subjects  : {n_subjects} (complete cases across all weeks)',
+            '',
+            'Design      : F1-LD-F1 (one between-subjects x one within-subjects factor)',
+            'Between     : Condition  (starting_condition)',
+            'Within      : Week       (sessions 1-4 = week 1, 5-8 = week 2, etc.)',
+            'Response    : Per-animal per-week mean of measure',
+            '',
+            'Statistics  : ANOVA-Type Statistic (ATS, chi-sq approx.) -- primary',
+            '              Box approximation of ATS -- secondary',
+            '              Wald-Type Statistic (WTS) -- reference only',
+            'Post-hoc    : Between-condition: pairwise Mann-Whitney U, Holm corrected',
+            '              Per-week        : pairwise Mann-Whitney U at each week, Holm corrected',
+            '',
+            'R output:',
+            '-' * 72,
+            '',
+        ]
+        with open(report_path, 'w', encoding='utf-8') as _fout:
+            _fout.write('\n'.join(header_lines) + r_output_clean)
+        print(f"\n[OK] nparLD report saved -> {report_path}")
+
+    return {
+        'r_output': r_output_clean,
+        'report_path': report_path,
+        'n_subjects': n_subjects,
+        'conditions': condition_levels,
+        'weeks': week_levels,
+        'ats_pvalues': ats_pvalues,
+        'measure': measure,
+    }
+
+
+def _bh_fdr(p_values):
+    """Benjamini-Hochberg FDR correction (no scipy dependency)."""
+    n = len(p_values)
+    if n == 0:
+        return []
+    order = sorted(range(n), key=lambda i: p_values[i])
+    p_sorted = [p_values[i] for i in order]
+    p_adj = [p_sorted[i] * n / (i + 1) for i in range(n)]
+    # Enforce monotonicity from right to left
+    for i in range(n - 2, -1, -1):
+        p_adj[i] = min(p_adj[i], p_adj[i + 1])
+    result = [0.0] * n
+    for rank, orig_idx in enumerate(order):
+        result[orig_idx] = min(p_adj[rank], 1.0)
+    return result
+
+
+def _write_nparld_bh_fdr_summary(run_results, output_dir=None):
+    """
+    Apply BH FDR correction across all DVs (one correction per ANOVA effect)
+    and print + save a summary report.
+
+    run_results : list of dicts returned by run_nparld_condition_week_r(),
+                  each must have keys 'measure' and 'ats_pvalues'.
+    """
+    measures = [r['measure'] for r in run_results]
+    effects  = ['Condition', 'Week', 'Condition:Week']
+
+    _ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    lines = [
+        '=' * 72,
+        'nparLD: BH FDR CORRECTION ACROSS DEPENDENT VARIABLES',
+        '=' * 72,
+        f'Generated : {_ts}',
+        f'N DVs     : {len(measures)}',
+        f'DVs       : {", ".join(measures)}',
+        '',
+        'Method : Benjamini-Hochberg FDR applied independently for each',
+        '         ANOVA effect (Condition, Week, Condition:Week) across',
+        '         all dependent variables listed above.',
+        '',
+        'Note   : Correction is across DVs only; the 3 effects within a',
+        '         single model are NOT corrected against each other.',
+        '',
+    ]
+
+    print('\n' + '=' * 72)
+    print('nparLD: BH FDR CORRECTION ACROSS DEPENDENT VARIABLES')
+    print(f'N DVs: {len(measures)}')
+    print('=' * 72)
+
+    for effect in effects:
+        p_vals    = [r['ats_pvalues'].get(effect, float('nan')) for r in run_results]
+        valid_idx = [i for i, p in enumerate(p_vals) if p == p]  # exclude NaN
+
+        header = f'Effect: {effect}  (n_valid={len(valid_idx)})'
+        lines.append(header)
+        print(f'\n{header}')
+
+        if not valid_idx:
+            lines.append('  -- no valid p-values --')
+            print('  -- no valid p-values --')
+            lines.append('')
+            continue
+
+        p_valid   = [p_vals[i] for i in valid_idx]
+        p_fdr     = _bh_fdr(p_valid)
+
+        col_hdr = f'  {"DV":<26}  {"p_raw":>10}  {"p_BH_FDR":>10}  {"Sig":<4}'
+        sep     = '  ' + '-' * 54
+        lines += [col_hdr, sep]
+        print(col_hdr)
+        print(sep)
+
+        for j, orig_i in enumerate(valid_idx):
+            m_name = measures[orig_i]
+            p_r    = p_vals[orig_i]
+            p_b    = p_fdr[j]
+            sig    = ('***' if p_b < 0.001 else
+                      '**'  if p_b < 0.01  else
+                      '*'   if p_b < 0.05  else
+                      '.'   if p_b < 0.1   else '')
+            row = f'  {m_name:<26}  {p_r:>10.6f}  {p_b:>10.6f}  {sig:<4}'
+            lines.append(row)
+            print(row)
+
+        lines.append('')
+        print()
+
+    if output_dir is not None:
+        os.makedirs(output_dir, exist_ok=True)
+        _fts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        summary_path = os.path.join(
+            output_dir, f'nparld_bh_fdr_summary_{_fts}.txt'
+        )
+        with open(summary_path, 'w', encoding='utf-8') as _fout:
+            _fout.write('\n'.join(lines) + '\n')
+        print(f'[OK] BH FDR summary saved -> {summary_path}')
+
+
+def _run_nparld_menu(all_results, output_dir=None):
+    """Interactive CLI menu to run nparLD Condition x Week ANOVA."""
+    _NPARLD_MEASURES = [
+        'sensitivity',
+        'average_speed',
+        'hits',
+        'lick_count',
+        'avg_cap',
+        'rewards_per_bout',
+        'lick_after_reward_prop',
+        'dprime',
+        'total_distance',
+        'immobility_prop',
+    ]
+    # Append ending_level if it was injected into results_df (requires transitions CSV)
+    if all_results and 'ending_level' in all_results[0].get('df', {}).columns:
+        _NPARLD_MEASURES.append('ending_level')
+    print('\n' + '=' * 60)
+    print('nparLD: Condition x Week nonparametric ANOVA')
+    print('Sessions 1-4 = Week 1, 5-8 = Week 2, etc.')
+    print('=' * 60)
+    print('Available measures:')
+    for idx, m in enumerate(_NPARLD_MEASURES, 1):
+        print(f'  {idx:2d}. {m}')
+    print('   0. Run all measures')
+    print('  -1. Cancel / return')
+
+    while True:
+        try:
+            choice = input('Select measure(s) — single number, comma-separated list, 0, or -1: ').strip()
+        except EOFError:
+            print('nparLD cancelled.')
+            return
+        if choice == '-1':
+            print('nparLD cancelled.')
+            return
+        if choice == '0':
+            selected_measures = _NPARLD_MEASURES
+        else:
+            # Accept comma-separated list of indices, e.g. "1,9,10"
+            try:
+                indices = [int(x.strip()) for x in choice.split(',')]
+            except ValueError:
+                print('  Invalid input. Enter a number or comma-separated numbers.')
+                continue
+            invalid = [i for i in indices if not (1 <= i <= len(_NPARLD_MEASURES))]
+            if invalid:
+                print(f'  Out-of-range: {invalid}. Please enter numbers between 1 and {len(_NPARLD_MEASURES)}.')
+                continue
+            selected_measures = [_NPARLD_MEASURES[i - 1] for i in indices]
+
+        all_nparld_results = []
+        for m in selected_measures:
+            print(f'\n--- Running nparLD for: {m} ---')
+            res = run_nparld_condition_week_r(
+                all_results, measure=m, output_dir=output_dir
+            )
+            if res and res.get('ats_pvalues'):
+                all_nparld_results.append(res)
+        # BH FDR correction across DVs (only meaningful with ≥2 DVs)
+        if len(all_nparld_results) >= 2:
+            _write_nparld_bh_fdr_summary(all_nparld_results, output_dir)
+        return
+
+
 def main():
     # Create and hide the root window
     root = tk.Tk()
@@ -15288,6 +15842,31 @@ def main():
         if save_path:
             fig.savefig(save_path, bbox_inches='tight', format='svg')
             print(f"Saved: {save_path}")
+
+    # ── Optional nparLD Condition x Week ANOVA ────────────────────────────────
+    # Inject ending_level column into each mouse's results_df if level progression
+    # data is available (requires transitions CSV to have been provided).
+    _prog = (_level_stats_data or {}).get('level_progression') if _level_stats_data else None
+    if _prog:
+        for _res in all_results:
+            _aid = _res['mouse']
+            if _aid in _prog:
+                _pts = _prog[_aid]  # [(session_rank, level_num), ...]
+                _n = len(_res['df'])
+                _levels = [float('nan')] * _n
+                for _rank, _lv in _pts:
+                    _idx = _rank - 1  # session_rank is 1-based
+                    if 0 <= _idx < _n:
+                        _levels[_idx] = float(_lv)
+                _res['df']['ending_level'] = _levels
+    try:
+        _nparld_ans = input(
+            '\nRun nparLD Condition x Week nonparametric ANOVA? [y/n]: '
+        ).strip().lower()
+    except EOFError:
+        _nparld_ans = 'n'
+    if _nparld_ans == 'y':
+        _run_nparld_menu(all_results, output_dir=output_dir)
 
 if __name__ == "__main__":
     main()
