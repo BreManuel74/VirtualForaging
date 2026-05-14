@@ -15115,16 +15115,22 @@ def _bh_fdr(p_values):
     return result
 
 
-def _write_nparld_bh_fdr_summary(run_results, output_dir=None):
+def _write_nparld_bh_fdr_summary(run_results, output_dir=None,
+                                  effects=None, filename_tag='bh_fdr_summary'):
     """
     Apply BH FDR correction across all DVs (one correction per ANOVA effect)
     and print + save a summary report.
 
-    run_results : list of dicts returned by run_nparld_condition_week_r(),
-                  each must have keys 'measure' and 'ats_pvalues'.
+    run_results  : list of dicts returned by run_nparld_condition_week_r() or
+                   run_nparld_condition_weekday_r(); each must have keys
+                   'measure' and 'ats_pvalues'.
+    effects      : list of effect names to correct (keys in 'ats_pvalues').
+                   Defaults to ['Condition', 'Week', 'Condition:Week'].
+    filename_tag : suffix used in the output filename.
     """
     measures = [r['measure'] for r in run_results]
-    effects  = ['Condition', 'Week', 'Condition:Week']
+    if effects is None:
+        effects = ['Condition', 'Week', 'Condition:Week']
 
     _ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     lines = [
@@ -15191,7 +15197,7 @@ def _write_nparld_bh_fdr_summary(run_results, output_dir=None):
         os.makedirs(output_dir, exist_ok=True)
         _fts = datetime.now().strftime('%Y%m%d_%H%M%S')
         summary_path = os.path.join(
-            output_dir, f'nparld_bh_fdr_summary_{_fts}.txt'
+            output_dir, f'nparld_{filename_tag}_{_fts}.txt'
         )
         with open(summary_path, 'w', encoding='utf-8') as _fout:
             _fout.write('\n'.join(lines) + '\n')
@@ -15260,6 +15266,495 @@ def _run_nparld_menu(all_results, output_dir=None):
         # BH FDR correction across DVs (only meaningful with ≥2 DVs)
         if len(all_nparld_results) >= 2:
             _write_nparld_bh_fdr_summary(all_nparld_results, output_dir)
+        return
+
+
+# ── nparLD: Condition x Weekday (training day of week) ────────────────────────
+
+_DOW_NPARLD = ['Monday', 'Tuesday', 'Thursday', 'Friday']  # fixed 4-day training cycle
+
+
+def run_nparld_condition_weekday_r(
+    all_results,
+    measure: str = 'hits',
+    output_dir=None,
+) -> dict:
+    """
+    Nonparametric repeated-measures ANOVA via R nparLD.
+
+    Design  : F1-LD-F1 (one between-subjects x one within-subjects factor)
+    Between : Condition  (starting_condition)
+    Within  : Weekday    (Monday / Tuesday / Thursday / Friday)
+    Response: per-animal per-weekday mean of ``measure``
+
+    Returns
+    -------
+    dict with keys: 'r_output', 'report_path', 'n_subjects', 'conditions',
+                    'weekdays', 'ats_pvalues', 'measure'
+    """
+    import glob as _glob
+
+    _WD_ORDER = _DOW_NPARLD
+
+    # ── Build per-animal per-weekday mean dataset ─────────────────────────────
+    frames = []
+    for result in all_results:
+        df = result['df'].copy()
+        if 'weekday' not in df.columns:
+            print(f"  [WARNING] 'weekday' column missing for {result['mouse']} — skipping")
+            continue
+        if measure not in df.columns:
+            print(f"  [WARNING] '{measure}' not found for {result['mouse']} — skipping")
+            continue
+        df['ID'] = result['mouse']
+        df['Condition'] = result['starting_condition']
+        sub = df[['ID', 'Condition', 'weekday', measure]].dropna(subset=[measure])
+        frames.append(sub)
+
+    if not frames:
+        print(f"  [ERROR] No data available for measure '{measure}'.")
+        return {}
+
+    combined = pd.concat(frames, ignore_index=True)
+    combined = combined.rename(columns={'weekday': 'Weekday', measure: 'Response'})
+
+    # Per-animal per-weekday mean
+    wd_data = (
+        combined
+        .groupby(['ID', 'Condition', 'Weekday'], as_index=False)['Response']
+        .mean()
+    )
+
+    # Complete-case filter: keep only animals present in every training weekday
+    wd_counts = wd_data.groupby('ID')['Weekday'].nunique()
+    n_required = len(_WD_ORDER)
+    complete_ids = wd_counts[wd_counts == n_required].index
+    n_dropped = wd_data['ID'].nunique() - len(complete_ids)
+    if n_dropped:
+        print(f"  [NOTE] Dropped {n_dropped} animal(s) missing at least one weekday; "
+              f"{len(complete_ids)} retained")
+    wd_data = wd_data[wd_data['ID'].isin(complete_ids)].copy()
+
+    if wd_data.empty or len(complete_ids) < 3:
+        print(f"  [ERROR] Insufficient complete-case animals ({len(complete_ids)}) for nparLD.")
+        return {}
+
+    condition_levels = sorted(wd_data['Condition'].unique())
+    n_subjects = int(wd_data['ID'].nunique())
+
+    print(f"\nnparLD (weekday): {n_subjects} subjects x {len(_WD_ORDER)} weekdays x {len(condition_levels)} conditions")
+    print(f"  Conditions : {condition_levels}")
+    print(f"  Weekdays   : {_WD_ORDER}")
+
+    # ── Write temp CSV ────────────────────────────────────────────────────────
+    tmp_csv = Path(tempfile.mktemp(suffix='.csv'))
+    wd_data[['ID', 'Condition', 'Weekday', 'Response']].to_csv(str(tmp_csv), index=False)
+
+    _csv_r     = str(tmp_csv).replace('\\', '/')
+    _wd_levels = ', '.join(f'"{w}"' for w in _WD_ORDER)
+    _co_levels = ', '.join(f'"{c}"' for c in condition_levels)
+
+    r_script = (
+        'options(warn=1)\n'
+        'if (!require("nparLD", quietly=TRUE, warn.conflicts=FALSE)) {\n'
+        '  install.packages("nparLD", repos="https://cran.r-project.org", quiet=TRUE)\n'
+        '  library(nparLD)\n'
+        '}\n'
+        '\n'
+        f'data <- read.csv("{_csv_r}")\n'
+        f'data$Weekday   <- factor(data$Weekday,   levels=c({_wd_levels}))\n'
+        f'data$Condition <- factor(data$Condition, levels=c({_co_levels}))\n'
+        'data$ID        <- factor(data$ID)\n'
+        '\n'
+        'cat("\\n================================================================\\n")\n'
+        f'cat("nparLD: {measure} -- Condition x Weekday (F1-LD-F1 design)\\n")\n'
+        'cat("================================================================\\n")\n'
+        'cat("N subjects  :", nlevels(data$ID), "\\n")\n'
+        'cat("Conditions  :", paste(levels(data$Condition), collapse=", "), "\\n")\n'
+        'cat("Weekdays    :", paste(levels(data$Weekday),   collapse=", "), "\\n\\n")\n'
+        '\n'
+        'result <- f1.ld.f1(\n'
+        '  y          = data$Response,\n'
+        '  time       = data$Weekday,\n'
+        '  group      = data$Condition,\n'
+        '  subject    = data$ID,\n'
+        '  time.name  = "Weekday",\n'
+        '  group.name = "Condition",\n'
+        '  description = FALSE\n'
+        ')\n'
+        '\n'
+        '# Helper functions\n'
+        'sig_fn <- function(p) {\n'
+        '  if(is.na(p)) return("")\n'
+        '  if(p<0.001) return("***")\n'
+        '  if(p<0.01)  return("**")\n'
+        '  if(p<0.05)  return("*")\n'
+        '  if(p<0.1)   return(".")\n'
+        '  return("")\n'
+        '}\n'
+        'fmt_p <- function(p) {\n'
+        '  if(is.na(p)) return("      NA")\n'
+        '  if(p<0.0001) return("< 0.0001")\n'
+        '  sprintf("%.6f", p)\n'
+        '}\n'
+        '\n'
+        'cat("\\n--- ANOVA-Type Statistic (ATS) ---\\n")\n'
+        'cat(sprintf("  %-26s  %10s  %8s  %12s  %s\\n", "Effect", "ATS", "df", "p-value", "Sig"))\n'
+        'cat("  ", strrep("-", 62), "\\n", sep="")\n'
+        'ats_df <- result$ANOVA.test\n'
+        'for (i in seq_len(nrow(ats_df))) {\n'
+        '  eff <- rownames(ats_df)[i]\n'
+        '  pv  <- ats_df[i, ncol(ats_df)]\n'
+        '  cat(sprintf("  %-26s  %10.4f  %8.4f  %12s  %s\\n",\n'
+        '              eff, ats_df[i,1], ats_df[i,2], fmt_p(pv), sig_fn(pv)))\n'
+        '}\n'
+        '\n'
+        'cat("\\n--- ATS with Box approximation ---\\n")\n'
+        'cat(sprintf("  %-26s  %10s  %7s  %8s  %12s  %s\\n",\n'
+        '            "Effect", "ATS", "df1", "df2", "p-value", "Sig"))\n'
+        'cat("  ", strrep("-", 72), "\\n", sep="")\n'
+        'box_df <- result$ANOVA.test.mod.Box\n'
+        'for (i in seq_len(nrow(box_df))) {\n'
+        '  eff <- rownames(box_df)[i]\n'
+        '  pv  <- box_df[i, ncol(box_df)]\n'
+        '  cat(sprintf("  %-26s  %10.4f  %7.4f  %8.4f  %12s  %s\\n",\n'
+        '              eff, box_df[i,1], box_df[i,2], box_df[i,3], fmt_p(pv), sig_fn(pv)))\n'
+        '}\n'
+        '\n'
+        'cat("\\n--- Wald-Type Statistic (WTS) ---\\n")\n'
+        'cat(sprintf("  %-26s  %10s  %8s  %12s  %s\\n", "Effect", "WTS", "df", "p-value", "Sig"))\n'
+        'cat("  ", strrep("-", 62), "\\n", sep="")\n'
+        'wts_df <- result$Wald.test\n'
+        'for (i in seq_len(nrow(wts_df))) {\n'
+        '  eff <- rownames(wts_df)[i]\n'
+        '  pv  <- wts_df[i, ncol(wts_df)]\n'
+        '  cat(sprintf("  %-26s  %10.4f  %8.4f  %12s  %s\\n",\n'
+        '              eff, wts_df[i,1], wts_df[i,2], fmt_p(pv), sig_fn(pv)))\n'
+        '}\n'
+        '\n'
+        'cat("\\n--- Relative Treatment Effects (RTE) ---\\n")\n'
+        'print(result$RTE)\n'
+        '\n'
+        'cat("\\n================================================================\\n")\n'
+        'cat("POST-HOC: Between-condition (Mann-Whitney U, Holm corrected)\\n")\n'
+        'cat("  (per-animal mean across all weekdays)\\n")\n'
+        'cat("================================================================\\n")\n'
+        'per_animal <- aggregate(Response ~ ID + Condition, data=data, FUN=mean)\n'
+        'conds_all  <- levels(per_animal$Condition)\n'
+        'if (length(conds_all) >= 2) {\n'
+        '  pairs_all <- combn(length(conds_all), 2)\n'
+        '  p_raw_all <- apply(pairs_all, 2, function(idx) {\n'
+        '    x <- per_animal$Response[per_animal$Condition == conds_all[idx[1]]]\n'
+        '    y <- per_animal$Response[per_animal$Condition == conds_all[idx[2]]]\n'
+        '    if (length(x)<1 || length(y)<1) return(NA_real_)\n'
+        '    tryCatch(wilcox.test(x, y, exact=FALSE)$p.value, error=function(e) NA_real_)\n'
+        '  })\n'
+        '  p_holm_all <- p.adjust(p_raw_all, method="holm")\n'
+        '  cat(sprintf("  %-22s  %-22s  %10s  %10s  %s\\n",\n'
+        '              "Group A", "Group B", "p_raw", "p_holm", "Sig"))\n'
+        '  cat("  ", strrep("-", 68), "\\n", sep="")\n'
+        '  for (k in seq_len(ncol(pairs_all))) {\n'
+        '    ca    <- conds_all[pairs_all[1,k]]\n'
+        '    cb    <- conds_all[pairs_all[2,k]]\n'
+        '    na_ca <- sum(!is.na(per_animal$Response[per_animal$Condition==ca]))\n'
+        '    nb_cb <- sum(!is.na(per_animal$Response[per_animal$Condition==cb]))\n'
+        '    if (is.na(p_raw_all[k])) {\n'
+        '      cat(sprintf("  %-22s  %-22s  %10s  %10s\\n",\n'
+        '                  paste0(ca," (n=",na_ca,")"), paste0(cb," (n=",nb_cb,")"),\n'
+        '                  "NA", "NA"))\n'
+        '    } else {\n'
+        '      cat(sprintf("  %-22s  %-22s  %10.6f  %10.6f  %s\\n",\n'
+        '                  paste0(ca," (n=",na_ca,")"), paste0(cb," (n=",nb_cb,")"),\n'
+        '                  p_raw_all[k], p_holm_all[k], sig_fn(p_holm_all[k])))\n'
+        '    }\n'
+        '  }\n'
+        '} else {\n'
+        '  cat("  (only 1 condition -- no pairwise test)\\n")\n'
+        '}\n'
+        '\n'
+        'cat("\\n================================================================\\n")\n'
+        'cat("POST-HOC: Between-condition comparisons at each weekday\\n")\n'
+        'cat("  (Mann-Whitney U, Holm corrected within each weekday)\\n")\n'
+        'cat("================================================================\\n")\n'
+        'for (wd in levels(data$Weekday)) {\n'
+        '  sub <- data[data$Weekday == wd, ]\n'
+        '  cat("\\nWeekday:", wd, "\\n")\n'
+        '  conds <- levels(sub$Condition)\n'
+        '  if (length(conds) < 2) { cat("  (only 1 condition -- no pairwise test)\\n"); next }\n'
+        '  pairs_idx <- combn(length(conds), 2)\n'
+        '  p_raw <- apply(pairs_idx, 2, function(idx) {\n'
+        '    x <- sub$Response[sub$Condition == conds[idx[1]]]\n'
+        '    y <- sub$Response[sub$Condition == conds[idx[2]]]\n'
+        '    if (length(x) < 1 || length(y) < 1) return(NA_real_)\n'
+        '    tryCatch(\n'
+        '      wilcox.test(x, y, exact=FALSE)$p.value,\n'
+        '      error = function(e) NA_real_\n'
+        '    )\n'
+        '  })\n'
+        '  p_holm <- p.adjust(p_raw, method="holm")\n'
+        '  n_pairs <- ncol(pairs_idx)\n'
+        '  for (k in seq_len(n_pairs)) {\n'
+        '    ca <- conds[pairs_idx[1, k]]\n'
+        '    cb <- conds[pairs_idx[2, k]]\n'
+        '    na_ca <- sum(!is.na(sub$Response[sub$Condition == ca]))\n'
+        '    nb_cb <- sum(!is.na(sub$Response[sub$Condition == cb]))\n'
+        '    if (is.na(p_raw[k])) {\n'
+        '      cat(sprintf("  %s (n=%d) vs %s (n=%d) : NA\\n", ca, na_ca, cb, nb_cb))\n'
+        '    } else {\n'
+        '      sig <- sig_fn(p_holm[k])\n'
+        '      cat(sprintf("  %s (n=%d) vs %s (n=%d) : p_raw=%.6f  p_holm=%.6f  %s\\n",\n'
+        '                  ca, na_ca, cb, nb_cb, p_raw[k], p_holm[k], sig))\n'
+        '    }\n'
+        '  }\n'
+        '}\n'
+        '\n'
+        'cat("\\n================================================================\\n")\n'
+        'cat("POST-HOC: Pairwise weekday comparisons (condition-agnostic)\\n")\n'
+        'cat("  (Wilcoxon signed-rank, paired by animal, Holm corrected)\\n")\n'
+        'cat("================================================================\\n")\n'
+        'wd_lvls_ph  <- levels(data$Weekday)\n'
+        'wd_pairs_ph <- combn(length(wd_lvls_ph), 2)\n'
+        'n_wd_pairs  <- ncol(wd_pairs_ph)\n'
+        'p_raw_wd_ph <- numeric(n_wd_pairs)\n'
+        'n_pairs_used <- integer(n_wd_pairs)\n'
+        'for (k in seq_len(n_wd_pairs)) {\n'
+        '  da    <- wd_lvls_ph[wd_pairs_ph[1, k]]\n'
+        '  db    <- wd_lvls_ph[wd_pairs_ph[2, k]]\n'
+        '  sub_a <- data[data$Weekday == da, ]\n'
+        '  sub_b <- data[data$Weekday == db, ]\n'
+        '  common_ids <- intersect(as.character(sub_a$ID), as.character(sub_b$ID))\n'
+        '  x <- sub_a$Response[match(common_ids, as.character(sub_a$ID))]\n'
+        '  y <- sub_b$Response[match(common_ids, as.character(sub_b$ID))]\n'
+        '  n_pairs_used[k] <- length(common_ids)\n'
+        '  if (length(x) < 3) { p_raw_wd_ph[k] <- NA_real_; next }\n'
+        '  p_raw_wd_ph[k] <- tryCatch(\n'
+        '    wilcox.test(x, y, paired=TRUE, exact=FALSE)$p.value,\n'
+        '    error = function(e) NA_real_\n'
+        '  )\n'
+        '}\n'
+        'p_holm_wd_ph <- p.adjust(p_raw_wd_ph, method="holm")\n'
+        'cat(sprintf("  %-14s  %-14s  %6s  %10s  %10s  %s\\n",\n'
+        '            "Day A", "Day B", "n", "p_raw", "p_holm", "Sig"))\n'
+        'cat("  ", strrep("-", 62), "\\n", sep="")\n'
+        'for (k in seq_len(n_wd_pairs)) {\n'
+        '  da <- wd_lvls_ph[wd_pairs_ph[1, k]]\n'
+        '  db <- wd_lvls_ph[wd_pairs_ph[2, k]]\n'
+        '  np <- n_pairs_used[k]\n'
+        '  if (is.na(p_raw_wd_ph[k])) {\n'
+        '    cat(sprintf("  %-14s  %-14s  %6d  %10s  %10s\\n",\n'
+        '                da, db, np, "NA", "NA"))\n'
+        '  } else {\n'
+        '    cat(sprintf("  %-14s  %-14s  %6d  %10.6f  %10.6f  %s\\n",\n'
+        '                da, db, np, p_raw_wd_ph[k], p_holm_wd_ph[k],\n'
+        '                sig_fn(p_holm_wd_ph[k])))\n'
+        '  }\n'
+        '}\n'
+        '\n'
+        'cat("\\n================================================================\\n")\n'
+        'cat("OMNIBUS SUMMARY -- ATS\\n")\n'
+        'cat("================================================================\\n")\n'
+        'cat(sprintf("  %-26s  %10s  %8s  %12s  %s\\n", "Effect", "ATS", "df", "p-value", "Sig"))\n'
+        'cat("  ", strrep("-", 62), "\\n", sep="")\n'
+        'for (i in seq_len(nrow(ats_df))) {\n'
+        '  eff <- rownames(ats_df)[i]\n'
+        '  pv  <- ats_df[i, ncol(ats_df)]\n'
+        '  cat(sprintf("  %-26s  %10.4f  %8.4f  %12s  %s\\n",\n'
+        '              eff, ats_df[i,1], ats_df[i,2], fmt_p(pv), sig_fn(pv)))\n'
+        '}\n'
+        '\n'
+        'cat("\\n================================================================\\n")\n'
+        'cat("END\\n")\n'
+        '\n'
+        '# Machine-readable line for Python BH-FDR collection (do not remove)\n'
+        'p_cond  <- ats_df["Condition",         ncol(ats_df)]\n'
+        'p_wd    <- ats_df["Weekday",            ncol(ats_df)]\n'
+        'p_inter <- ats_df["Condition:Weekday",  ncol(ats_df)]\n'
+        'cat(sprintf("__ATS_PVALS_WD__ Condition=%.15g Weekday=%.15g Interaction=%.15g\\n",\n'
+        '            p_cond, p_wd, p_inter))\n'
+    )
+
+    tmp_r = Path(tempfile.mktemp(suffix='.R'))
+    tmp_r.write_text(r_script, encoding='utf-8')
+
+    # ── Locate Rscript ────────────────────────────────────────────────────────
+    rscript = shutil.which('Rscript') or shutil.which('Rscript.exe')
+    if rscript is None:
+        for _pat in (
+            r'C:\Program Files\R\R-*\bin\Rscript.exe',
+            r'C:\Program Files\R\R-*\bin\x64\Rscript.exe',
+        ):
+            _m = sorted(_glob.glob(_pat))
+            if _m:
+                rscript = _m[-1]
+                break
+
+    if rscript is None:
+        print("ERROR: 'Rscript' not found. Install R and add to PATH.")
+        tmp_csv.unlink(missing_ok=True)
+        tmp_r.unlink(missing_ok=True)
+        return {}
+
+    r_output = ''
+    try:
+        proc = subprocess.run(
+            [rscript, '--vanilla', str(tmp_r)],
+            capture_output=True, text=True, timeout=300,
+        )
+        r_output = proc.stdout
+        r_stderr = proc.stderr.strip()
+        if proc.returncode != 0:
+            print(f"R exited with code {proc.returncode}.")
+        if r_stderr:
+            non_trivial = [
+                ln for ln in r_stderr.splitlines()
+                if not ln.startswith('Loading') and ln.strip()
+            ]
+            if non_trivial:
+                print("R messages:\n" + '\n'.join(non_trivial))
+    except FileNotFoundError:
+        print("ERROR: 'Rscript' not found. Install R and add to the system PATH.")
+        return {}
+    except subprocess.TimeoutExpired:
+        print("ERROR: R script timed out after 300 s.")
+        return {}
+    finally:
+        tmp_csv.unlink(missing_ok=True)
+        tmp_r.unlink(missing_ok=True)
+
+    # ── Parse ATS p-values from machine-readable line ─────────────────────────
+    import re as _re
+    _pv_match = _re.search(
+        r'__ATS_PVALS_WD__ Condition=(\S+) Weekday=(\S+) Interaction=(\S+)',
+        r_output,
+    )
+    ats_pvalues = {}
+    if _pv_match:
+        try:
+            ats_pvalues = {
+                'Condition':           float(_pv_match.group(1)),
+                'Weekday':             float(_pv_match.group(2)),
+                'Condition:Weekday':   float(_pv_match.group(3)),
+            }
+        except ValueError:
+            pass
+    # Strip the machine-readable line before display/save
+    r_output_clean = _re.sub(r'__ATS_PVALS_WD__[^\n]*\n?', '', r_output)
+
+    print(r_output_clean)
+
+    # ── Save report ───────────────────────────────────────────────────────────
+    report_path = None
+    if r_output.strip() and output_dir is not None:
+        os.makedirs(output_dir, exist_ok=True)
+        _ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        report_path = os.path.join(
+            output_dir, f'nparld_condition_weekday_{measure}_{_ts}.txt'
+        )
+        header_lines = [
+            '=' * 72,
+            f'nparLD: {measure} -- Condition x Weekday (F1-LD-F1 nonparametric ANOVA)',
+            '=' * 72,
+            f'Generated   : {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
+            f'Measure     : {measure}',
+            f'Conditions  : {", ".join(str(c) for c in condition_levels)}',
+            f'Weekdays    : {_WD_ORDER}',
+            f'N subjects  : {n_subjects} (complete cases across all 4 weekdays)',
+            '',
+            'Design      : F1-LD-F1 (one between-subjects x one within-subjects factor)',
+            'Between     : Condition  (starting_condition)',
+            'Within      : Weekday    (Monday / Tuesday / Thursday / Friday)',
+            'Response    : Per-animal per-weekday mean of measure (across all sessions)',
+            '',
+            'Statistics  : ANOVA-Type Statistic (ATS, chi-sq approx.) -- primary',
+            '              Box approximation of ATS -- secondary',
+            '              Wald-Type Statistic (WTS) -- reference only',
+            'Post-hoc    : Between-condition: pairwise Mann-Whitney U, Holm corrected',
+            '              Per-weekday     : pairwise Mann-Whitney U at each weekday, Holm corrected',
+            '              Across-weekday  : pairwise Wilcoxon signed-rank (paired by animal, condition-agnostic), Holm corrected',
+            '',
+            'R output:',
+            '-' * 72,
+            '',
+        ]
+        with open(report_path, 'w', encoding='utf-8') as _fout:
+            _fout.write('\n'.join(header_lines) + r_output_clean)
+        print(f"\n[OK] nparLD weekday report saved -> {report_path}")
+
+    return {
+        'r_output': r_output_clean,
+        'report_path': report_path,
+        'n_subjects': n_subjects,
+        'conditions': condition_levels,
+        'weekdays': _WD_ORDER,
+        'ats_pvalues': ats_pvalues,
+        'measure': measure,
+    }
+
+
+def _run_nparld_weekday_menu(all_results, output_dir=None):
+    """Interactive CLI menu to run nparLD Condition x Weekday ANOVA."""
+    _WD_MEASURES = [
+        'hits',
+        'sensitivity',
+        'average_speed',
+        'lick_count',
+        'avg_cap',
+        'rewards_per_bout',
+        'lick_after_reward_prop',
+        'dprime',
+        'total_distance',
+        'immobility_prop',
+    ]
+    print('\n' + '=' * 60)
+    print('nparLD: Condition x Weekday nonparametric ANOVA')
+    print('Within factor: Monday / Tuesday / Thursday / Friday')
+    print('Response: per-animal per-weekday mean (across all sessions)')
+    print('=' * 60)
+    print('Available measures:')
+    for idx, m in enumerate(_WD_MEASURES, 1):
+        print(f'  {idx:2d}. {m}')
+    print('   0. Run all measures')
+    print('  -1. Cancel / return')
+
+    while True:
+        try:
+            choice = input('Select measure(s) — single number, comma-separated list, 0, or -1: ').strip()
+        except EOFError:
+            return
+
+        if choice == '-1':
+            return
+
+        selected_measures = []
+        if choice == '0':
+            selected_measures = list(_WD_MEASURES)
+        else:
+            try:
+                indices = [int(x.strip()) for x in choice.split(',')]
+            except ValueError:
+                print('  Invalid input. Enter a number or comma-separated numbers.')
+                continue
+            invalid = [i for i in indices if not (1 <= i <= len(_WD_MEASURES))]
+            if invalid:
+                print(f'  Out-of-range: {invalid}. Please enter numbers between 1 and {len(_WD_MEASURES)}.')
+                continue
+            selected_measures = [_WD_MEASURES[i - 1] for i in indices]
+
+        all_wd_results = []
+        for m in selected_measures:
+            print(f'\n--- Running nparLD (weekday) for: {m} ---')
+            res = run_nparld_condition_weekday_r(
+                all_results, measure=m, output_dir=output_dir
+            )
+            if res and res.get('ats_pvalues'):
+                all_wd_results.append(res)
+        # BH FDR correction across DVs when ≥2 DVs ran
+        if len(all_wd_results) >= 2:
+            _write_nparld_bh_fdr_summary(
+                all_wd_results, output_dir,
+                effects=['Condition', 'Weekday', 'Condition:Weekday'],
+                filename_tag='weekday_bh_fdr_summary',
+            )
         return
 
 
@@ -15867,6 +16362,15 @@ def main():
         _nparld_ans = 'n'
     if _nparld_ans == 'y':
         _run_nparld_menu(all_results, output_dir=output_dir)
+
+    try:
+        _nparld_wd_ans = input(
+            '\nRun nparLD Condition x Weekday nonparametric ANOVA? [y/n]: '
+        ).strip().lower()
+    except EOFError:
+        _nparld_wd_ans = 'n'
+    if _nparld_wd_ans == 'y':
+        _run_nparld_weekday_menu(all_results, output_dir=output_dir)
 
 if __name__ == "__main__":
     main()
