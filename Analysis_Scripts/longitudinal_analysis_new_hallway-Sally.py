@@ -1144,6 +1144,132 @@ def _match_rewards_to_zones(trial_log_df, max_window_s: float = 30.0):
     return sorted(matched, key=lambda x: x[0])
 
 
+# ── Mann-Whitney U report writer ──────────────────────────────────────────────
+
+def _write_mwu_report(
+    output_dir,
+    filename_stem: str,
+    measure: str,
+    comparisons: list,
+    n_bootstrap: int = 2000,
+    seed: int = 42,
+) -> None:
+    """Write a formatted Mann-Whitney U test report (.txt) to *output_dir*.
+
+    Parameters
+    ----------
+    output_dir : str | None
+        Directory in which to write the report.  Silently skipped if None.
+    filename_stem : str
+        Base filename (no extension, no timestamp).
+    measure : str
+        Human-readable label for the measure being compared.
+    comparisons : list of (str, str, array-like, array-like)
+        One entry per comparison: (label_a, label_b, values_a, values_b).
+    n_bootstrap : int
+        Bootstrap resamples for the 95 % CI on the Hodges-Lehmann estimator.
+    seed : int
+        RNG seed for reproducible bootstrap CI.
+    """
+    if output_dir is None:
+        return
+    try:
+        from scipy.stats import mannwhitneyu as _mwu_fn
+        os.makedirs(output_dir, exist_ok=True)
+
+        rows = []
+        for (la, lb, arr_a, arr_b) in comparisons:
+            a = np.asarray(arr_a, dtype=float)
+            b = np.asarray(arr_b, dtype=float)
+            a = a[~np.isnan(a)]
+            b = b[~np.isnan(b)]
+            if len(a) < 2 or len(b) < 2:
+                continue
+            u_stat, p_raw = _mwu_fn(a, b, alternative='two-sided')
+            r_rb = 1.0 - 2.0 * float(u_stat) / (len(a) * len(b))
+            diffs = (a[:, None] - b[None, :]).ravel()
+            hl_est = float(np.median(diffs))
+            rng_bs = np.random.default_rng(seed)
+            hl_boots = []
+            for _ in range(n_bootstrap):
+                ab = rng_bs.choice(a, size=len(a), replace=True)
+                bb = rng_bs.choice(b, size=len(b), replace=True)
+                hl_boots.append(float(np.median((ab[:, None] - bb[None, :]).ravel())))
+            ci_lo = float(np.percentile(hl_boots, 2.5))
+            ci_hi = float(np.percentile(hl_boots, 97.5))
+            rows.append({
+                'la': la, 'lb': lb,
+                'na': len(a), 'nb': len(b),
+                'u': float(u_stat), 'p_raw': float(p_raw),
+                'r_rb': r_rb, 'hl_est': hl_est,
+                'ci_lo': ci_lo, 'ci_hi': ci_hi,
+            })
+
+        if not rows:
+            return
+
+        k = len(rows)
+        # Holm-Bonferroni correction
+        correction_label = ('Holm-Bonferroni' if k > 1
+                            else 'None (single pairwise comparison)')
+        sorted_idx = sorted(range(k), key=lambda i: rows[i]['p_raw'])
+        p_adjs = [None] * k
+        prev_adj = 0.0
+        for rank, idx in enumerate(sorted_idx):
+            adj = min(rows[idx]['p_raw'] * (k - rank), 1.0)
+            adj = max(adj, prev_adj)
+            p_adjs[idx] = adj
+            prev_adj = adj
+        for i, row in enumerate(rows):
+            row['p_adj'] = p_adjs[i]
+
+        ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        ts_file = datetime.now().strftime('%Y%m%d_%H%M%S')
+        outpath = os.path.join(output_dir, f'{filename_stem}_mwu_{ts_file}.txt')
+        SEP  = '=' * 90
+        SEP2 = '-' * 90
+        hdr = (f'{"Comparison":<44} {"nA":>4} {"nB":>4}  {"U":>10}  '
+               f'{"p(raw)":>9}  {"p(adj)":>9}  {"r_rb":>7}  {"HL_est":>9}  95% CI')
+        lines = [
+            SEP,
+            f'MANN-WHITNEY U TEST RESULTS  --  {measure}',
+            SEP,
+            f'Generated  : {ts}',
+            f'Measure    : {measure}',
+            f'Correction : {correction_label}',
+            '',
+            'Field definitions:',
+            '  U        : Mann-Whitney U statistic',
+            '  p(raw)   : Two-sided p-value (uncorrected)',
+            f'  p(adj)   : Adjusted p-value ({correction_label})',
+            '  r_rb     : Rank-biserial correlation (effect size; 1 \u2212 2U/(nA\xd7nB))',
+            '             |r| < 0.3 = small, 0.3\u20130.5 = medium, > 0.5 = large',
+            '  HL_est   : Hodges-Lehmann location shift (median of all pairwise diffs A\u2212B)',
+            f'  95% CI   : Bootstrap CI (n={n_bootstrap:,} resamples) on Hodges-Lehmann estimator',
+            '',
+            hdr,
+            SEP2,
+        ]
+        for row in rows:
+            comp_label = f'{row["la"]} vs {row["lb"]}'
+            ci_str = f'[{row["ci_lo"]:.4f}, {row["ci_hi"]:.4f}]'
+            lines.append(
+                f'{comp_label:<44} {row["na"]:>4} {row["nb"]:>4}  '
+                f'{row["u"]:>10.2f}  {row["p_raw"]:>9.4f}  {row["p_adj"]:>9.4f}  '
+                f'{row["r_rb"]:>7.4f}  {row["hl_est"]:>9.4f}  {ci_str}'
+            )
+        lines += [
+            '',
+            'Significance: * p(adj)<0.05   ** p(adj)<0.01   *** p(adj)<0.001',
+            SEP,
+        ]
+        with open(outpath, 'w', encoding='utf-8') as fh:
+            fh.write('\n'.join(lines) + '\n')
+        print(f'  [MWU REPORT] {os.path.basename(outpath)}')
+    except Exception as _mwu_rep_err:
+        print(f'  [WARN] _write_mwu_report failed for "{filename_stem}": {_mwu_rep_err}')
+
+
 # ── Plot selection ────────────────────────────────────────────────────────────
 _ALL_PLOT_KEYS = {
     'speed', 'sensitivity', 'lick_count', 'reward_count',
@@ -1485,7 +1611,7 @@ def _ask_plot_selection(root, labels=None, title='Select Plots to Generate'):
     return frozenset(key for key, var in vars_.items() if var.get())
 
 
-def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, selected_plots=None):
+def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, selected_plots=None, output_dir=None):
     """Analyze rewards/min for each level across all mice, split by starting condition.
 
     Uses a transitions CSV (produced by level_sorter.py) to slice each session's
@@ -2675,6 +2801,14 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
 
             ax_llb.set_title('Final Level Reached by Starting Condition\n(last training day; Mann-Whitney U test)')
             last_level_bar_fig.tight_layout()
+            _write_mwu_report(
+                output_dir, 'last_level_bar',
+                'Final Level Reached per Mouse (by Condition)',
+                [(_lc1, _lc2,
+                  [v for _, v in _last_lvl_by_cond[_lc1]],
+                  [v for _, v in _last_lvl_by_cond[_lc2]])
+                 for (_lc1, _lc2, _, _) in _llb_results],
+            )
 
     # ── Level survivor plot (proportion of mice that experienced each level) ──
     level_survivor_fig = None
@@ -2825,6 +2959,15 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
             _ax_t2.spines['right'].set_visible(False)
             _ax_t2.legend(title='Starting Condition')
             time_to_level2_fig.tight_layout()
+            import itertools as _it_t2
+            _write_mwu_report(
+                output_dir, 'time_to_level2',
+                'Cumulative Time to First Level 1→2 Transition (min)',
+                [(_t2_conds[_ia], _t2_conds[_ib],
+                  list(_t2_by_cond[_t2_conds[_ia]]),
+                  list(_t2_by_cond[_t2_conds[_ib]]))
+                 for _ia, _ib in _it_t2.combinations(range(len(_t2_conds)), 2)],
+            )
 
     # ── Level progression: ending level per session ────────────────────────────
     level_progression_indiv_fig = None
@@ -3001,6 +3144,14 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
                     '(slope of ending level vs session; Mann-Whitney U test)'
                 )
                 level_progression_bar_fig.tight_layout()
+                _write_mwu_report(
+                    output_dir, 'level_progression_bar',
+                    'Rate of Level Change (levels/session, slope)',
+                    [(_lpc1, _lpc2,
+                      [v for _, v in _prog_slope_by_cond[_lpc1]],
+                      [v for _, v in _prog_slope_by_cond[_lpc2]])
+                     for (_lpc1, _lpc2, _, _) in _lpb_results],
+                )
 
     # ── Sensitivity by level — individual mice ────────────────────────────────
     level_sensitivity_fig = None
@@ -6425,6 +6576,14 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
 
         ax_rpbbar.set_title('Average Rewards per Locomotion Bout by Starting Condition\n(collapsed across all sessions; Mann-Whitney U test)')
         condition_rewards_per_bout_bar_fig.tight_layout()
+        _write_mwu_report(
+            output_dir, 'condition_rewards_per_bout_bar',
+            'Rewards per Locomotion Bout',
+            [(_rc1, _rc2,
+              [v for _, v in condition_mouse_rpb[_rc1]],
+              [v for _, v in condition_mouse_rpb[_rc2]])
+             for (_rc1, _rc2, _, _) in _rpbbar_results],
+        )
 
     # ── Condition-based first-lick latency line plot ──────────────────────────
     condition_first_lick_latency_fig = plt.figure(figsize=(12, 6)) if 'condition_first_lick_latency' in selected_plots else None
@@ -6563,6 +6722,14 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
 
         ax_fllbar.set_title('Average First-Lick Latency After Reward Delivery by Starting Condition\n(collapsed across all sessions; Mann-Whitney U test)')
         condition_first_lick_latency_bar_fig.tight_layout()
+        _write_mwu_report(
+            output_dir, 'condition_first_lick_latency_bar',
+            'First Lick Latency After Reward Delivery (s)',
+            [(_fc1, _fc2,
+              [v for _, v in _condition_mouse_fll[_fc1]],
+              [v for _, v in _condition_mouse_fll[_fc2]])
+             for (_fc1, _fc2, _, _) in _fllbar_results],
+        )
 
     # ── Condition-based lick-after-reward proportion line plot ────────────────
     condition_lick_after_reward_prop_fig = plt.figure(figsize=(12, 6)) if 'lick_after_reward_prop' in selected_plots else None
@@ -6698,6 +6865,14 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
 
         ax_larpbar.set_title('Proportion of Reward Deliveries with Licks by Starting Condition\n(2 s post-delivery window, collapsed across all sessions; Mann-Whitney U test)')
         condition_lick_after_reward_prop_bar_fig.tight_layout()
+        _write_mwu_report(
+            output_dir, 'lick_after_reward_prop_bar',
+            'Proportion of Reward Deliveries with Post-Delivery Lick',
+            [(_lc1, _lc2,
+              [v for _, v in _condition_mouse_larp[_lc1]],
+              [v for _, v in _condition_mouse_larp[_lc2]])
+             for (_lc1, _lc2, _, _) in _larp_results],
+        )
 
     # ── Weekday reward bar charts ─────────────────────────────────────────────
     # For each mouse average its reward count (hits) across all sessions that
@@ -7145,6 +7320,14 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
 
         ax_lrrbar.set_title('Average Lick Count / Reward Count Ratio by Starting Condition\n(collapsed across all sessions; Mann-Whitney U test)')
         condition_lick_reward_ratio_bar_fig.tight_layout()
+        _write_mwu_report(
+            output_dir, 'condition_lick_reward_ratio_bar',
+            'Lick Count / Reward Count Ratio',
+            [(_bc1, _bc2,
+              [v for _, v in condition_mouse_lrr[_bc1]],
+              [v for _, v in condition_mouse_lrr[_bc2]])
+             for (_bc1, _bc2, _, _) in _lrrbar_results],
+        )
 
     # ── Punishment zone percentage bar chart (one value per mouse) ────────────
     condition_punish_zone_pct_bar_fig = None
@@ -7234,6 +7417,14 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
 
         ax_pzbar.set_title('% Punishment Zones Across All Sessions by Starting Condition\n(one value per mouse; Mann-Whitney U test)')
         condition_punish_zone_pct_bar_fig.tight_layout()
+        _write_mwu_report(
+            output_dir, 'condition_punish_zone_pct_bar',
+            '% Punishment Zones Across All Sessions',
+            [(_pc1, _pc2,
+              [v for _, v in condition_mouse_pzpct[_pc1]],
+              [v for _, v in condition_mouse_pzpct[_pc2]])
+             for (_pc1, _pc2, _, _) in _pzbar_results],
+        )
 
     # Create collapsed condition bar plot (one average rpm per mouse, collapsed across all days)
     condition_bar_fig = None
@@ -7466,6 +7657,14 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             'Average Sensitivity by Starting Condition\n'
             '(collapsed across all sessions; Mann-Whitney U test)')
         condition_sensitivity_bar_fig.tight_layout()
+        _write_mwu_report(
+            output_dir, 'condition_sensitivity_bar',
+            'Average Sensitivity by Condition',
+            [(_sc1, _sc2,
+              [v for _, v in _csen_data[_sc1]],
+              [v for _, v in _csen_data[_sc2]])
+             for (_sc1, _sc2, _, _) in _senbar_pairs],
+        )
 
     # ── Exploratory: speed histogram ──────────────────────────────────────────
     expl_speed_histogram_fig = None
@@ -10616,6 +10815,14 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             'Average Distance Per Session by Starting Condition\n'
             '(collapsed across all sessions; Mann-Whitney U test)')
         condition_distance_bar_fig.tight_layout()
+        _write_mwu_report(
+            output_dir, 'condition_distance_bar',
+            'Average Distance per Session (m)',
+            [(_sc1, _sc2,
+              [v for _, v in condition_mouse_dist_avg[_sc1]],
+              [v for _, v in condition_mouse_dist_avg[_sc2]])
+             for (_sc1, _sc2, _, _) in _dbar_pairs],
+        )
 
     # Create collapsed condition bar plot for total distance (sum across all sessions, mm → m)
     total_distance_bar_fig = None
@@ -10705,6 +10912,14 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             'Total Distance Traveled per Mouse by Starting Condition\n'
             '(summed across all sessions; Mann-Whitney U test)')
         total_distance_bar_fig.tight_layout()
+        _write_mwu_report(
+            output_dir, 'total_distance_bar',
+            'Total Distance per Mouse (m)',
+            [(_sc1, _sc2,
+              [v for _, v in condition_mouse_dist_total[_sc1]],
+              [v for _, v in condition_mouse_dist_total[_sc2]])
+             for (_sc1, _sc2, _, _) in _tbar_pairs],
+        )
 
     # ── Behavioral epoch plots ────────────────────────────────────────────────
     epoch_speed_per_mouse_fig            = epoch_speed_cond_fig            = None
@@ -11191,6 +11406,14 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     '(-1\u20130 s vs 0\u20131 s; mean \u00b1 SEM across mice; positive = higher capacitance after delivery; Mann-Whitney U)',
                 )
                 epoch_del_cap_diff_entry_fig.tight_layout()
+                _write_mwu_report(
+                    output_dir, 'epoch_delivery_cap_diff_entry',
+                    'Capacitive (z-scored) Post-minus-Pre Reward Delivery (1 s windows)',
+                    [(_conds_dcde[_ia], _conds_dcde[_ib],
+                      [e[1] for e in _dcde_by_cond[_conds_dcde[_ia]]],
+                      [e[1] for e in _dcde_by_cond[_conds_dcde[_ib]]])
+                     for _ia, _ib in _pairs_dcde],
+                )
 
         # ── Sex-split session-averaged epoch plots ───────────────────────────────────
         _sex_color_map = {'male': 'green', 'female': 'purple'}
@@ -11441,6 +11664,14 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     '(0-0.65 s vs 0.65-1.3 s; mean \u00b1 SEM across mice; positive = faster after 0.65 s cutoff)',
                 )
                 epoch_punish_speed_diff_fig.tight_layout()
+                _write_mwu_report(
+                    output_dir, 'epoch_punish_speed_diff',
+                    'Speed Post-minus-Pre 0.65 s Cutoff (Punishment Zone)',
+                    [(_conds_pd[_ia], _conds_pd[_ib],
+                      [e[1] for e in _pdiff_by_cond[_conds_pd[_ia]]],
+                      [e[1] for e in _pdiff_by_cond[_conds_pd[_ib]]])
+                     for _ia, _ib in _pairs_pd],
+                )
 
         # ── Punishment zone: 1 s pre- vs 1 s post-zone entry bar chart ────────
         if 'epoch_punish_speed_pre_post_entry' in selected_plots and _any_punish_speed:
@@ -11620,6 +11851,14 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     '(-1-0 s vs 0-1 s; mean ± SEM across mice; positive = faster after zone entry)',
                 )
                 epoch_punish_speed_diff_entry_fig.tight_layout()
+                _write_mwu_report(
+                    output_dir, 'epoch_punish_speed_diff_entry',
+                    'Speed Post-minus-Pre Zone Entry (Punishment Zone, 1 s windows)',
+                    [(_conds_de[_ia], _conds_de[_ib],
+                      [e[1] for e in _pde_by_cond[_conds_de[_ia]]],
+                      [e[1] for e in _pde_by_cond[_conds_de[_ib]]])
+                     for _ia, _ib in _pairs_de],
+                )
 
         # ── Punishment zone: pre/post 0.65 s cutoff capacitive bar chart ─────
         if 'epoch_punish_cap_pre_post' in selected_plots and _any_punish_cap:
@@ -11798,6 +12037,14 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     '(0-0.65 s vs 0.65-1.3 s; mean \u00b1 SEM across mice; positive = higher licking after 0.65 s cutoff; Mann-Whitney U)',
                 )
                 epoch_punish_cap_diff_fig.tight_layout()
+                _write_mwu_report(
+                    output_dir, 'epoch_punish_cap_diff',
+                    'Capacitive (z-scored) Post-minus-Pre 0.65 s Cutoff (Punishment Zone)',
+                    [(_conds_pcd[_ia], _conds_pcd[_ib],
+                      [e[1] for e in _pcdiff_by_cond[_conds_pcd[_ia]]],
+                      [e[1] for e in _pcdiff_by_cond[_conds_pcd[_ib]]])
+                     for _ia, _ib in _pairs_pcd],
+                )
 
         # ── Punishment zone: 1 s pre- vs 1 s post-zone entry cap bar chart ───
         if 'epoch_punish_cap_pre_post_entry' in selected_plots and _any_punish_cap:
@@ -11976,6 +12223,14 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     '(-1-0 s vs 0-1 s; mean \u00b1 SEM across mice; positive = higher licking after zone entry; Mann-Whitney U)',
                 )
                 epoch_punish_cap_diff_entry_fig.tight_layout()
+                _write_mwu_report(
+                    output_dir, 'epoch_punish_cap_diff_entry',
+                    'Capacitive (z-scored) Post-minus-Pre Zone Entry (Punishment Zone, 1 s windows)',
+                    [(_conds_pcde[_ia], _conds_pcde[_ib],
+                      [e[1] for e in _pcdentry_by_cond[_conds_pcde[_ia]]],
+                      [e[1] for e in _pcdentry_by_cond[_conds_pcde[_ib]]])
+                     for _ia, _ib in _pairs_pcde],
+                )
 
         # ── Pre/post-reward delivery speed bar chart ───────────────────────
         if 'epoch_reward_speed_pre_post' in selected_plots and _any_speed:
@@ -12157,6 +12412,14 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     '(0-0.65 s vs 0.65-1.3 s; mean \u00b1 SEM across mice; positive = faster after reward delivery)',
                 )
                 epoch_reward_speed_diff_fig.tight_layout()
+                _write_mwu_report(
+                    output_dir, 'epoch_reward_speed_diff',
+                    'Speed Post-minus-Pre Reward Delivery (0-0.65 s vs 0.65-1.3 s)',
+                    [(_conds_d[_ia], _conds_d[_ib],
+                      [e[1] for e in _diff_by_cond[_conds_d[_ia]]],
+                      [e[1] for e in _diff_by_cond[_conds_d[_ib]]])
+                     for _ia, _ib in _pairs_d],
+                )
 
         # ── Pre/post-reward delivery capacitive (z-scored) bar chart ──────────
         if 'epoch_reward_cap_pre_post' in selected_plots and _any_cap:
@@ -12337,6 +12600,14 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     '(0-0.65 s vs 0.65-1.3 s; mean \u00b1 SEM across mice; positive = higher licking after reward delivery)',
                 )
                 epoch_reward_cap_diff_fig.tight_layout()
+                _write_mwu_report(
+                    output_dir, 'epoch_reward_cap_diff',
+                    'Capacitive (z-scored) Post-minus-Pre Reward Delivery (0-0.65 s vs 0.65-1.3 s)',
+                    [(_conds_cap_d[_ia], _conds_cap_d[_ib],
+                      [e[1] for e in _cap_diff_by_cond[_conds_cap_d[_ia]]],
+                      [e[1] for e in _cap_diff_by_cond[_conds_cap_d[_ib]]])
+                     for _ia, _ib in _pairs_cap_d],
+                )
 
         # ── Reward zone: 0.65 s pre- vs 0.65 s post-zone entry bar chart ─────
         if 'epoch_reward_speed_pre_post_entry' in selected_plots and _any_speed:
@@ -12516,6 +12787,14 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     '(-0.65-0 s vs 0-0.65 s; mean ± SEM across mice; positive = faster after zone entry)',
                 )
                 epoch_reward_speed_diff_entry_fig.tight_layout()
+                _write_mwu_report(
+                    output_dir, 'epoch_reward_speed_diff_entry',
+                    'Speed Post-minus-Pre Zone Entry (Reward Zone, -0.65-0 s vs 0-0.65 s)',
+                    [(_conds_rde[_ia], _conds_rde[_ib],
+                      [e[1] for e in _rde_by_cond[_conds_rde[_ia]]],
+                      [e[1] for e in _rde_by_cond[_conds_rde[_ib]]])
+                     for _ia, _ib in _pairs_rde],
+                )
 
         # ── Reward zone: 1 s pre- vs 1 s post-zone entry bar chart ──────────
         if 'epoch_reward_speed_pre_post_entry_1s' in selected_plots and _any_speed:
@@ -12695,6 +12974,14 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     '(-1-0 s vs 0-1 s; mean \u00b1 SEM across mice; positive = faster after zone entry)',
                 )
                 epoch_reward_speed_diff_entry_1s_fig.tight_layout()
+                _write_mwu_report(
+                    output_dir, 'epoch_reward_speed_diff_entry_1s',
+                    'Speed Post-minus-Pre Zone Entry (Reward Zone, 1 s windows, -1-0 s vs 0-1 s)',
+                    [(_conds_rde1[_ia], _conds_rde1[_ib],
+                      [e[1] for e in _rde1_by_cond[_conds_rde1[_ia]]],
+                      [e[1] for e in _rde1_by_cond[_conds_rde1[_ib]]])
+                     for _ia, _ib in _pairs_rde1],
+                )
 
     # ── Shuffle Z-score: pre-entry slowing specificity (circular-shift permutation) ──
     _shuf_plot_keys = {'condition_shuffle_zscore', 'condition_shuffle_zscore_bar',
@@ -12855,6 +13142,14 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                         'Mean Z-Score per Mouse by Condition (negative = slower than chance inside reward zone)',
                     )
                     condition_shuffle_zscore_bar_fig.tight_layout()
+                    _write_mwu_report(
+                        output_dir, 'condition_shuffle_zscore_bar',
+                        'Zone Speed Z-Score (Reward Zone) by Condition',
+                        [(_shuf_conds_bar[_ia_szb], _shuf_conds_bar[_ib_szb],
+                          [e[1] for e in _shuf_bar_data[_shuf_conds_bar[_ia_szb]]],
+                          [e[1] for e in _shuf_bar_data[_shuf_conds_bar[_ib_szb]]])
+                         for _ia_szb, _ib_szb in _szbar_pairs],
+                    )
 
             # ── Level bar chart: mean Z-score per level per condition ────────
             if 'level_shuffle_zscore' in selected_plots and transitions_csv_path:
@@ -13314,6 +13609,14 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                         'Mean Z-Score per Mouse by Condition (negative = slower than chance inside zone)',
                     )
                     condition_punish_shuffle_zscore_bar_fig.tight_layout()
+                    _write_mwu_report(
+                        output_dir, 'condition_punish_shuffle_zscore_bar',
+                        'Zone Speed Z-Score (Punishment Zone) by Condition',
+                        [(_pshuf_conds_bar[_ia_pszb], _pshuf_conds_bar[_ib_pszb],
+                          [e[1] for e in _pshuf_bar_data[_pshuf_conds_bar[_ia_pszb]]],
+                          [e[1] for e in _pshuf_bar_data[_pshuf_conds_bar[_ib_pszb]]])
+                         for _ia_pszb, _ib_pszb in _pszbar_pairs],
+                    )
 
             # ── Level bar chart ────────────────────────────────────────────────
             if 'level_punish_shuffle_zscore' in selected_plots and transitions_csv_path:
@@ -13711,6 +14014,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         _level_stats_data = analyze_levels(
             data_files, transitions_csv_path, animal_conditions=conditions,
             selected_plots=selected_plots,
+            output_dir=output_dir,
         )
 
     # ── Missing data report ───────────────────────────────────────────────────
@@ -14552,13 +14856,18 @@ def main():
             print("No transitions CSV selected — level plot will be empty.")
 
     # Analyze data and plot results
+    # Auto-create a timestamped stats_reports subfolder next to the data files
+    _report_ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+    output_dir = os.path.join(
+        os.path.dirname(os.path.abspath(file_paths[0])),
+        f'stats_reports_{_report_ts}',
+    )
     speed_fig, sensitivity_fig, lick_fig, reward_fig, lick_reward_ratio_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, avg_sex_speed_fig, distance_fig, immobility_prop_fig, bout_count_fig, avg_bout_count_fig, rewards_per_bout_fig, first_lick_latency_fig, condition_rewards_per_bout_fig, condition_rewards_per_bout_bar_fig, condition_first_lick_latency_fig, condition_first_lick_latency_bar_fig, condition_lick_after_reward_prop_fig, condition_lick_after_reward_prop_bar_fig, weekday_reward_bar_fig, weekday_reward_bar_condition_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_lick_reward_ratio_fig, condition_lick_reward_ratio_bar_fig, condition_punish_zone_pct_bar_fig, condition_bar_fig, condition_speed_bar_fig, condition_sensitivity_fig, condition_sensitivity_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_sensitivity_fig, level_immobility_prop_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, last_level_bar_fig, level_survivor_fig, time_to_level2_fig, level_progression_indiv_fig, level_progression_condition_fig, level_progression_bar_fig, epoch_del_speed_per_mouse_fig, epoch_del_speed_cond_fig, epoch_del_cap_per_mouse_fig, epoch_del_cap_cond_fig, epoch_del_lick_per_mouse_fig, epoch_del_lick_cond_fig, epoch_del_cap_diff_entry_fig, condition_shuffle_zscore_fig, condition_shuffle_zscore_bar_fig, level_shuffle_zscore_fig, level_shuffle_zscore_line_fig, level_shuffle_zscore_cond_fig, condition_punish_shuffle_zscore_fig, condition_punish_shuffle_zscore_bar_fig, level_punish_shuffle_zscore_fig, level_punish_shuffle_zscore_line_fig, level_punish_shuffle_zscore_cond_fig, epoch_speed_per_mouse_fig, epoch_speed_cond_fig, epoch_cap_per_mouse_fig, epoch_cap_cond_fig, epoch_speed_sess_per_mouse_fig, epoch_speed_sess_cond_fig, epoch_cap_sess_per_mouse_fig, epoch_cap_sess_cond_fig, epoch_speed_early_per_mouse_fig, epoch_speed_late_per_mouse_fig, epoch_speed_early_cond_fig, epoch_speed_late_cond_fig, epoch_cap_early_per_mouse_fig, epoch_cap_late_per_mouse_fig, epoch_cap_early_cond_fig, epoch_cap_late_cond_fig, epoch_speed_early_ev_per_mouse_fig, epoch_speed_late_ev_per_mouse_fig, epoch_speed_early_ev_cond_fig, epoch_speed_late_ev_cond_fig, epoch_cap_early_ev_per_mouse_fig, epoch_cap_late_ev_per_mouse_fig, epoch_cap_early_ev_cond_fig, epoch_cap_late_ev_cond_fig, epoch_speed_early_ev_cond_clean_fig, epoch_speed_late_ev_cond_clean_fig, epoch_cap_early_ev_cond_clean_fig, epoch_cap_late_ev_cond_clean_fig, epoch_speed_sess_cond_clean_fig, epoch_cap_sess_cond_clean_fig, epoch_speed_early_cond_clean_fig, epoch_speed_late_cond_clean_fig, epoch_cap_early_cond_clean_fig, epoch_cap_late_cond_clean_fig, punish_speed_per_mouse_fig, punish_speed_cond_fig, punish_cap_per_mouse_fig, punish_cap_cond_fig, punish_speed_sess_per_mouse_fig, punish_speed_sess_cond_fig, punish_cap_sess_per_mouse_fig, punish_cap_sess_cond_fig, punish_speed_sess_cond_clean_fig, punish_cap_sess_cond_clean_fig, sex_speed_fig, sex_distance_indiv_fig, sex_reward_indiv_fig, epoch_speed_sess_sex_per_mouse_fig, epoch_speed_sess_sex_fig, epoch_cap_sess_sex_per_mouse_fig, epoch_cap_sess_sex_fig, epoch_punish_speed_sess_sex_per_mouse_fig, epoch_punish_speed_sess_sex_fig, epoch_punish_cap_sess_sex_per_mouse_fig, epoch_punish_cap_sess_sex_fig, epoch_reward_speed_pre_post_fig, epoch_reward_speed_diff_fig, epoch_reward_cap_pre_post_fig, epoch_reward_cap_diff_fig, epoch_reward_speed_pre_post_entry_fig, epoch_reward_speed_diff_entry_fig, epoch_reward_speed_pre_post_entry_1s_fig, epoch_reward_speed_diff_entry_1s_fig, epoch_reward_lick_count_sess_per_mouse_fig, epoch_reward_lick_count_sess_cond_fig, epoch_reward_lick_count_sess_cond_clean_fig, epoch_punish_lick_count_sess_per_mouse_fig, epoch_punish_lick_count_sess_cond_fig, epoch_punish_speed_pre_post_fig, epoch_punish_speed_diff_fig, epoch_punish_speed_pre_post_entry_fig, epoch_punish_speed_diff_entry_fig, epoch_punish_cap_pre_post_fig, epoch_punish_cap_diff_fig, epoch_punish_cap_pre_post_entry_fig, epoch_punish_cap_diff_entry_fig, expl_speed_histogram_fig, expl_speed_distfit_fig, expl_speed_boxplot_fig, expl_speed_rm_anova_resid_fig, expl_cap_histogram_fig, expl_cap_boxplot_fig, expl_cap_rm_anova_resid_fig, expl_cap_distfit_fig, expl_lick_distfit_fig, expl_lick_boxplot_fig, expl_lick_rm_anova_resid_fig, expl_lick_rate_distfit_fig, expl_lick_reward_ratio_distfit_fig, all_results, _level_stats_data = analyze_mouse_data(
         file_paths, markers, starting_conditions,
         transitions_csv_path=transitions_csv_path,
         selected_plots=selected_plots,
+        output_dir=output_dir,
     )
-
-    # All generated figures (None entries are skipped)
     all_figs = [f for f in [
         speed_fig, sensitivity_fig, lick_fig, reward_fig, lick_reward_ratio_fig,
         false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig,
