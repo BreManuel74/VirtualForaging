@@ -110,13 +110,13 @@ SESSION_CACHE_DIR = os.path.join(script_dir, '.session_cache')
 if not os.path.exists(SESSION_CACHE_DIR):
     os.makedirs(SESSION_CACHE_DIR)
 
-_SESSION_CACHE_VERSION = 10  # bump this to invalidate all cached sessions after code changes
+_SESSION_CACHE_VERSION = 11  # bump this to invalidate all cached sessions after code changes
 
 # ── Levels-analysis treadmill/lick cache (separate from main session cache) ───
 _LEVELS_SESS_CACHE_DIR = os.path.join(SESSION_CACHE_DIR, 'levels')
 if not os.path.exists(_LEVELS_SESS_CACHE_DIR):
     os.makedirs(_LEVELS_SESS_CACHE_DIR)
-_LEVELS_CACHE_VERSION = 2  # bump to invalidate levels cache independently
+_LEVELS_CACHE_VERSION = 3  # bump to invalidate levels cache independently
 
 # ── Diagnostic mode ───────────────────────────────────────────────────────────
 # Set to True to print per-trial matching, lick-latency, and lick-prop traces
@@ -1706,6 +1706,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
                 treadmill_df     = _lvl_chit['treadmill_df']
                 lick_event_times = _lvl_chit['lick_event_times']
                 session_end_time = _lvl_chit['session_end_time']
+                gap_intervals    = _lvl_chit.get('gaps', [])
                 if _lvl_chit.get('has_gaps'):
                     print(f"  [GAP] {animal_id} session {session_num}: "
                           f"{_lvl_chit['n_gaps']} gap(s) detected in capacitive file "
@@ -1718,6 +1719,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
                 lick_event_times = np.array([])
                 session_end_time = None
                 _gap_info_lvl    = {'has_gaps': False, 'n_gaps': 0, 'total_gap_s': 0.0, 'gaps': []}
+                gap_intervals    = []
                 if isinstance(capacitive_path, str) and not pd.isna(capacitive_path):
                     try:
                         cap = pd.read_csv(capacitive_path)
@@ -1785,7 +1787,9 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
                     'has_gaps':         _gap_info_lvl['has_gaps'],
                     'n_gaps':           _gap_info_lvl['n_gaps'],
                     'total_gap_s':      _gap_info_lvl['total_gap_s'],
+                    'gaps':             _gap_info_lvl['gaps'],
                 })
+                gap_intervals = _gap_info_lvl['gaps']
 
             levels   = session_group['level'].tolist()
             trans_ts = session_group['transition_ts'].tolist()
@@ -1853,6 +1857,15 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
                 duration_min = (end_t - start_t) / 60.0
                 if duration_min <= 0:
                     continue
+                # Valid cap recording time within this level window (excludes gap periods).
+                # Lick detection is only possible during non-gap intervals, so the lick-rate
+                # denominator should reflect the actual cap recording time, not the full wall time.
+                _gap_in_win = sum(
+                    min(g[1], end_t) - max(g[0], start_t)
+                    for g in gap_intervals
+                    if g[1] > start_t and g[0] < end_t
+                )
+                valid_duration_min = max(0.0, (end_t - start_t) - _gap_in_win) / 60.0
                 count = int(np.sum((reward_events >= start_t) & (reward_events < end_t)))
                 count += int(np.sum((hits_events   >= start_t) & (hits_events   < end_t)))
 
@@ -1860,6 +1873,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
                 key = (animal_id, level)
                 if key not in animal_level_accum:
                     animal_level_accum[key] = {'rewards': 0, 'duration_min': 0.0,
+                                               'valid_duration_min': 0.0,
                                                'condition': condition,
                                                'speed_sum': 0.0, 'speed_count': 0,
                                                'lick_count': 0, 'dist_sum': 0.0,
@@ -1867,8 +1881,9 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
                                                'bout_spd_sum': 0.0, 'bout_spd_cnt': 0,
                                                'bout_dist_sum': 0.0, 'bout_dist_cnt': 0,
                                                'level_hits': 0, 'level_opportunities': 0}
-                animal_level_accum[key]['rewards']      += count
-                animal_level_accum[key]['duration_min'] += duration_min
+                animal_level_accum[key]['rewards']           += count
+                animal_level_accum[key]['duration_min']      += duration_min
+                animal_level_accum[key]['valid_duration_min'] += valid_duration_min
                 if treadmill_df is not None and len(treadmill_df) > 0:
                     mask = (treadmill_df['global_time'] >= start_t) & (treadmill_df['global_time'] < end_t)
                     lvl_speeds = treadmill_df.loc[mask, 'speed'].values / 10.0
@@ -2004,8 +2019,9 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
             avg_dist_bout_m = accum['bout_dist_sum'] / accum['bout_dist_cnt'] / 1000.0  # mm → m
             condition_level_bout_avg_dist_lvl.setdefault(condition, {}).setdefault(level, []).append(avg_dist_bout_m)
             collapsed_level_bout_avg_dist_lvl.setdefault(level, []).append(avg_dist_bout_m)
-        if accum['lick_count'] > 0 and accum['duration_min'] > 0:
-            lpm = accum['lick_count'] / accum['duration_min']
+        _lick_denom = accum.get('valid_duration_min') or accum['duration_min']
+        if accum['lick_count'] > 0 and _lick_denom > 0:
+            lpm = accum['lick_count'] / _lick_denom
             condition_level_lick.setdefault(condition, {}).setdefault(level, []).append(lpm)
             collapsed_level_lick.setdefault(level, []).append(lpm)
         if accum.get('dist_sum', 0.0) > 0:
@@ -3228,10 +3244,26 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
 # ── Descriptive statistics report ────────────────────────────────────────────
 
 def generate_descriptive_stats_report(all_results, level_stats_data=None, output_dir=None):
-    """Generate a descriptive statistics Excel workbook (.xlsx) with one sheet
-    per metric sliced across training sessions (time) and, if level data are
-    available, per level.  Metrics are grouped by starting condition; statistics
-    reported per group are: mean, SEM, SD, N, min, max, median.
+    """Generate a comprehensive descriptive statistics Excel workbook (.xlsx).
+
+    Sheets
+    ------
+    Overview          : One row per DV – overall condition means, SDs, SEMs, 95 % CIs,
+                        medians, Cohen's d, and Mann-Whitney U p (between conditions).
+    Per-DV sheets     : Rows = Overall (all sessions) + Week 1 + Week 2 + …
+                        Columns = per-condition stats + between-condition effect sizes.
+                        Week means are computed as per-animal weekly averages before
+                        aggregating across animals (avoids session-level pseudoreplication).
+    Level sheets      : Condition-level breakdowns (requires level_stats_data).
+
+    Reported statistics per condition group
+    ----------------------------------------
+    N  Mean  SD  SEM  95%-CI lo  95%-CI hi  Median
+
+    Between-condition effect sizes (all condition pairs)
+    ----------------------------------------------------
+    Cohen's d (pooled SD)  |  effect label (negligible/small/medium/large)
+    Mann-Whitney U  p-value (two-sided, exact=False)
 
     Parameters
     ----------
@@ -3244,58 +3276,344 @@ def generate_descriptive_stats_report(all_results, level_stats_data=None, output
         Directory to save the report.  Defaults to current working directory.
     """
     try:
-        import openpyxl
+        import openpyxl                                          # noqa: F401
         from openpyxl.styles import Font, PatternFill, Alignment
         from openpyxl.utils import get_column_letter
-        from scipy.stats import t as t_dist
+        from scipy.stats import t as t_dist, mannwhitneyu as _scipy_mwu
     except ImportError:
-        print("[WARN] openpyxl not found — descriptive stats report skipped. "
-              "Install it with:  pip install openpyxl")
+        print("[WARN] openpyxl / scipy not found — descriptive stats report skipped.\n"
+              "       Install with:  pip install openpyxl scipy")
         return
 
-    STAT_COLS = ['mean', 'sem', 'sd', 'n', 'min', 'max', 'median', 'ci95_lo', 'ci95_hi']
-    HEADER_FONT   = Font(bold=True, color='FFFFFF')
-    HEADER_FILL_A = PatternFill(start_color='1F497D', end_color='1F497D', fill_type='solid')
-    ROW_FILLS = [
-        PatternFill(start_color='DCE6F1', end_color='DCE6F1', fill_type='solid'),
-        PatternFill(start_color='E2EFDA', end_color='E2EFDA', fill_type='solid'),
+    # ── Styling ───────────────────────────────────────────────────────────────
+    _WH_BOLD   = Font(bold=True, color='FFFFFF')
+    _CTR_WRAP  = Alignment(horizontal='center', wrap_text=True)
+    _CTR       = Alignment(horizontal='center')
+    # Header fill colours by condition index (dark) + effect columns
+    _COND_HDR  = ['1F497D', '375623', '7B2C2C', '614F28', '553B78']
+    _EFF_HDR   = '7B5B00'
+    _IDX_HDR   = '404040'
+    # Alternating data-row fills by condition index (light / lighter)
+    _COND_ROW  = [
+        ['DCE6F1', 'B8CCE4'],   # blue tints
+        ['E2EFDA', 'C6E0B4'],   # green tints
+        ['FCE4D6', 'F4B8A0'],   # red tints
+        ['EBE3F5', 'CEC0E8'],   # purple tints
     ]
+    _EFF_ROW   = ['FFF2CC', 'FFE699']   # yellow tints
 
-    # ── Helpers ──────────────────────────────────────────────────────────────
+    # ── Core helpers ──────────────────────────────────────────────────────────
 
-    def _clean(v):
+    def _ok(v):
+        """True when v is a usable numeric value."""
         if v is None:
             return False
-        if isinstance(v, float) and np.isnan(v):
+        try:
+            return not np.isnan(float(v))
+        except (TypeError, ValueError):
             return False
-        return True
 
-    def _desc_stats(vals):
-        a = np.array([v for v in vals if _clean(v)], dtype=float)
-        if len(a) == 0:
-            return dict(mean=np.nan, sem=np.nan, sd=np.nan, n=0,
-                        min=np.nan, max=np.nan, median=np.nan,
-                        ci95_lo=np.nan, ci95_hi=np.nan)
-        _mean = float(np.mean(a))
-        _sd   = float(np.std(a, ddof=1)) if len(a) > 1 else np.nan
-        _sem  = float(_sd / np.sqrt(len(a))) if len(a) > 1 else np.nan
-        if len(a) > 1:
-            _t = t_dist.ppf(0.975, df=len(a) - 1)
-            _ci_lo = _mean - _t * _sem
-            _ci_hi = _mean + _t * _sem
+    def _arr(vals):
+        return np.array([float(v) for v in vals if _ok(v)], dtype=float)
+
+    def _desc(vals):
+        a = _arr(vals)
+        n = len(a)
+        if n == 0:
+            return {'N': 0, 'Mean': None, 'SD': None, 'SEM': None,
+                    'CI95_lo': None, 'CI95_hi': None, 'Median': None}
+        mu  = float(np.mean(a))
+        sd  = float(np.std(a, ddof=1)) if n > 1 else None
+        sem = float(sd / np.sqrt(n))   if sd is not None else None
+        if sem is not None:
+            tc = t_dist.ppf(0.975, df=n - 1)
+            ci_lo, ci_hi = mu - tc * sem, mu + tc * sem
         else:
-            _ci_lo = _ci_hi = np.nan
-        return dict(
-            mean=_mean,
-            sem=_sem,
-            sd=_sd,
-            n=int(len(a)),
-            min=float(np.min(a)),
-            max=float(np.max(a)),
-            median=float(np.median(a)),
-            ci95_lo=_ci_lo,
-            ci95_hi=_ci_hi,
-        )
+            ci_lo = ci_hi = None
+        return {'N': n, 'Mean': mu, 'SD': sd, 'SEM': sem,
+                'CI95_lo': ci_lo, 'CI95_hi': ci_hi,
+                'Median': float(np.median(a))}
+
+    def _cohens_d(va, vb):
+        a, b = _arr(va), _arr(vb)
+        na, nb = len(a), len(b)
+        if na < 2 or nb < 2:
+            return None
+        vp = ((na - 1) * np.var(a, ddof=1) + (nb - 1) * np.var(b, ddof=1)) / (na + nb - 2)
+        if vp <= 0:
+            return None
+        return float((np.mean(a) - np.mean(b)) / np.sqrt(vp))
+
+    def _d_label(d):
+        if d is None:
+            return ''
+        ad = abs(d)
+        return ('negligible' if ad < 0.2 else
+                'small'      if ad < 0.5 else
+                'medium'     if ad < 0.8 else
+                'large')
+
+    def _mwu_p(va, vb):
+        a, b = _arr(va), _arr(vb)
+        if len(a) < 3 or len(b) < 3:
+            return None
+        try:
+            _, p = _scipy_mwu(a, b, alternative='two-sided')
+            return float(p)
+        except Exception:
+            return None
+
+    # ── DV extraction helpers ─────────────────────────────────────────────────
+
+    def _get(df_r, i, col):
+        if col not in df_r.columns or i >= len(df_r):
+            return None
+        v = df_r.iat[i, df_r.columns.get_loc(col)]
+        return float(v) if pd.notna(v) else None
+
+    def _reward_rate_fn(df_r, i):
+        # Rewards come from the trial log / treadmill — unaffected by capacitive gaps.
+        # Use raw session_length (minutes); hits / session_min = hits/min
+        h, s = _get(df_r, i, 'hits'), _get(df_r, i, 'session_length')
+        return h / s if h is not None and s and s > 0 else None
+
+    def _lick_rate_fn(df_r, i):
+        # Prefer gap-excluded valid_session_length; fall back to raw session_length.
+        # Both stored in minutes → lick_count / session_min = licks/min
+        lc = _get(df_r, i, 'lick_count')
+        s = _get(df_r, i, 'valid_session_length') or _get(df_r, i, 'session_length')
+        return lc / s if lc is not None and s and s > 0 else None
+
+    def _dist_m_fn(df_r, i):
+        v = _get(df_r, i, 'total_distance')
+        return v / 1000.0 if v is not None else None
+
+    def _bout_dist_m_fn(df_r, i):
+        v = _get(df_r, i, 'avg_dist_per_bout')
+        return v / 1000.0 if v is not None else None
+
+    # ── DV specifications: (long_label, col_name_or_fn, excel_tab_name) ───────
+    _DV_SPECS = [
+        ('Average Speed (cm/s)',          'average_speed',           'Speed'),
+        ('Reward Count',                  'hits',                    'Reward Count'),
+        ('Reward Rate (hits/min)',         _reward_rate_fn,           'Reward Rate'),
+        ('Sensitivity (H \u2212 FA)',     'sensitivity',             'Sensitivity'),
+        ("d\u2019  (detectability)",      'dprime',                  "d-prime"),
+        ('Lick Count',                    'lick_count',              'Lick Count'),
+        ('Lick Rate (licks/min)',          _lick_rate_fn,             'Lick Rate'),
+        ('Avg Capacitive (z-score)',       'avg_cap',                 'Avg Cap'),
+        ('Lick-After-Reward Proportion',  'lick_after_reward_prop',  'Lick-Rew Prop'),
+        ('Rewards per Bout',              'rewards_per_bout',        'Rew per Bout'),
+        ('Total Distance (m)',            _dist_m_fn,                'Distance'),
+        ('Bout Count',                    'bout_count',              'Bout Count'),
+        ('Bout Avg Speed (cm/s)',         'avg_speed_per_bout',      'Bout Speed'),
+        ('Bout Avg Distance (m)',         _bout_dist_m_fn,           'Bout Distance'),
+        ('Immobility Proportion',         'immobility_prop',         'Immobility'),
+        ('False Alarms',                  'false_alarms',            'False Alarms'),
+        ('Correct Rejections',            'correct_rejections',      'Correct Rej'),
+        ('Specificity',                   'specificity',             'Specificity'),
+        ('Avg Lick Latency (s)',          'avg_lick_latency',        'Lick Latency'),
+    ]
+    # Add ending_level if injected
+    if all_results and 'ending_level' in all_results[0].get('df', pd.DataFrame()).columns:
+        _DV_SPECS.append(('Ending Level', 'ending_level', 'Ending Level'))
+
+    conditions_sorted = sorted({r['starting_condition'] for r in all_results})
+    cond_pairs = [(conditions_sorted[i], conditions_sorted[j])
+                  for i in range(len(conditions_sorted))
+                  for j in range(i + 1, len(conditions_sorted))]
+    STAT_KEYS = ['N', 'Mean', 'SD', 'SEM', 'CI95_lo', 'CI95_hi', 'Median']
+
+    # ── Build per-animal × (overall + week) data for one DV ──────────────────
+
+    def _build_dv_data(col_or_fn):
+        """Return (overall_by_cond, week_by_cond).
+
+        overall_by_cond : {cond: [per-animal grand mean]}
+        week_by_cond    : {week_num: {cond: [per-animal week mean]}}
+        Per-animal weekly means are computed first; only those means feed into
+        the group statistics (avoids session-level pseudoreplication).
+        """
+        overall: dict = {c: [] for c in conditions_sorted}
+        by_week: dict = {}
+        for r in all_results:
+            df = r['df'].reset_index(drop=True)
+            cond = r['starting_condition']
+            if cond not in conditions_sorted:
+                continue
+            grand_vals: list = []
+            wk_vals: dict = {}
+            for i in range(len(df)):
+                v = col_or_fn(df, i) if callable(col_or_fn) else _get(df, i, col_or_fn)
+                if _ok(v):
+                    fv = float(v)
+                    grand_vals.append(fv)
+                    wk = i // 4 + 1
+                    wk_vals.setdefault(wk, []).append(fv)
+            if grand_vals:
+                overall[cond].append(float(np.mean(grand_vals)))
+            for wk, wv in wk_vals.items():
+                if wk not in by_week:
+                    by_week[wk] = {c: [] for c in conditions_sorted}
+                by_week[wk][cond].append(float(np.mean(wv)))
+        return overall, by_week
+
+    # ── Column-header / row helpers ───────────────────────────────────────────
+
+    def _make_headers(index_name='Period'):
+        hdrs = [index_name]
+        for c in conditions_sorted:
+            for sk in STAT_KEYS:
+                hdrs.append(f'{c}  {sk}')
+        for ca, cb in cond_pairs:
+            hdrs.append(f"Cohen's d  ({ca} vs {cb})")
+            hdrs.append(f"d_label  ({ca} vs {cb})")
+            hdrs.append(f"MWU p  ({ca} vs {cb})")
+        return hdrs
+
+    def _make_row(index_val, cond_vals, index_name='Period'):
+        rec = {index_name: index_val}
+        for c in conditions_sorted:
+            st = _desc(cond_vals.get(c, []))
+            for sk in STAT_KEYS:
+                rec[f'{c}  {sk}'] = st[sk]
+        for ca, cb in cond_pairs:
+            va, vb = cond_vals.get(ca, []), cond_vals.get(cb, [])
+            d = _cohens_d(va, vb)
+            rec[f"Cohen's d  ({ca} vs {cb})"] = d
+            rec[f"d_label  ({ca} vs {cb})"]   = _d_label(d)
+            rec[f"MWU p  ({ca} vs {cb})"]     = _mwu_p(va, vb)
+        return rec
+
+    # ── Generic sheet writer ──────────────────────────────────────────────────
+
+    def _write_stats_sheet(writer, sheet_name, records, hdrs):
+        """Write records (list of dicts) to an Excel sheet with full formatting."""
+        cols_ordered = [h for h in hdrs if h in records[0]]
+        df_s = pd.DataFrame(records, columns=cols_ordered)
+        df_s.to_excel(writer, sheet_name=sheet_name, index=False)
+
+        ws = writer.sheets[sheet_name]
+        ws.freeze_panes = 'B2'
+        n_cond_cols = len(conditions_sorted) * len(STAT_KEYS)
+
+        # ── Header row ──
+        for col_idx, cell in enumerate(ws[1], 1):
+            cell.font      = _WH_BOLD
+            cell.alignment = _CTR_WRAP
+            if col_idx == 1:
+                color = _IDX_HDR
+            elif col_idx <= 1 + n_cond_cols:
+                ci    = (col_idx - 2) // len(STAT_KEYS)
+                color = _COND_HDR[ci % len(_COND_HDR)]
+            else:
+                color = _EFF_HDR
+            cell.fill = PatternFill(start_color=color, end_color=color, fill_type='solid')
+
+        # ── Data rows ──
+        for row_idx in range(2, len(records) + 2):
+            alt = (row_idx - 2) % 2
+            for col_idx in range(1, len(cols_ordered) + 1):
+                cell = ws.cell(row=row_idx, column=col_idx)
+                cell.alignment = _CTR
+                if col_idx == 1:
+                    pass  # no fill for index column
+                elif col_idx <= 1 + n_cond_cols:
+                    ci   = (col_idx - 2) // len(STAT_KEYS)
+                    pair = _COND_ROW[ci % len(_COND_ROW)]
+                    cell.fill = PatternFill(start_color=pair[alt],
+                                            end_color=pair[alt], fill_type='solid')
+                else:
+                    cell.fill = PatternFill(start_color=_EFF_ROW[alt],
+                                            end_color=_EFF_ROW[alt], fill_type='solid')
+                # Number formats
+                h = hdrs[col_idx - 1] if col_idx <= len(hdrs) else ''
+                if isinstance(cell.value, (int, float)) and cell.value is not None:
+                    if h.endswith('  N'):
+                        cell.number_format = '0'
+                    elif 'MWU p' in h:
+                        cell.number_format = '0.000000'
+                    else:
+                        cell.number_format = '0.0000'
+
+        # ── Auto-fit columns ──
+        for col_cells in ws.columns:
+            mx = max((len(str(c.value)) if c.value is not None else 0)
+                     for c in col_cells)
+            ws.column_dimensions[
+                get_column_letter(col_cells[0].column)
+            ].width = max(9, min(mx + 2, 30))
+
+    # ── Per-DV by-week sheet ──────────────────────────────────────────────────
+
+    def _write_dv_sheet(writer, sheet_name, overall_cond, week_cond):
+        hdrs = _make_headers('Period')
+        rows_data = [('Overall (all sessions)', overall_cond)]
+        for wk in sorted(week_cond.keys()):
+            rows_data.append((f'Week {wk}', week_cond[wk]))
+        records = [_make_row(lbl, cv, 'Period') for lbl, cv in rows_data]
+        _write_stats_sheet(writer, sheet_name, records, hdrs)
+
+    # ── Overview sheet ────────────────────────────────────────────────────────
+
+    def _write_overview(writer, all_dv_overall):
+        """One row per DV – overall condition stats + effect sizes."""
+        hdrs    = _make_headers('Measure')
+        records = [_make_row(lbl, ov, 'Measure')
+                   for lbl, ov in all_dv_overall]
+        # Reuse the same generic writer; n_cond_cols math is identical
+        cols_ordered = [h for h in hdrs if h in records[0]]
+        df_ov = pd.DataFrame(records, columns=cols_ordered)
+        df_ov.to_excel(writer, sheet_name='Overview', index=False)
+
+        ws = writer.sheets['Overview']
+        ws.freeze_panes = 'B2'
+        n_cond_cols = len(conditions_sorted) * len(STAT_KEYS)
+
+        for col_idx, cell in enumerate(ws[1], 1):
+            cell.font      = _WH_BOLD
+            cell.alignment = _CTR_WRAP
+            if col_idx == 1:
+                color = _IDX_HDR
+            elif col_idx <= 1 + n_cond_cols:
+                ci    = (col_idx - 2) // len(STAT_KEYS)
+                color = _COND_HDR[ci % len(_COND_HDR)]
+            else:
+                color = _EFF_HDR
+            cell.fill = PatternFill(start_color=color, end_color=color, fill_type='solid')
+
+        for row_idx in range(2, len(records) + 2):
+            alt = (row_idx - 2) % 2
+            for col_idx in range(1, len(cols_ordered) + 1):
+                cell = ws.cell(row=row_idx, column=col_idx)
+                cell.alignment = _CTR
+                if col_idx == 1:
+                    pass
+                elif col_idx <= 1 + n_cond_cols:
+                    ci   = (col_idx - 2) // len(STAT_KEYS)
+                    pair = _COND_ROW[ci % len(_COND_ROW)]
+                    cell.fill = PatternFill(start_color=pair[alt],
+                                            end_color=pair[alt], fill_type='solid')
+                else:
+                    cell.fill = PatternFill(start_color=_EFF_ROW[alt],
+                                            end_color=_EFF_ROW[alt], fill_type='solid')
+                h = hdrs[col_idx - 1] if col_idx <= len(hdrs) else ''
+                if isinstance(cell.value, (int, float)) and cell.value is not None:
+                    if h.endswith('  N'):
+                        cell.number_format = '0'
+                    elif 'MWU p' in h:
+                        cell.number_format = '0.000000'
+                    else:
+                        cell.number_format = '0.0000'
+
+        for col_cells in ws.columns:
+            mx = max((len(str(c.value)) if c.value is not None else 0)
+                     for c in col_cells)
+            ws.column_dimensions[
+                get_column_letter(col_cells[0].column)
+            ].width = max(12, min(mx + 2, 35))
+
+    # ── Level sheets (extended with effect sizes) ─────────────────────────────
 
     def _sort_level(lv):
         if lv.startswith('level_'):
@@ -3305,165 +3623,141 @@ def generate_descriptive_stats_report(all_results, level_stats_data=None, output
                 pass
         return (1, lv)
 
-    def _write_sheet(writer, sheet_name, index_label, rows):
-        """Write a stats sheet to the Excel workbook.
+    def _write_level_sheet(writer, sheet_name, cond_level_dict):
+        if not cond_level_dict:
+            return
+        lvl_conds = sorted(cond_level_dict.keys())
+        lvl_pairs = [(lvl_conds[i], lvl_conds[j])
+                     for i in range(len(lvl_conds))
+                     for j in range(i + 1, len(lvl_conds))]
+        lvls = sorted(
+            {lv for cd in cond_level_dict.values() for lv in cd},
+            key=_sort_level,
+        )
 
-        rows : list[dict]
-            Each dict has {index_label: display_value, cond_name: [float_list], ...}.
-        """
-        all_conds = sorted({k for row in rows for k in row if k != index_label})
-        col_names = [index_label]
-        for cond in all_conds:
-            for stat in STAT_COLS:
-                col_names.append(f'{cond}_{stat}')
+        # Build headers using the level-specific condition list
+        lvl_hdrs = ['Level']
+        for c in lvl_conds:
+            for sk in STAT_KEYS:
+                lvl_hdrs.append(f'{c}  {sk}')
+        for ca, cb in lvl_pairs:
+            lvl_hdrs.append(f"Cohen's d  ({ca} vs {cb})")
+            lvl_hdrs.append(f"d_label  ({ca} vs {cb})")
+            lvl_hdrs.append(f"MWU p  ({ca} vs {cb})")
 
         records = []
-        for row in rows:
-            rec = {index_label: row[index_label]}
-            for cond in all_conds:
-                st = _desc_stats(row.get(cond, []))
-                for stat in STAT_COLS:
-                    rec[f'{cond}_{stat}'] = st[stat]
+        for lv in lvls:
+            lv_label = lv.replace('level_', 'L').replace('.json', '')
+            rec = {'Level': lv_label}
+            cond_vals = {c: cond_level_dict[c].get(lv, []) for c in lvl_conds}
+            for c in lvl_conds:
+                st = _desc(cond_vals[c])
+                for sk in STAT_KEYS:
+                    rec[f'{c}  {sk}'] = st[sk]
+            for ca, cb in lvl_pairs:
+                d = _cohens_d(cond_vals[ca], cond_vals[cb])
+                rec[f"Cohen's d  ({ca} vs {cb})"] = d
+                rec[f"d_label  ({ca} vs {cb})"]   = _d_label(d)
+                rec[f"MWU p  ({ca} vs {cb})"]     = _mwu_p(cond_vals[ca], cond_vals[cb])
             records.append(rec)
 
-        df_sheet = pd.DataFrame(records, columns=col_names)
-        df_sheet.to_excel(writer, sheet_name=sheet_name, index=False)
+        if not records:
+            return
+
+        # Write using the generic sheet writer with level-specific column count
+        n_lc = len(lvl_conds)
+        n_cond_cols_lvl = n_lc * len(STAT_KEYS)
+
+        cols_ordered = [h for h in lvl_hdrs if h in records[0]]
+        df_lv = pd.DataFrame(records, columns=cols_ordered)
+        df_lv.to_excel(writer, sheet_name=sheet_name, index=False)
 
         ws = writer.sheets[sheet_name]
         ws.freeze_panes = 'B2'
+        for col_idx, cell in enumerate(ws[1], 1):
+            cell.font      = _WH_BOLD
+            cell.alignment = _CTR_WRAP
+            if col_idx == 1:
+                color = _IDX_HDR
+            elif col_idx <= 1 + n_cond_cols_lvl:
+                ci    = (col_idx - 2) // len(STAT_KEYS)
+                color = _COND_HDR[ci % len(_COND_HDR)]
+            else:
+                color = _EFF_HDR
+            cell.fill = PatternFill(start_color=color, end_color=color, fill_type='solid')
 
-        # Style header
-        for cell in ws[1]:
-            cell.font  = HEADER_FONT
-            cell.fill  = HEADER_FILL_A
-            cell.alignment = Alignment(horizontal='center', wrap_text=True)
+        for row_idx in range(2, len(records) + 2):
+            alt = (row_idx - 2) % 2
+            for col_idx in range(1, len(cols_ordered) + 1):
+                cell = ws.cell(row=row_idx, column=col_idx)
+                cell.alignment = _CTR
+                if col_idx == 1:
+                    pass
+                elif col_idx <= 1 + n_cond_cols_lvl:
+                    ci   = (col_idx - 2) // len(STAT_KEYS)
+                    pair = _COND_ROW[ci % len(_COND_ROW)]
+                    cell.fill = PatternFill(start_color=pair[alt],
+                                            end_color=pair[alt], fill_type='solid')
+                else:
+                    cell.fill = PatternFill(start_color=_EFF_ROW[alt],
+                                            end_color=_EFF_ROW[alt], fill_type='solid')
+                h = lvl_hdrs[col_idx - 1] if col_idx <= len(lvl_hdrs) else ''
+                if isinstance(cell.value, (int, float)) and cell.value is not None:
+                    if h.endswith('  N'):
+                        cell.number_format = '0'
+                    elif 'MWU p' in h:
+                        cell.number_format = '0.000000'
+                    else:
+                        cell.number_format = '0.0000'
 
-        # Alternating condition shading
-        for ci, cond in enumerate(all_conds):
-            fill = ROW_FILLS[ci % len(ROW_FILLS)]
-            col_start = 2 + ci * len(STAT_COLS)
-            col_end   = col_start + len(STAT_COLS) - 1
-            for row_idx in range(2, len(records) + 2):
-                for col_idx in range(col_start, col_end + 1):
-                    ws.cell(row=row_idx, column=col_idx).fill = fill
-
-        # Auto-fit column widths (capped 10–25)
         for col_cells in ws.columns:
-            max_len = max(
-                (len(str(c.value)) if c.value is not None else 0) for c in col_cells
-            )
+            mx = max((len(str(c.value)) if c.value is not None else 0)
+                     for c in col_cells)
             ws.column_dimensions[
                 get_column_letter(col_cells[0].column)
-            ].width = max(10, min(max_len + 2, 25))
+            ].width = max(9, min(mx + 2, 28))
 
-    # ── Time-based rows ───────────────────────────────────────────────────────
-
-    conditions_sorted = sorted({r['starting_condition'] for r in all_results})
-    max_sessions = max(len(r['df']) for r in all_results)
-
-    def _extract(df_r, sess_idx, col):
-        if sess_idx >= len(df_r):
-            return np.nan
-        v = df_r.iat[sess_idx, df_r.columns.get_loc(col)]
-        return float(v) if pd.notna(v) else np.nan
-
-    def _session_rows(col_or_fn):
-        """Build rows for a time-based sheet.
-        col_or_fn: column name (str) or callable(df_r, sess_idx) -> float.
-        """
-        rows = []
-        for sess_idx in range(max_sessions):
-            row = {'Session': sess_idx + 1}
-            for cond in conditions_sorted:
-                vals = []
-                for r in all_results:
-                    if r['starting_condition'] != cond:
-                        continue
-                    df_r = r['df'].reset_index(drop=True)
-                    if callable(col_or_fn):
-                        v = col_or_fn(df_r, sess_idx)
-                    else:
-                        v = _extract(df_r, sess_idx, col_or_fn)
-                    if _clean(v):
-                        vals.append(float(v))
-                row[cond] = vals
-            rows.append(row)
-        return rows
-
-    def _reward_rate(df_r, i):
-        h = _extract(df_r, i, 'hits')
-        s = _extract(df_r, i, 'session_length')
-        return h / s if _clean(h) and _clean(s) and s > 0 else np.nan
-
-    def _lick_rate(df_r, i):
-        lc = _extract(df_r, i, 'lick_count')
-        s  = _extract(df_r, i, 'session_length')
-        return lc / s if _clean(lc) and _clean(s) and s > 0 else np.nan
-
-    def _dist_m(df_r, i):
-        v = _extract(df_r, i, 'total_distance')
-        return v / 1000.0 if _clean(v) else np.nan
-
-    def _bout_dist_m(df_r, i):
-        v = _extract(df_r, i, 'avg_dist_per_bout')
-        return v / 1000.0 if _clean(v) else np.nan
-
-    time_sheets = [
-        ('Time - Speed',          _session_rows('average_speed')),
-        ('Time - Reward Count',   _session_rows('hits')),
-        ('Time - Reward Rate',    _session_rows(_reward_rate)),
-        ('Time - Lick Rate',      _session_rows(_lick_rate)),
-        ('Time - Distance (m)',   _session_rows(_dist_m)),
-        ('Time - Bout Count',     _session_rows('bout_count')),
-        ('Time - Bout Avg Speed', _session_rows('avg_speed_per_bout')),
-        ('Time - Bout Avg Dist',  _session_rows(_bout_dist_m)),
-    ]
-
-    # ── Level-based rows ──────────────────────────────────────────────────────
-
-    level_sheets = []
-    if level_stats_data is not None:
-
-        def _level_rows(cond_level_dict):
-            if not cond_level_dict:
-                return []
-            lvls = sorted(
-                {lv for cd in cond_level_dict.values() for lv in cd},
-                key=_sort_level,
-            )
-            rows = []
-            for lv in lvls:
-                row = {'Level': lv.replace('level_', 'L').replace('.json', '')}
-                for cond in sorted(cond_level_dict.keys()):
-                    row[cond] = cond_level_dict[cond].get(lv, [])
-                rows.append(row)
-            return rows
-
-        level_sheets = [
-            ('Level - Reward Rate',    _level_rows(level_stats_data['condition_level_reward_rate'])),
-            ('Level - Speed',          _level_rows(level_stats_data['condition_level_speed'])),
-            ('Level - Lick Rate',      _level_rows(level_stats_data['condition_level_lick'])),
-            ('Level - Distance (m)',   _level_rows(level_stats_data['condition_level_dist'])),
-            ('Level - Bout Count',     _level_rows(level_stats_data['condition_level_bout'])),
-            ('Level - Bout Avg Speed', _level_rows(level_stats_data['condition_level_bout_avg_spd'])),
-            ('Level - Bout Avg Dist',  _level_rows(level_stats_data['condition_level_bout_avg_dist'])),
-        ]
-
-    # ── Write workbook ────────────────────────────────────────────────────────
+    # ── Build data + write workbook ───────────────────────────────────────────
 
     if output_dir is None:
         output_dir = os.getcwd()
     os.makedirs(output_dir, exist_ok=True)
-    timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S')
-    out_path = os.path.join(output_dir, f'descriptive_stats_{timestamp_str}.xlsx')
+    ts       = datetime.now().strftime('%Y%m%d_%H%M%S')
+    out_path = os.path.join(output_dir, f'descriptive_stats_{ts}.xlsx')
+
+    all_dv_overall: list = []   # [(label, overall_by_cond), ...] for Overview
 
     with pd.ExcelWriter(out_path, engine='openpyxl') as writer:
-        for sheet_name, rows in time_sheets:
-            if rows:
-                _write_sheet(writer, sheet_name, 'Session', rows)
-        for sheet_name, rows in level_sheets:
-            if rows:
-                _write_sheet(writer, sheet_name, 'Level', rows)
+
+        # Per-DV sheets (Overview written last, then moved to front)
+        for dv_label, col_or_fn, tab_name in _DV_SPECS:
+            overall_cond, week_cond = _build_dv_data(col_or_fn)
+            all_dv_overall.append((dv_label, overall_cond))
+            _write_dv_sheet(writer, tab_name, overall_cond, week_cond)
+
+        # Overview sheet
+        _write_overview(writer, all_dv_overall)
+
+        # Move Overview to the first tab
+        wb = writer.book
+        if 'Overview' in wb.sheetnames:
+            wb.move_sheet('Overview', offset=-wb.sheetnames.index('Overview'))
+
+        # Level sheets
+        if level_stats_data is not None:
+            _lsd = level_stats_data
+            _level_sheet_specs = [
+                ('Lvl Reward Rate',  _lsd.get('condition_level_reward_rate')),
+                ('Lvl Speed',        _lsd.get('condition_level_speed')),
+                ('Lvl Lick Rate',    _lsd.get('condition_level_lick')),
+                ('Lvl Distance',     _lsd.get('condition_level_dist')),
+                ('Lvl Bout Count',   _lsd.get('condition_level_bout')),
+                ('Lvl Bout Speed',   _lsd.get('condition_level_bout_avg_spd')),
+                ('Lvl Bout Dist',    _lsd.get('condition_level_bout_avg_dist')),
+            ]
+            for sname, cld in _level_sheet_specs:
+                if cld:
+                    _write_level_sheet(writer, sname, cld)
 
     print(f"\nDescriptive stats report saved to:\n  {out_path}")
 
@@ -4242,7 +4536,8 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         misses_list = []  # List for misses (texture changes minus hits)
         sensitivities = []  # List for sensitivity values
         lick_counts = []  # List for daily lick counts
-        session_lengths = []  # List for session lengths in minutes
+        session_lengths = []  # List for session lengths in minutes (raw total)
+        valid_session_lengths = []  # List for gap-excluded session lengths in minutes
         avg_cap_values = []  # List for per-session mean raw capacitive sensor value
         false_alarms_list = []  # List for false alarm counts
         correct_rejections_list = []  # List for correct rejection counts
@@ -4330,6 +4625,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     sensitivity             = _c['sensitivity']
                     lick_count              = _c['lick_count']
                     session_length_minutes  = _c['session_length_minutes']
+                    valid_session_length_minutes = _c.get('valid_session_length_minutes', session_length_minutes)
                     avg_cap_session         = _c['avg_cap_session']
                     false_alarm_count       = _c['false_alarm_count']
                     correct_rejection_count = _c['correct_rejection_count']
@@ -4357,6 +4653,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     sensitivities.append(sensitivity)
                     lick_counts.append(lick_count)
                     session_lengths.append(session_length_minutes)
+                    valid_session_lengths.append(valid_session_length_minutes)
                     avg_cap_values.append(avg_cap_session)
                     false_alarms_list.append(false_alarm_count)
                     correct_rejections_list.append(correct_rejection_count)
@@ -4541,6 +4838,19 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                 # ── Capacitive-derived metrics ────────────────────────────
                 if capacitive_data is not None:
                     session_length_minutes = float(capacitive_data['elapsed_time'].max()) / 60.0
+                    # If any gaps exist in the cap file, the cap timestamps cannot be trusted
+                    # for total session duration (e.g. a trailing gap makes the file appear
+                    # shorter than the actual session).  Fall back to treadmill max time.
+                    if (_cap_gap_info['has_gaps']
+                            and treadmill_data is not None
+                            and 'global_time' in treadmill_data.columns):
+                        _tm_times_vsl = pd.to_numeric(
+                            treadmill_data['global_time'], errors='coerce').dropna()
+                        valid_session_length_minutes = (
+                            float(_tm_times_vsl.max()) / 60.0
+                            if len(_tm_times_vsl) > 0 else session_length_minutes)
+                    else:
+                        valid_session_length_minutes = session_length_minutes
 
                     cap_df = capacitive_data.copy()
                     cap_df['Time_sec'] = cap_df['elapsed_time']
@@ -4585,6 +4895,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                         session_length_minutes = float(_tm_times.max()) / 60.0 if len(_tm_times) > 0 else float('nan')
                     else:
                         session_length_minutes = float('nan')
+                    valid_session_length_minutes = session_length_minutes  # no cap data → no gaps to exclude
                     lick_count = float('nan')
                     avg_cap_session = float('nan')
 
@@ -4957,6 +5268,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                 sensitivities.append(sensitivity)
                 lick_counts.append(lick_count)
                 session_lengths.append(session_length_minutes)
+                valid_session_lengths.append(valid_session_length_minutes)
                 avg_cap_values.append(avg_cap_session)
                 false_alarms_list.append(false_alarm_count)
                 correct_rejections_list.append(correct_rejection_count)
@@ -5150,6 +5462,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                         'sensitivity':               sensitivity,
                         'lick_count':                lick_count,
                         'session_length_minutes':    session_length_minutes,
+                        'valid_session_length_minutes': valid_session_length_minutes,
                         'avg_cap_session':           avg_cap_session,
                         'false_alarm_count':         false_alarm_count,
                         'correct_rejection_count':   correct_rejection_count,
@@ -5193,6 +5506,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             'sensitivity': sensitivities,
             'lick_count': lick_counts,
             'session_length': session_lengths,
+            'valid_session_length': valid_session_lengths,
             'avg_cap': avg_cap_values,
             'false_alarms': false_alarms_list,
             'correct_rejections': correct_rejections_list,
@@ -6052,8 +6366,8 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         df_r    = result['df']
         lpm_row = np.full(max_sessions, np.nan)
         for session_idx, (_, row) in enumerate(df_r.iterrows()):
-            if pd.notna(row['session_length']) and row['session_length'] > 0 and pd.notna(row['lick_count']):
-                lpm_row[session_idx] = row['lick_count'] / row['session_length']
+            if pd.notna(row['valid_session_length']) and row['valid_session_length'] > 0 and pd.notna(row['lick_count']):
+                lpm_row[session_idx] = row['lick_count'] / row['valid_session_length']
         all_licks_per_min[i] = lpm_row
         mouse_name = result['mouse']
         if markers[mouse_name] == 's':
@@ -7148,8 +7462,8 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             df_r = result['df']
             lpm_array = np.full(max_sessions, np.nan)
             for session_idx, (_, row) in enumerate(df_r.iterrows()):
-                if pd.notna(row['session_length']) and row['session_length'] > 0 and pd.notna(row['lick_count']):
-                    lpm_array[session_idx] = row['lick_count'] / row['session_length']
+                if pd.notna(row['valid_session_length']) and row['valid_session_length'] > 0 and pd.notna(row['lick_count']):
+                    lpm_array[session_idx] = row['lick_count'] / row['valid_session_length']
             condition_lick_rate_groups[condition].append(lpm_array)
 
         day_numbers = np.arange(1, max_sessions + 1)
@@ -10699,8 +11013,8 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             df_r = result['df']
             session_lpms = []
             for _, row in df_r.iterrows():
-                if pd.notna(row['session_length']) and row['session_length'] > 0 and pd.notna(row['lick_count']):
-                    session_lpms.append(row['lick_count'] / row['session_length'])
+                if pd.notna(row['valid_session_length']) and row['valid_session_length'] > 0 and pd.notna(row['lick_count']):
+                    session_lpms.append(row['lick_count'] / row['valid_session_length'])
             if session_lpms:
                 if condition not in condition_mouse_lpms:
                     condition_mouse_lpms[condition] = []
