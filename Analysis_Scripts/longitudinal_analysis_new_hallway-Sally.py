@@ -11365,12 +11365,20 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         if 'epoch_reward_speed_sess_clean' in selected_plots and _any_speed:
             _, epoch_speed_sess_cond_clean_fig = _plot_epoch_panels(
                 all_results, 'speed_epoch_session_means',
-                ylabel='Treadmill Speed (cm/s)',
+                ylabel='Speed (cm/s)',
                 title_prefix='Speed Aligned to Reward Zone Entry',
                 condition_color_map=condition_color_map,
                 hierarchy='session',
                 show_individual_traces=False,
             )
+            epoch_speed_sess_cond_clean_fig.axes[0].set_ylim(-3, 15)
+            epoch_speed_sess_cond_clean_fig.axes[0].set_yticks([-3, 0, 3, 6, 9, 12, 15])
+            epoch_speed_sess_cond_clean_fig.axes[0].set_xlim(-5,5)
+            epoch_speed_sess_cond_clean_fig.axes[0].set_xticks([-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5])
+            _leg = epoch_speed_sess_cond_clean_fig.axes[0].get_legend()
+            if _leg:
+                _leg.remove()
+            epoch_speed_sess_cond_clean_fig.tight_layout()
 
         if 'epoch_reward_cap_sess' in selected_plots and _any_cap:
             epoch_cap_sess_per_mouse_fig, epoch_cap_sess_cond_fig = _plot_epoch_panels(
@@ -11389,6 +11397,10 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                 hierarchy='session',
                 show_individual_traces=False,
             )
+            epoch_cap_sess_cond_clean_fig.axes[0].set_ylim(0, 10)
+            epoch_cap_sess_cond_clean_fig.axes[0].set_yticks([0, 2, 4, 6, 8, 10])
+            epoch_cap_sess_cond_clean_fig.axes[0].set_xlim(-5,5)
+            epoch_cap_sess_cond_clean_fig.axes[0].set_xticks([-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5])
 
         if 'epoch_reward_speed_early_late' in selected_plots and _any_speed:
             (epoch_speed_early_per_mouse_fig, epoch_speed_late_per_mouse_fig,
@@ -11560,13 +11572,17 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         if 'epoch_punish_speed_sess_clean' in selected_plots and _any_punish_speed:
             _, punish_speed_sess_cond_clean_fig = _plot_epoch_panels(
                 all_results, 'punish_speed_epoch_session_means',
-                ylabel='Treadmill Speed (cm/s)',
-                title_prefix='Speed Aligned to Punishment Zone Entry',
+                ylabel='Speed (cm/s)',
+                title_prefix='Speed Aligned to Distractor Zone Entry',
                 condition_color_map=condition_color_map,
                 hierarchy='session',
                 show_individual_traces=False,
                 reward_delivery_vline=False,
             )
+            punish_speed_sess_cond_clean_fig.axes[0].set_ylim(0, 15)
+            punish_speed_sess_cond_clean_fig.axes[0].set_yticks([0, 5, 10, 15])
+            punish_speed_sess_cond_clean_fig.axes[0].set_xlim(-5,5)
+            punish_speed_sess_cond_clean_fig.axes[0].set_xticks([-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5])
 
         if 'epoch_punish_cap_sess' in selected_plots and _any_punish_cap:
             punish_cap_sess_per_mouse_fig, punish_cap_sess_cond_fig = _plot_epoch_panels(
@@ -11587,6 +11603,10 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                 show_individual_traces=False,
                 reward_delivery_vline=False,
             )
+            punish_cap_sess_cond_clean_fig.axes[0].set_ylim(0, 10)
+            punish_cap_sess_cond_clean_fig.axes[0].set_yticks([0, 2, 4, 6, 8, 10])
+            punish_cap_sess_cond_clean_fig.axes[0].set_xlim(-5,5)
+            punish_cap_sess_cond_clean_fig.axes[0].set_xticks([-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5])
 
         # ── Reward delivery-aligned epoch plots ──────────────────────────────────
         _any_del_speed = any(r.get('delivery_speed_epoch_session_means') is not None for r in all_results)
@@ -11664,10 +11684,9 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     _ax_dcde.bar(_ci, _mn_dcde, width=0.55, color=_color, alpha=0.7,
                                  yerr=_sem_dcde, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
                     _jitter_dcde = (_rng_dcde.random(_n_dcde) - 0.5) * 0.22
-                    for _j, (_mname, _dv) in enumerate(_entries):
-                        _ax_dcde.plot(_ci + _jitter_dcde[_j], _dv, 'o',
-                                      color=_color, markeredgecolor='black',
-                                      markeredgewidth=0.5, markersize=plt.rcParams['lines.markersize'], alpha=0.6, zorder=3)
+                    _ax_dcde.scatter(_ci + _jitter_dcde, _dvals_dcde,
+                                     color=_color, edgecolors='black',
+                                     linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
                 _ax_dcde.axhline(0, color='black', linestyle='--', zorder=1)
                 _ax_dcde.set_xticks(_bar_x_dcde)
                 _ax_dcde.set_xticklabels(_conds_dcde)
@@ -11917,10 +11936,9 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     _ax_pd.bar(_ci, _mn_pd, width=0.55, color=_color, alpha=0.7,
                                yerr=_sem_pd, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
                     _jitter_pd = (_rng_pd.random(_n_pd) - 0.5) * 0.22
-                    for _j, (_mname, _dv) in enumerate(_entries):
-                        _ax_pd.plot(_ci + _jitter_pd[_j], _dv, 'o',
-                                    color=_color, markeredgecolor='black',
-                                    markeredgewidth=0.5, markersize=plt.rcParams['lines.markersize'], alpha=0.6, zorder=3)
+                    _ax_pd.scatter(_ci + _jitter_pd, _dvals_pd,
+                                   color=_color, edgecolors='black',
+                                   linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
                 _ax_pd.axhline(0, color='black', linestyle='--', zorder=1)
                 _ax_pd.set_xticks(_bar_x_pd)
                 _ax_pd.set_xticklabels(_conds_pd)
@@ -12101,10 +12119,9 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     _ax_de.bar(_ci, _mn_de, width=0.55, color=_color, alpha=0.7,
                                yerr=_sem_de, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
                     _jitter_de = (_rng_de.random(_n_de) - 0.5) * 0.22
-                    for _j, (_mname, _dv) in enumerate(_entries):
-                        _ax_de.plot(_ci + _jitter_de[_j], _dv, 'o',
-                                    color=_color, markeredgecolor='black',
-                                    markeredgewidth=0.5, markersize=plt.rcParams['lines.markersize'], alpha=0.6, zorder=3)
+                    _ax_de.scatter(_ci + _jitter_de, _dvals_de,
+                                   color=_color, edgecolors='black',
+                                   linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
                 _ax_de.axhline(0, color='black', linestyle='--', zorder=1)
                 _ax_de.set_xticks(_bar_x_de)
                 _ax_de.set_xticklabels(_conds_de)
@@ -12286,10 +12303,9 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     _ax_pcd.bar(_ci, _mn_pcd, width=0.55, color=_color, alpha=0.7,
                                 yerr=_sem_pcd, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
                     _jitter_pcd = (_rng_pcd.random(_n_pcd) - 0.5) * 0.22
-                    for _j, (_mname, _dv) in enumerate(_entries):
-                        _ax_pcd.plot(_ci + _jitter_pcd[_j], _dv, 'o',
-                                     color=_color, markeredgecolor='black',
-                                     markeredgewidth=0.5, markersize=plt.rcParams['lines.markersize'], alpha=0.6, zorder=3)
+                    _ax_pcd.scatter(_ci + _jitter_pcd, _dvals_pcd,
+                                    color=_color, edgecolors='black',
+                                    linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
                 _ax_pcd.axhline(0, color='black', linestyle='--', zorder=1)
                 _ax_pcd.set_xticks(_bar_x_pcd)
                 _ax_pcd.set_xticklabels(_conds_pcd)
@@ -12469,10 +12485,9 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     _ax_pcde.bar(_ci, _mn_pcde, width=0.55, color=_color, alpha=0.7,
                                  yerr=_sem_pcde, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
                     _jitter_pcde = (_rng_pcde.random(_n_pcde) - 0.5) * 0.22
-                    for _j, (_mname, _dv) in enumerate(_entries):
-                        _ax_pcde.plot(_ci + _jitter_pcde[_j], _dv, 'o',
-                                      color=_color, markeredgecolor='black',
-                                      markeredgewidth=0.5, markersize=plt.rcParams['lines.markersize'], alpha=0.6, zorder=3)
+                    _ax_pcde.scatter(_ci + _jitter_pcde, _dvals_pcde,
+                                     color=_color, edgecolors='black',
+                                     linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
                 _ax_pcde.axhline(0, color='black', linestyle='--', zorder=1)
                 _ax_pcde.set_xticks(_bar_x_pcde)
                 _ax_pcde.set_xticklabels(_conds_pcde)
@@ -12653,20 +12668,19 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     _ax_d.bar(_ci, _mn_d, width=0.55, color=_color, alpha=0.7,
                               yerr=_sem_d, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
                     _jitter_d = (_rng_d.random(_n_d) - 0.5) * 0.22
-                    for _j, (_mname, _dv) in enumerate(_entries):
-                        _ax_d.plot(_ci + _jitter_d[_j], _dv, 'o',
-                                   color=_color, markeredgecolor='black',
-                                   markeredgewidth=0.5, markersize=plt.rcParams['lines.markersize'], alpha=0.6, zorder=3)
-                _ax_d.axhline(0, color='black', linestyle='--', zorder=1)
+                    _ax_d.scatter(_ci + _jitter_d, _dvals,
+                                  color=_color, edgecolors='black',
+                                  linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
+                _ax_d.axhline(0, color='black', linestyle='-', zorder=1)
                 _ax_d.set_xticks(_bar_x)
                 _ax_d.set_xticklabels(_conds_d)
                 _ax_d.set_ylabel('Speed difference (cm/s)\n[post-reward \u2212 pre-reward]')
-                _ax_d.set_xlabel('Condition')
+                _ax_d.set_xlabel('CA%')
+                _ax_d.set_ylim(bottom=-6, top=2)
                 if _all_diff_vals:
                     _ymax_d = float(np.nanmax(_all_diff_vals))
                     _ymin_d = float(np.nanmin(_all_diff_vals))
                     _pad_d  = max(abs(_ymax_d), abs(_ymin_d)) * 0.12 or 0.5
-                    _ax_d.set_ylim(_ymin_d - _pad_d, _ymax_d + _pad_d)
                 _ax_d.tick_params(axis='both', direction='in')
                 _ax_d.spines['top'].set_visible(False)
                 _ax_d.spines['right'].set_visible(False)
@@ -12676,7 +12690,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                 _pairs_d = list(_itertools_d.combinations(range(_n_conds_d), 2))
                 _ylim_cur = list(_ax_d.get_ylim())
                 _bracket_step = (_ylim_cur[1] - _ylim_cur[0]) * 0.14
-                _bracket_base = _ylim_cur[1]
+                _bracket_base = _ylim_cur[1] - _bracket_step * (len(_pairs_d) + 0.5)
                 for _pi, (_ia, _ib) in enumerate(_pairs_d):
                     _vals_a = [e[1] for e in _diff_by_cond[_conds_d[_ia]]]
                     _vals_b = [e[1] for e in _diff_by_cond[_conds_d[_ib]]]
@@ -12684,13 +12698,13 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                         continue
                     _u_stat_d, _p_val_d = mannwhitneyu(_vals_a, _vals_b, alternative='two-sided')
                     if _p_val_d < 0.001:
-                        _sig_str = f'p = {_p_val_d:.2e}***'
+                        _sig_str = f'***'
                     elif _p_val_d < 0.01:
-                        _sig_str = f'p = {_p_val_d:.3f}**'
+                        _sig_str = f'**'
                     elif _p_val_d < 0.05:
-                        _sig_str = f'p = {_p_val_d:.3f}*'
+                        _sig_str = f'*'
                     else:
-                        _sig_str = f'p = {_p_val_d:.3f} (ns)'
+                        _sig_str = f'(ns)'
                     _bh = _bracket_base + _bracket_step * (_pi + 0.6)
                     _ax_d.plot([_ia, _ia, _ib, _ib],
                                [_bh - _bracket_step * 0.15,
@@ -12700,13 +12714,8 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                                color='black')
                     _ax_d.text((_ia + _ib) / 2, _bh + _bracket_step * 0.05,
                                _sig_str, ha='center', va='bottom')
-                if _pairs_d:
-                    _new_top = _bracket_base + _bracket_step * (len(_pairs_d) + 1.5)
-                    _ax_d.set_ylim(_ylim_cur[0], _new_top)
-
                 epoch_reward_speed_diff_fig.suptitle(
-                    'Post- vs Pre-Reward Speed Difference by Condition\n'
-                    '(0-0.65 s vs 0.65-1.3 s; mean \u00b1 SEM across mice; positive = faster after reward delivery)',
+                    'Post-Reward Delivery Speed Difference',
                 )
                 epoch_reward_speed_diff_fig.tight_layout()
                 _write_mwu_report(
@@ -12838,20 +12847,19 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     _ax_cap_d.bar(_ci, _mn_cap_d, width=0.55, color=_color, alpha=0.7,
                                   yerr=_sem_cap_d, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
                     _jitter_cap_d = (_rng_cap_d.random(_n_cap_d) - 0.5) * 0.22
-                    for _j, (_mname, _dv) in enumerate(_entries):
-                        _ax_cap_d.plot(_ci + _jitter_cap_d[_j], _dv, 'o',
-                                       color=_color, markeredgecolor='black',
-                                       markeredgewidth=0.5, markersize=plt.rcParams['lines.markersize'], alpha=0.6, zorder=3)
+                    _ax_cap_d.scatter(_ci + _jitter_cap_d, _dvals,
+                                      color=_color, edgecolors='black',
+                                      linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
                 _ax_cap_d.axhline(0, color='black', linestyle='--', zorder=1)
                 _ax_cap_d.set_xticks(_bar_x_cap)
                 _ax_cap_d.set_xticklabels(_conds_cap_d)
                 _ax_cap_d.set_ylabel('Capacitive difference (z-score)\n[post-reward \u2212 pre-reward]')
-                _ax_cap_d.set_xlabel('Condition')
+                _ax_cap_d.set_xlabel('CA%')
+                _ax_cap_d.set_ylim(bottom=0, top=8)
                 if _all_cap_diff_vals:
                     _ymax_cap_d = float(np.nanmax(_all_cap_diff_vals))
                     _ymin_cap_d = float(np.nanmin(_all_cap_diff_vals))
                     _pad_cap_d  = max(abs(_ymax_cap_d), abs(_ymin_cap_d)) * 0.12 or 0.1
-                    _ax_cap_d.set_ylim(_ymin_cap_d - _pad_cap_d, _ymax_cap_d + _pad_cap_d)
                 _ax_cap_d.tick_params(axis='both', direction='in')
                 _ax_cap_d.spines['top'].set_visible(False)
                 _ax_cap_d.spines['right'].set_visible(False)
@@ -12861,7 +12869,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                 _pairs_cap_d = list(_itertools_cap_d.combinations(range(_n_conds_cap_d), 2))
                 _ylim_cur_cap = list(_ax_cap_d.get_ylim())
                 _bracket_step_cap = (_ylim_cur_cap[1] - _ylim_cur_cap[0]) * 0.14
-                _bracket_base_cap = _ylim_cur_cap[1]
+                _bracket_base_cap = _ylim_cur_cap[1] - _bracket_step_cap * (len(_pairs_cap_d) + 0.5)
                 for _pi, (_ia, _ib) in enumerate(_pairs_cap_d):
                     _vals_a = [e[1] for e in _cap_diff_by_cond[_conds_cap_d[_ia]]]
                     _vals_b = [e[1] for e in _cap_diff_by_cond[_conds_cap_d[_ib]]]
@@ -12869,13 +12877,13 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                         continue
                     _u_stat_cap, _p_val_cap = mannwhitneyu(_vals_a, _vals_b, alternative='two-sided')
                     if _p_val_cap < 0.001:
-                        _sig_str_cap = f'p = {_p_val_cap:.2e}***'
+                        _sig_str_cap = f'***'
                     elif _p_val_cap < 0.01:
-                        _sig_str_cap = f'p = {_p_val_cap:.3f}**'
+                        _sig_str_cap = f'**'
                     elif _p_val_cap < 0.05:
-                        _sig_str_cap = f'p = {_p_val_cap:.3f}*'
+                        _sig_str_cap = f'*'
                     else:
-                        _sig_str_cap = f'p = {_p_val_cap:.3f} (ns)'
+                        _sig_str_cap = f'ns'
                     _bh_cap = _bracket_base_cap + _bracket_step_cap * (_pi + 0.6)
                     _ax_cap_d.plot([_ia, _ia, _ib, _ib],
                                    [_bh_cap - _bracket_step_cap * 0.15,
@@ -12885,13 +12893,8 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                                    color='black')
                     _ax_cap_d.text((_ia + _ib) / 2, _bh_cap + _bracket_step_cap * 0.05,
                                    _sig_str_cap, ha='center', va='bottom')
-                if _pairs_cap_d:
-                    _new_top_cap = _bracket_base_cap + _bracket_step_cap * (len(_pairs_cap_d) + 1.5)
-                    _ax_cap_d.set_ylim(_ylim_cur_cap[0], _new_top_cap)
-
                 epoch_reward_cap_diff_fig.suptitle(
-                    'Post- vs Pre-Reward Capacitive (z-scored) Difference by Condition\n'
-                    '(0-0.65 s vs 0.65-1.3 s; mean \u00b1 SEM across mice; positive = higher licking after reward delivery)',
+                    'Post-Reward Delivery Licking Differences',
                 )
                 epoch_reward_cap_diff_fig.tight_layout()
                 _write_mwu_report(
@@ -13022,10 +13025,9 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     _ax_rde.bar(_ci, _mn_rde, width=0.55, color=_color, alpha=0.7,
                                 yerr=_sem_rde, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
                     _jitter_rde = (_rng_rde.random(_n_rde) - 0.5) * 0.22
-                    for _j, (_mname, _dv) in enumerate(_entries):
-                        _ax_rde.plot(_ci + _jitter_rde[_j], _dv, 'o',
-                                     color=_color, markeredgecolor='black',
-                                     markeredgewidth=0.5, markersize=plt.rcParams['lines.markersize'], alpha=0.6, zorder=3)
+                    _ax_rde.scatter(_ci + _jitter_rde, _dvals_rde,
+                                    color=_color, edgecolors='black',
+                                    linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
                 _ax_rde.axhline(0, color='black', linestyle='--', zorder=1)
                 _ax_rde.set_xticks(_bar_x_rde)
                 _ax_rde.set_xticklabels(_conds_rde)
@@ -13206,10 +13208,9 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     _ax_rde1.bar(_ci, _mn_rde1, width=0.55, color=_color, alpha=0.7,
                                  yerr=_sem_rde1, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
                     _jitter_rde1 = (_rng_rde1.random(_n_rde1) - 0.5) * 0.22
-                    for _j, (_mname, _dv) in enumerate(_entries):
-                        _ax_rde1.plot(_ci + _jitter_rde1[_j], _dv, 'o',
-                                      color=_color, markeredgecolor='black',
-                                      markeredgewidth=0.5, markersize=plt.rcParams['lines.markersize'], alpha=0.6, zorder=3)
+                    _ax_rde1.scatter(_ci + _jitter_rde1, _dvals_rde1,
+                                     color=_color, edgecolors='black',
+                                     linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
                 _ax_rde1.axhline(0, color='black', linestyle='--', zorder=1)
                 _ax_rde1.set_xticks(_bar_x_rde1)
                 _ax_rde1.set_xticklabels(_conds_rde1)
