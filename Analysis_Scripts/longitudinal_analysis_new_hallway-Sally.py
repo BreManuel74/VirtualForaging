@@ -36,7 +36,7 @@ plt.rcParams.update({
     "figure.titlesize": 10,
     "lines.linewidth": 0.9,
     "lines.markersize": 3,
-    "figure.figsize": (5.5, 2.5), #5, 2.5 ; 6, 2.5 for survivor ; 5.5, 2.5 weekday, 3.5, 3 time to first transition
+    "figure.figsize": (3, 2.5), #5, 2.5 ; 6, 2.5 for survivor ; 5.5, 2.5 weekday, 3.5, 3 time to first transition
 })
 import sys
 import pickle
@@ -2058,67 +2058,69 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
 
     cond_color_map = {c: _condition_to_color(c) for c in conditions_sorted}
 
-    # Grouped bar chart ----------------------------------------------------------
-    level_reward_fig, ax = plt.subplots(figsize=(max(15, n_levels * 0.8), 8))
-
-    bar_width   = 0.8 / max(n_conditions, 1)
-    x_positions = np.arange(n_levels)
-
-    for cond_idx, condition in enumerate(conditions_sorted):
-        cond_data = condition_level_data[condition]
-        means = []
-        sems  = []
-        ns    = []
-        for level in all_levels:
-            vals = cond_data.get(level, [])
-            if vals:
-                means.append(float(np.mean(vals)))
-                sems.append(float(np.std(vals) / np.sqrt(len(vals))))
-                ns.append(len(vals))
-            else:
-                means.append(np.nan)
-                sems.append(np.nan)
-                ns.append(0)
-
-        offset = (cond_idx - (n_conditions - 1) / 2) * bar_width
-        bars = ax.bar(
-            x_positions + offset, means,
-            width=bar_width, yerr=sems,
-            capsize=4,
-            color=cond_color_map[condition],
-            label=condition,
-            error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2,
-        )
-
-        # n= annotations above each bar
-        for xi, (m, n_val) in enumerate(zip(means, ns)):
-            if n_val > 0 and not np.isnan(m):
-                ax.text(
-                    x_positions[xi] + offset,
-                    m + (sems[xi] if not np.isnan(sems[xi]) else 0),
-                    f'n={n_val}',
-                    ha='center', va='bottom',
-                    fontsize=7,
-                    color=cond_color_map[condition],
-                )
-
-    ax.set_xticks(x_positions)
-    ax.set_xticklabels(
-        [lv.replace('level_', 'L').replace('.json', '') for lv in all_levels],
-        rotation=45, ha='right',
-    )
-    ax.set_title('Average Rewards Per Minute by Level — by Starting Condition')
-    ax.set_xlabel('Level')
-    ax.set_ylabel('Rewards per Minute (Mean ± SEM)')
-    ax.set_ylim(bottom=0)
-    ax.tick_params(axis='both', direction='in')
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.legend(title='Starting Condition')
-    level_reward_fig.tight_layout()
-
     if selected_plots is None:
         selected_plots = set(_ALL_PLOT_KEYS)
+
+    # Grouped bar chart ----------------------------------------------------------
+    level_reward_fig = None
+    if 'levels' in selected_plots:
+        level_reward_fig, ax = plt.subplots(figsize=(max(15, n_levels * 0.8), 8))
+
+        bar_width   = 0.8 / max(n_conditions, 1)
+        x_positions = np.arange(n_levels)
+
+        for cond_idx, condition in enumerate(conditions_sorted):
+            cond_data = condition_level_data[condition]
+            means = []
+            sems  = []
+            ns    = []
+            for level in all_levels:
+                vals = cond_data.get(level, [])
+                if vals:
+                    means.append(float(np.mean(vals)))
+                    sems.append(float(np.std(vals) / np.sqrt(len(vals))))
+                    ns.append(len(vals))
+                else:
+                    means.append(np.nan)
+                    sems.append(np.nan)
+                    ns.append(0)
+
+            offset = (cond_idx - (n_conditions - 1) / 2) * bar_width
+            bars = ax.bar(
+                x_positions + offset, means,
+                width=bar_width, yerr=sems,
+                capsize=4,
+                color=cond_color_map[condition],
+                label=condition,
+                error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2,
+            )
+
+            # n= annotations above each bar
+            for xi, (m, n_val) in enumerate(zip(means, ns)):
+                if n_val > 0 and not np.isnan(m):
+                    ax.text(
+                        x_positions[xi] + offset,
+                        m + (sems[xi] if not np.isnan(sems[xi]) else 0),
+                        f'n={n_val}',
+                        ha='center', va='bottom',
+                        fontsize=7,
+                        color=cond_color_map[condition],
+                    )
+
+        ax.set_xticks(x_positions)
+        ax.set_xticklabels(
+            [lv.replace('level_', 'L').replace('.json', '') for lv in all_levels],
+            rotation=45, ha='right',
+        )
+        ax.set_title('Average Rewards Per Minute by Level — by Starting Condition')
+        ax.set_xlabel('Level')
+        ax.set_ylabel('Rewards per Minute (Mean ± SEM)')
+        ax.set_ylim(bottom=0)
+        ax.tick_params(axis='both', direction='in')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.legend(title='Starting Condition')
+        level_reward_fig.tight_layout()
 
     # ── Collapsed speed by level (all mice) ───────────────────────────────────
     level_speed_collapsed_fig = None
@@ -2759,10 +2761,9 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
                 ax_llb.bar(ci, _mean_llb, width=0.5, color=color, alpha=0.7,
                            yerr=_sem_llb, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
                 jitter = (_rng_llb.random(len(mouse_vals)) - 0.5) * 0.22
-                for j, (_aid_llb, _lv_val) in enumerate(entries):
-                    ax_llb.plot(ci + jitter[j], _lv_val, 'o',
-                                color=color, markeredgecolor='black',
-                                markeredgewidth=0.5, markersize=plt.rcParams['lines.markersize'], alpha=0.6, zorder=3)
+                ax_llb.scatter(ci + jitter, mouse_vals,
+                               color=color, edgecolors='black',
+                               linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
 
             ax_llb.set_xticks(_x_pos_llb)
             ax_llb.set_xticklabels(_conds_llb)
@@ -2943,7 +2944,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
                          if len(_vals) > 1 else 0.0)
                 _color = cond_color_map.get(_cond, 'steelblue')
                 _ax_t2.bar(_t2_x[_ci], _mean, width=0.5, yerr=_sem, capsize=5,
-                           color=_color, label=f'{_cond} (n={len(_vals)})',
+                           color=_color,
                            error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
                 # Individual data points with jitter
                 _jit = _rng.uniform(-0.10, 0.10, len(_vals))
@@ -2966,9 +2967,11 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
                                   '***'  if _pv < 0.001  else
                                   '**'   if _pv < 0.01   else
                                   '*'    if _pv < 0.05   else 'ns')
-                        _ax_t2.plot([0, 1], [_ymax_bk, _ymax_bk], color='black',
-                                    linewidth=1.2, zorder=6)
-                        _ax_t2.text(0.5, _ymax_bk * 1.01, f'{_stars}\np={_pv:.3f}',
+                        _tick = _ymax_bk * 0.03
+                        _ax_t2.plot([0, 0, 1, 1],
+                                    [_ymax_bk - _tick, _ymax_bk, _ymax_bk, _ymax_bk - _tick],
+                                    color='black', linewidth=1.2, zorder=6)
+                        _ax_t2.text(0.5, _ymax_bk * 1.01, _stars,
                                     ha='center', va='bottom')
                         _ax_t2.set_ylim(bottom=0, top=_ymax_bk * 1.15)
                     except Exception:
@@ -2976,16 +2979,14 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
 
             _ax_t2.set_xticks(_t2_x)
             _ax_t2.set_xticklabels(_t2_conds)
-            _ax_t2.set_xlabel('Starting Condition')
-            _ax_t2.set_ylabel('Cumulative time to first level change (min)')
+            _ax_t2.set_xlabel('CA%')
+            _ax_t2.set_ylabel('Time to first level change (min)')
             _ax_t2.set_title(
-                'Time to First Level 1\u21922 Transition\n'
-                '(cumulative: prior session durations + within-session transition time)')
-            _ax_t2.set_ylim(bottom=0)
+                'Time to First Level Transition')
+            _ax_t2.set_ylim(bottom=0, top=200)
             _ax_t2.tick_params(axis='both', direction='in')
             _ax_t2.spines['top'].set_visible(False)
             _ax_t2.spines['right'].set_visible(False)
-            _ax_t2.legend(title='Starting Condition')
             time_to_level2_fig.tight_layout()
             import itertools as _it_t2
             _write_mwu_report(
@@ -3112,10 +3113,9 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
                     ax_lpb.bar(ci, _pb_mean, width=0.5, color=color, alpha=0.7,
                                yerr=_pb_sem, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
                     jitter = (_rng_pb.random(len(mouse_vals)) - 0.5) * 0.22
-                    for j, (_aid_pb, _sl_val) in enumerate(entries):
-                        ax_lpb.plot(ci + jitter[j], _sl_val, 'o',
-                                    color=color, markeredgecolor='black',
-                                    markeredgewidth=0.5, markersize=plt.rcParams['lines.markersize'], alpha=0.6, zorder=3)
+                    ax_lpb.scatter(ci + jitter, mouse_vals,
+                                   color=color, edgecolors='black',
+                                   linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
                 ax_lpb.axhline(0, color='black', linewidth=0.8, linestyle='--')
                 ax_lpb.set_xticks(_pb_x)
                 ax_lpb.set_xticklabels(_pb_conds)
@@ -3230,7 +3230,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
             ax_lsen.tick_params(axis='both', direction='in')
             ax_lsen.spines['top'].set_visible(False)
             ax_lsen.spines['right'].set_visible(False)
-            plt.legend(frameon=False, fontsize=plt.rcParams['legend.fontsize'])
+            ax_lsen.legend(frameon=False, fontsize=plt.rcParams['legend.fontsize'])
             # tight_layout() omitted — constrained_layout=True handles spacing
 
     # ── Package level data for the descriptive stats report ──────────────────
@@ -6845,10 +6845,9 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             ax_rpbbar.bar(ci, mean_rpb, width=0.5, color=color, alpha=0.7,
                           yerr=sem_rpb, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
             jitter = (rng_rpbbar.random(len(mouse_vals)) - 0.5) * 0.22
-            for j, (mouse_name_rpb, rpb_val) in enumerate(entries):
-                ax_rpbbar.plot(ci + jitter[j], rpb_val, 'o',
-                               color=color, markeredgecolor='black',
-                               markeredgewidth=0.5, markersize=plt.rcParams['lines.markersize'], alpha=0.6, zorder=3)
+            ax_rpbbar.scatter(ci + jitter, mouse_vals,
+                              color=color, edgecolors='black',
+                              linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
 
         ax_rpbbar.set_xticks(x_pos_rpbbar)
         ax_rpbbar.set_xticklabels(conditions_sorted_rpbbar)
@@ -6991,10 +6990,9 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             ax_fllbar.bar(ci, mean_fll, width=0.5, color=color, alpha=0.7,
                           yerr=sem_fll, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
             jitter = (_rng_fllbar.random(len(mouse_vals)) - 0.5) * 0.22
-            for j, (mouse_name_fll, fll_val) in enumerate(entries):
-                ax_fllbar.plot(ci + jitter[j], fll_val, 'o',
-                               color=color, markeredgecolor='black',
-                               markeredgewidth=0.5, markersize=plt.rcParams['lines.markersize'], alpha=0.6, zorder=3)
+            ax_fllbar.scatter(ci + jitter, mouse_vals,
+                              color=color, edgecolors='black',
+                              linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
 
         ax_fllbar.set_xticks(_x_pos_fllbar)
         ax_fllbar.set_xticklabels(_conditions_sorted_fllbar)
@@ -7137,16 +7135,15 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             ax_larpbar.bar(ci, mean_larp_b, width=0.5, color=color, alpha=0.7,
                            yerr=sem_larp_b, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
             jitter = (_rng_larp.random(len(mouse_vals)) - 0.5) * 0.22
-            for j, (mouse_name_larp, larp_val) in enumerate(entries):
-                ax_larpbar.plot(ci + jitter[j], larp_val, 'o',
-                                color=color, markeredgecolor='black',
-                                markeredgewidth=0.5, markersize=plt.rcParams['lines.markersize'], alpha=0.6, zorder=3)
+            ax_larpbar.scatter(ci + jitter, mouse_vals,
+                               color=color, edgecolors='black',
+                               linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
 
         ax_larpbar.set_xticks(_x_pos_larp)
         ax_larpbar.set_xticklabels(_conditions_sorted_larp)
         ax_larpbar.set_xlabel('Starting Condition')
-        ax_larpbar.set_ylabel('Proportion of Deliveries with Licks (Mean \u00b1 SEM)')
-        ax_larpbar.set_ylim(0, 1.05)
+        ax_larpbar.set_ylabel('Proportion of Deliveries with Licks')
+        ax_larpbar.set_ylim(0, 1.2)
         ax_larpbar.tick_params(axis='both', direction='in')
         ax_larpbar.spines['top'].set_visible(False)
         ax_larpbar.spines['right'].set_visible(False)
@@ -7163,7 +7160,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                 _larp_results.append((_lc1, _lc2, float(_larp_stat), float(_larp_p)))
 
         if _larp_results:
-            _larp_y_max = 1.0  # proportion is bounded by [0, 1]; anchor brackets at 1.0
+            _larp_y_max = 0.8  # proportion is bounded by [0, 1]; anchor brackets at 1.0
             _larp_step = _larp_y_max * 0.12
             for _bk_idx, (_lc1, _lc2, _larp_stat, _larp_p) in enumerate(_larp_results):
                 _bx1 = _conditions_sorted_larp.index(_lc1)
@@ -7176,13 +7173,13 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     color='black', linewidth=1.2,
                 )
                 if _larp_p < 0.001:
-                    _lsig = f'*** p={_larp_p:.4f}'
+                    _lsig = f'***'
                 elif _larp_p < 0.01:
-                    _lsig = f'** p={_larp_p:.3f}'
+                    _lsig = f'**'
                 elif _larp_p < 0.05:
-                    _lsig = f'* p={_larp_p:.3f}'
+                    _lsig = f'*'
                 else:
-                    _lsig = f'ns  p={_larp_p:.3f}'
+                    _lsig = f'ns'
                 ax_larpbar.text(
                     (_bx1 + _bx2) / 2.0,
                     _bk_y + _larp_step * 0.05,
@@ -7190,10 +7187,10 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                 )
             ax_larpbar.set_ylim(
                 bottom=0,
-                top=_larp_y_max + _larp_step * (len(_larp_results) + 1.8),
+                top=1.2
             )
 
-        ax_larpbar.set_title('Proportion of Reward Deliveries with Licks by Starting Condition\n(2 s post-delivery window, collapsed across all sessions; Mann-Whitney U test)')
+        ax_larpbar.set_title('Proportion of Reward Deliveries with Licks')
         condition_lick_after_reward_prop_bar_fig.tight_layout()
         _write_mwu_report(
             output_dir, 'lick_after_reward_prop_bar',
@@ -7586,10 +7583,9 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             ax_lrrbar.bar(ci, mean_lrr, width=0.5, color=color, alpha=0.7,
                           yerr=sem_lrr, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
             jitter = (rng_lrrbar.random(len(mouse_lrrs)) - 0.5) * 0.22
-            for j, (mouse_name_lrrbar, lrr_val) in enumerate(entries):
-                ax_lrrbar.plot(ci + jitter[j], lrr_val, 'o',
-                               color=color, markeredgecolor='black',
-                               markeredgewidth=0.5, markersize=plt.rcParams['lines.markersize'], alpha=0.6, zorder=3)
+            ax_lrrbar.scatter(ci + jitter, mouse_lrrs,
+                              color=color, edgecolors='black',
+                              linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
 
         ax_lrrbar.set_xticks(x_pos_lrrbar)
         ax_lrrbar.set_xticklabels(conditions_sorted_lrrbar)
@@ -7684,10 +7680,9 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             ax_pzbar.bar(ci, mean_pz, width=0.5, color=color, alpha=0.7,
                          yerr=sem_pz, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
             jitter = (rng_pzbar.random(len(mouse_vals)) - 0.5) * 0.22
-            for j, (mouse_name_pz, pz_val) in enumerate(entries):
-                ax_pzbar.plot(ci + jitter[j], pz_val, 'o',
-                              color=color, markeredgecolor='black',
-                              markeredgewidth=0.5, markersize=plt.rcParams['lines.markersize'], alpha=0.6, zorder=3)
+            ax_pzbar.scatter(ci + jitter, mouse_vals,
+                             color=color, edgecolors='black',
+                             linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
 
         ax_pzbar.set_xticks(x_pos_pzbar)
         ax_pzbar.set_xticklabels(conditions_sorted_pzbar)
@@ -7785,10 +7780,9 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             ax_bar.bar(ci, mean_rpm, width=0.5, color=color, alpha=0.7,
                        yerr=sem_rpm, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
             jitter = (rng_bar.random(len(mouse_rpms)) - 0.5) * 0.22
-            for j, (mouse_name_bar, rpm_val) in enumerate(entries):
-                ax_bar.plot(ci + jitter[j], rpm_val, 'o',
-                            color=color, markeredgecolor='black',
-                            markeredgewidth=0.5, markersize=plt.rcParams['lines.markersize'], alpha=0.6, zorder=3)
+            ax_bar.scatter(ci + jitter, mouse_rpms,
+                           color=color, edgecolors='black',
+                           linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
 
         ax_bar.set_xticks(x_pos_bar)
         ax_bar.set_xticklabels(conditions_sorted_bar)
@@ -7829,10 +7823,9 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             ax_sbar.bar(ci, mean_spd, width=0.5, color=color, alpha=0.7,
                         yerr=sem_spd, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
             jitter = (rng_sbar.random(len(mouse_speeds)) - 0.5) * 0.22
-            for j, (mouse_name_sbar, spd_val) in enumerate(entries):
-                ax_sbar.plot(ci + jitter[j], spd_val, 'o',
-                             color=color, markeredgecolor='black',
-                             markeredgewidth=0.5, markersize=plt.rcParams['lines.markersize'], alpha=0.6, zorder=3)
+            ax_sbar.scatter(ci + jitter, mouse_speeds,
+                            color=color, edgecolors='black',
+                            linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
 
         ax_sbar.set_xticks(x_pos_sbar)
         ax_sbar.set_xticklabels(conditions_sorted_sbar)
@@ -7924,11 +7917,10 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             ax_senbar.bar(ci, mean_sen, width=0.5, color=color, alpha=0.7,
                           yerr=sem_sen, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
             jitter = (_rng_senbar.random(len(mouse_vals)) - 0.5) * 0.22
-            for j, (mouse_name_s, sv) in enumerate(entries):
-                ax_senbar.plot(ci + jitter[j], sv, 'o',
-                               color=color, markeredgecolor='black',
-                               markeredgewidth=plt.rcParams['lines.linewidth'],
-                               markersize=plt.rcParams['lines.markersize'], zorder=3)
+            ax_senbar.scatter(ci + jitter, mouse_vals,
+                              color=color, edgecolors='black',
+                              linewidths=plt.rcParams['lines.linewidth'],
+                              s=plt.rcParams['lines.markersize']**2, zorder=3)
 
         ax_senbar.set_xticks(np.arange(len(_csen_conds)))
         ax_senbar.set_xticklabels(_csen_conds)
@@ -10906,10 +10898,9 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             ax_bcbar.bar(ci, mean_bc, width=0.5, color=color, alpha=0.7,
                          yerr=sem_bc, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
             jitter = (rng_bcbar.random(len(mouse_bcs)) - 0.5) * 0.22
-            for j, (_, bc_val) in enumerate(entries):
-                ax_bcbar.plot(ci + jitter[j], bc_val, 'o',
-                              color=color, markeredgecolor='black',
-                              markeredgewidth=0.5, markersize=plt.rcParams['lines.markersize'], alpha=0.6, zorder=3)
+            ax_bcbar.scatter(ci + jitter, mouse_bcs,
+                             color=color, edgecolors='black',
+                             linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
 
         ax_bcbar.set_xticks(x_pos_bcbar)
         ax_bcbar.set_xticklabels(conditions_sorted_bcbar)
@@ -10949,10 +10940,9 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             ax_basbar.bar(ci, mean_v, width=0.5, color=color, alpha=0.7,
                           yerr=sem_v, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
             jitter = (rng_basbar.random(len(mouse_vals)) - 0.5) * 0.22
-            for j, (_, val) in enumerate(entries):
-                ax_basbar.plot(ci + jitter[j], val, 'o',
-                               color=color, markeredgecolor='black',
-                               markeredgewidth=0.5, markersize=plt.rcParams['lines.markersize'], alpha=0.6, zorder=3)
+            ax_basbar.scatter(ci + jitter, mouse_vals,
+                              color=color, edgecolors='black',
+                              linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
         ax_basbar.set_xticks(x_pos_basbar)
         ax_basbar.set_xticklabels(conditions_sorted_basbar)
         ax_basbar.set_title('Average Speed per Locomotion Bout by Starting Condition\n(collapsed across all sessions)')
@@ -10992,10 +10982,9 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             ax_badbar.bar(ci, mean_v, width=0.5, color=color, alpha=0.7,
                           yerr=sem_v, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
             jitter = (rng_badbar.random(len(mouse_vals)) - 0.5) * 0.22
-            for j, (_, val) in enumerate(entries):
-                ax_badbar.plot(ci + jitter[j], val, 'o',
-                               color=color, markeredgecolor='black',
-                               markeredgewidth=0.5, markersize=plt.rcParams['lines.markersize'], alpha=0.6, zorder=3)
+            ax_badbar.scatter(ci + jitter, mouse_vals,
+                              color=color, edgecolors='black',
+                              linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
         ax_badbar.set_xticks(x_pos_badbar)
         ax_badbar.set_xticklabels(conditions_sorted_badbar)
         ax_badbar.set_title('Average Distance per Locomotion Bout by Starting Condition\n(collapsed across all sessions)')
@@ -11038,10 +11027,9 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             ax_lbar.bar(ci, mean_lpm, width=0.5, color=color, alpha=0.7,
                         yerr=sem_lpm, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
             jitter = (rng_lbar.random(len(mouse_lpms)) - 0.5) * 0.22
-            for j, (mouse_name_lbar, lpm_val) in enumerate(entries):
-                ax_lbar.plot(ci + jitter[j], lpm_val, 'o',
-                             color=color, markeredgecolor='black',
-                             markeredgewidth=0.5, markersize=plt.rcParams['lines.markersize'], alpha=0.6, zorder=3)
+            ax_lbar.scatter(ci + jitter, mouse_lpms,
+                            color=color, edgecolors='black',
+                            linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
 
         ax_lbar.set_xticks(x_pos_lbar)
         ax_lbar.set_xticklabels(conditions_sorted_lbar)
@@ -11083,10 +11071,9 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             ax_dbar.bar(ci, mean_d, width=0.5, color=color, alpha=0.7,
                         yerr=sem_d, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
             jitter = (rng_dbar.random(len(mouse_dists)) - 0.5) * 0.22
-            for j, (_, dist_val) in enumerate(entries):
-                ax_dbar.plot(ci + jitter[j], dist_val, 'o',
-                             color=color, markeredgecolor='black',
-                             markeredgewidth=1.0, markersize=plt.rcParams['lines.markersize'], zorder=3)
+            ax_dbar.scatter(ci + jitter, mouse_dists,
+                            color=color, edgecolors='black',
+                            linewidths=1.0, s=plt.rcParams['lines.markersize']**2, zorder=3)
 
         ax_dbar.set_xticks(x_pos_dbar)
         ax_dbar.set_xticklabels(conditions_sorted_dbar)
@@ -11180,10 +11167,9 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             ax_tbar.bar(ci, mean_t, width=0.5, color=color, alpha=0.7,
                         yerr=sem_t, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
             jitter = (rng_tbar.random(len(mouse_totals)) - 0.5) * 0.22
-            for j, (_, total_val) in enumerate(entries):
-                ax_tbar.plot(ci + jitter[j], total_val, 'o',
-                             color=color, markeredgecolor='black',
-                             markeredgewidth=0.5, markersize=plt.rcParams['lines.markersize'], alpha=0.6, zorder=3)
+            ax_tbar.scatter(ci + jitter, mouse_totals,
+                            color=color, edgecolors='black',
+                            linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
 
         ax_tbar.set_xticks(x_pos_tbar)
         ax_tbar.set_xticklabels(conditions_sorted_tbar)
@@ -16614,7 +16600,7 @@ def main():
             initialfile=f'epoch_reward_speed_sess_{lvl_name}_{len(file_paths)}mice.svg',
         )
         if save_path:
-            fig.savefig(save_path, bbox_inches='tight', format='svg')
+            fig.savefig(save_path, format='svg')
             print(f"Saved: {save_path}")
 
     for lvl_name, fig in _by_lvl_delivery:
@@ -16625,7 +16611,7 @@ def main():
             initialfile=f'epoch_delivery_speed_sess_{lvl_name}_{len(file_paths)}mice.svg',
         )
         if save_path:
-            fig.savefig(save_path, bbox_inches='tight', format='svg')
+            fig.savefig(save_path, format='svg')
             print(f"Saved: {save_path}")
 
     # ── Optional nparLD Condition x Week ANOVA ────────────────────────────────
