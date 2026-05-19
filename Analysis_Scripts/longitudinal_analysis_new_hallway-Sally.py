@@ -36,7 +36,7 @@ plt.rcParams.update({
     "figure.titlesize": 10,
     "lines.linewidth": 0.9,
     "lines.markersize": 3,
-    "figure.figsize": (4.5, 2.5), #5, 2.5 ; 6, 2.5 for survivor ; 5.5, 2.5 weekday, 3.5, 3 time to first transition
+    "figure.figsize": (4.25, 2.5), #5, 2.5 ; 6, 2.5 for survivor ; 5.5, 2.5 weekday, 3.5, 3 time to first transition
 })
 import sys
 import pickle
@@ -4010,7 +4010,8 @@ def _plot_epoch_panels_by_level(all_results, transitions_csv_path,
                                  ylabel, title_prefix, condition_color_map,
                                  window_s=EPOCH_WINDOW_S, canonical_time=None,
                                  reward_delivery_vline=True,
-                                 levels_to_include=None):
+                                 levels_to_include=None,
+                                 xlim=None, ylim=None):
     """One condition-averaged epoch figure per level, using timestamp-correct level slicing.
 
     Level boundaries are derived directly from the ``transition_ts`` column in
@@ -4275,8 +4276,9 @@ def _plot_epoch_panels_by_level(all_results, transitions_csv_path,
         ax.set_xlabel('Time (s)')
         ax.set_ylabel(ylabel)
         ax.set_title(f'{title_prefix} — {lvl_display}')
-        ax.set_xlim(-window_s, window_s)
-        ax.set_ylim(_shared_ybot, _shared_ytop)
+        ax.set_xlim(-5, 5)
+        ax.set_xticks([-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5])
+        ax.set_ylim(0, 14)
         ax.legend()
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
@@ -11387,8 +11389,8 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                 hierarchy='session',
                 show_individual_traces=False,
             )
-            epoch_speed_sess_cond_clean_fig.axes[0].set_ylim(-3, 15)
-            epoch_speed_sess_cond_clean_fig.axes[0].set_yticks([-3, 0, 3, 6, 9, 12, 15])
+            epoch_speed_sess_cond_clean_fig.axes[0].set_ylim(0, 15)
+            epoch_speed_sess_cond_clean_fig.axes[0].set_yticks([0, 5, 10, 15])
             epoch_speed_sess_cond_clean_fig.axes[0].set_xlim(-5,5)
             epoch_speed_sess_cond_clean_fig.axes[0].set_xticks([-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5])
             _leg = epoch_speed_sess_cond_clean_fig.axes[0].get_legend()
@@ -16667,6 +16669,10 @@ def main():
             pass
         _reward_levels_sel = _ask_level_selection(_reward_avail_levels,
                                                    'Select Levels — Speed Aligned to Reward Zone Entry') if _reward_avail_levels else None
+        # ── Manual axis limits for reward-entry speed epoch panels ─────────
+        # Set to None to use auto-scaling, or provide a tuple e.g. (0, 30)
+        _REWARD_ENTRY_EPOCH_XLIM = None   # e.g. (-5, 5)
+        _REWARD_ENTRY_EPOCH_YLIM = None   # e.g. (0, 30)
         _by_lvl_reward = _plot_epoch_panels_by_level(
             all_results, transitions_csv_path,
             data_files=file_paths,
@@ -16676,6 +16682,8 @@ def main():
             condition_color_map=_condition_color_map_main,
             reward_delivery_vline=True,
             levels_to_include=_reward_levels_sel,
+            xlim=_REWARD_ENTRY_EPOCH_XLIM,
+            ylim=_REWARD_ENTRY_EPOCH_YLIM,
         )
     else:
         _by_lvl_reward = []
@@ -16691,6 +16699,10 @@ def main():
             pass
         _delivery_levels_sel = _ask_level_selection(_delivery_avail_levels,
                                                      'Select Levels — Speed Aligned to Reward Delivery') if _delivery_avail_levels else None
+        # ── Manual axis limits for reward-delivery speed epoch panels ──────
+        # Set to None to use auto-scaling, or provide a tuple e.g. (0, 30)
+        _REWARD_DELIVERY_EPOCH_XLIM = None   # e.g. (-5, 5)
+        _REWARD_DELIVERY_EPOCH_YLIM = None   # e.g. (0, 30)
         _by_lvl_delivery = _plot_epoch_panels_by_level(
             all_results, transitions_csv_path,
             data_files=file_paths,
@@ -16700,6 +16712,8 @@ def main():
             condition_color_map=_condition_color_map_main,
             reward_delivery_vline=True,
             levels_to_include=_delivery_levels_sel,
+            xlim=_REWARD_DELIVERY_EPOCH_XLIM,
+            ylim=_REWARD_DELIVERY_EPOCH_YLIM,
         )
     else:
         _by_lvl_delivery = []
