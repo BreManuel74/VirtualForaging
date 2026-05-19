@@ -1617,7 +1617,7 @@ def _ask_plot_selection(root, labels=None, title='Select Plots to Generate'):
     return frozenset(key for key, var in vars_.items() if var.get())
 
 
-def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, selected_plots=None, output_dir=None):
+def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, animal_markers=None, selected_plots=None, output_dir=None):
     """Analyze rewards/min for each level across all mice, split by starting condition.
 
     Uses a transitions CSV (produced by level_sorter.py) to slice each session's
@@ -3207,6 +3207,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
             for animal_id in all_animals_sen:
                 condition = (animal_conditions or {}).get(animal_id, 'Unknown')
                 color = cond_color_map.get(condition, 'gray')
+                marker = (animal_markers or {}).get(animal_id, 'o')
                 x_vals, y_vals = [], []
                 for lv_idx, lv in enumerate(all_lvls_sen):
                     val = animal_level_sensitivity.get((animal_id, lv))
@@ -3214,25 +3215,33 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
                         x_vals.append(lv_idx + 1)
                         y_vals.append(val)
                 if x_vals:
-                    plt.plot(x_vals, y_vals, '-o',
+                    plt.plot(x_vals, y_vals, f'-{marker}',
                              color=color,
                              linewidth=plt.rcParams['lines.linewidth'],
-                             markersize=plt.rcParams['lines.markersize'],
-                             label=animal_id)
+                             markersize=plt.rcParams['lines.markersize'])
             ax_lsen = plt.gca()
-            ax_lsen.set_xticks(range(1, len(all_lvls_sen) + 1))
-            ax_lsen.set_xticklabels(
-                [lv.replace('level_', 'L').replace('.json', '') for lv in all_lvls_sen],
-                rotation=45, ha='right',
-            )
-            ax_lsen.set_title('Sensitivity by Level \u2014 Individual Mice')
+            ax_lsen.set_xlim(0, 14)  # adjust manually as needed
+            ax_lsen.set_xticks(range(0, 15, 2))
+            ax_lsen.set_title('Sensitivity by Level')
             ax_lsen.set_xlabel('Level')
             ax_lsen.set_ylabel('Sensitivity')
-            ax_lsen.set_ylim(0, 1.05)
+            ax_lsen.set_ylim(0, 1.1)
             ax_lsen.tick_params(axis='both', direction='in')
             ax_lsen.spines['top'].set_visible(False)
             ax_lsen.spines['right'].set_visible(False)
-            ax_lsen.legend(frameon=False, fontsize=plt.rcParams['legend.fontsize'])
+            # Legend: condition colors + sex marker shapes
+            _sen_legend_handles = [
+                Line2D([0], [0], color=col, linewidth=plt.rcParams['lines.linewidth'], label=cond)
+                for cond, col in sorted(cond_color_map.items())
+            ]
+            _sen_legend_handles.append(
+                Line2D([0], [0], color='gray', marker='s', linestyle='None',
+                       markersize=plt.rcParams['lines.markersize'], label='Male'))
+            _sen_legend_handles.append(
+                Line2D([0], [0], color='gray', marker='o', linestyle='None',
+                       markersize=plt.rcParams['lines.markersize'], label='Female'))
+            ax_lsen.legend(handles=_sen_legend_handles, frameon=False,
+                           fontsize=plt.rcParams['legend.fontsize'])
             # tight_layout() omitted — constrained_layout=True handles spacing
 
     # ── Package level data for the descriptive stats report ──────────────────
@@ -14399,6 +14408,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         level_progression_indiv_fig, level_progression_condition_fig, level_progression_bar_fig, \
         _level_stats_data = analyze_levels(
             data_files, transitions_csv_path, animal_conditions=conditions,
+            animal_markers=markers,
             selected_plots=selected_plots,
             output_dir=output_dir,
         )
