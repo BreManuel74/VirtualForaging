@@ -1066,6 +1066,64 @@ def _compute_true_zone_zscores(
     return z_arr
 
 
+def _compute_zone_zscore_window(
+    t_arr,
+    sp_arr,
+    zone_periods,
+    start_t: float,
+    end_t: float,
+    n_shuffles: int = 200,
+    rng=None,
+) -> float:
+    """Compute a shuffle Z-score for zone speed within a single level window.
+
+    Clips the uniformly-sampled treadmill arrays and zone periods to
+    [start_t, end_t), then runs the same circular-shift permutation as
+    _compute_true_zone_zscores on just that slice.
+
+    Parameters
+    ----------
+    t_arr, sp_arr : 1-D arrays (uniformly-sampled time / speed)
+    zone_periods  : list of (entry, exit) tuples (global-time seconds)
+    start_t, end_t: level window boundaries (seconds)
+    n_shuffles    : number of circular-shift shuffles
+    rng           : numpy random Generator (created internally if None)
+
+    Returns
+    -------
+    float Z-score, or np.nan if insufficient data
+    """
+    if rng is None:
+        rng = np.random.default_rng(42)
+    win_mask = (t_arr >= start_t) & (t_arr < end_t)
+    t_win  = t_arr[win_mask]
+    sp_win = sp_arr[win_mask]
+    if len(sp_win) < 4:
+        return float('nan')
+    zone_mask = np.zeros(len(sp_win), dtype=bool)
+    for entry, exit_ in zone_periods:
+        eff_entry = max(entry, start_t)
+        eff_exit  = min(exit_,  end_t)
+        if eff_exit > eff_entry:
+            zone_mask |= (t_win >= eff_entry) & (t_win <= eff_exit)
+    if not np.any(zone_mask) or not np.any(~zone_mask):
+        return float('nan')
+    real_mean = float(np.nanmean(sp_win[zone_mask]))
+    if np.isnan(real_mean):
+        return float('nan')
+    n_bins = len(sp_win)
+    shifts = rng.integers(1, n_bins, size=n_shuffles)
+    shuf_means = np.array([
+        float(np.nanmean(np.roll(sp_win, int(s))[zone_mask]))
+        for s in shifts
+    ])
+    shuf_mean = float(np.nanmean(shuf_means))
+    shuf_std  = float(np.nanstd(shuf_means, ddof=1))
+    if shuf_std > 0:
+        return float((real_mean - shuf_mean) / shuf_std)
+    return 0.0
+
+
 # ── RV-cohort helpers ─────────────────────────────────────────────────────────
 
 def _is_rv_cohort(mouse_name: str) -> bool:
@@ -1886,7 +1944,8 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
                                                'bout_count_lvl': 0,
                                                'bout_spd_sum': 0.0, 'bout_spd_cnt': 0,
                                                'bout_dist_sum': 0.0, 'bout_dist_cnt': 0,
-                                               'level_hits': 0, 'level_opportunities': 0}
+                                               'level_hits': 0, 'level_opportunities': 0,
+                                               'immo_total_s': 0.0, 'immo_dur_s': 0.0}
                 animal_level_accum[key]['rewards']           += count
                 animal_level_accum[key]['duration_min']      += duration_min
                 animal_level_accum[key]['valid_duration_min'] += valid_duration_min
@@ -1914,6 +1973,22 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
                                 if len(_dv) >= 2:
                                     animal_level_accum[key]['bout_dist_sum'] += float(_dv[-1] - _dv[0])
                                     animal_level_accum[key]['bout_dist_cnt'] += 1
+                    # Immobility within this level window (raw speed ≤ 0 cm/s for ≥ 2 s)
+                    if len(lvl_times) >= 2:
+                        _immo_dur_lvl   = float(lvl_times[-1] - lvl_times[0])
+                        _immo_mask_lvl  = lvl_speeds <= 0.0
+                        _immo_total_lvl = 0.0
+                        if _immo_dur_lvl > 0 and np.any(_immo_mask_lvl):
+                            _pad_il = np.concatenate([[False], _immo_mask_lvl, [False]])
+                            _dm_il  = np.diff(_pad_il.astype(np.int8))
+                            for _is_il, _ie_il in zip(
+                                    np.where(_dm_il == 1)[0], np.where(_dm_il == -1)[0]):
+                                _t0_il = lvl_times[_is_il]
+                                _t1_il = lvl_times[min(_ie_il, len(lvl_times) - 1)]
+                                if (_t1_il - _t0_il) >= 2.0:
+                                    _immo_total_lvl += _t1_il - _t0_il
+                        animal_level_accum[key]['immo_total_s'] += _immo_total_lvl
+                        animal_level_accum[key]['immo_dur_s']   += _immo_dur_lvl
                 if len(lick_event_times) > 0:
                     lick_mask = (lick_event_times >= start_t) & (lick_event_times < end_t)
                     animal_level_accum[key]['lick_count'] += int(np.sum(lick_mask))
@@ -2004,6 +2079,8 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
     collapsed_level_bout_avg_spd: dict[str, list[float]] = {}
     condition_level_bout_avg_dist_lvl: dict[str, dict[str, list[float]]] = {}
     collapsed_level_bout_avg_dist_lvl: dict[str, list[float]] = {}
+    condition_level_immo: dict[str, dict[str, list[float]]] = {}
+    collapsed_level_immo: dict[str, list[float]] = {}
     for (animal_id, level), accum in animal_level_accum.items():
         condition = accum['condition']
         if accum['duration_min'] > 0:
@@ -2034,6 +2111,11 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
             dist_m = accum['dist_sum'] / 1000.0  # mm → m
             condition_level_dist.setdefault(condition, {}).setdefault(level, []).append(dist_m)
             collapsed_level_dist.setdefault(level, []).append(dist_m)
+        _immo_dur = accum.get('immo_dur_s', 0.0)
+        if _immo_dur > 0:
+            _immo_prop = accum.get('immo_total_s', 0.0) / _immo_dur
+            condition_level_immo.setdefault(condition, {}).setdefault(level, []).append(_immo_prop)
+            collapsed_level_immo.setdefault(level, []).append(_immo_prop)
 
     # Per-condition distance excluding each mouse's last (potentially incomplete) level
     condition_level_dist_excl_last: dict[str, dict[str, list[float]]] = {}
@@ -3252,6 +3334,61 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
                            fontsize=plt.rcParams['legend.fontsize'])
             # tight_layout() omitted — constrained_layout=True handles spacing
 
+    # ── Per-level immobility proportion — individual mice ────────────────────
+    level_immobility_prop_fig = None
+    if 'level_immobility_prop' in (selected_plots or set()) and animal_level_accum:
+        _immo_by_mouse: dict = {}  # animal_id -> [(level_idx, immo_prop)]
+        _all_levs_im = sorted({lv for (_, lv) in animal_level_accum}, key=sort_key)
+        _lev_to_idx_im = {lv: i + 1 for i, lv in enumerate(_all_levs_im)}
+        for (_mn_im, _lv_im), _acc_im in animal_level_accum.items():
+            _dur_im = _acc_im.get('immo_dur_s', 0.0)
+            if _dur_im > 0:
+                _prop_im = _acc_im.get('immo_total_s', 0.0) / _dur_im
+                _immo_by_mouse.setdefault(_mn_im, []).append(
+                    (_lev_to_idx_im[_lv_im], _prop_im))
+        if _immo_by_mouse:
+            level_immobility_prop_fig = plt.figure(
+                figsize=plt.rcParams['figure.figsize'], constrained_layout=True)
+            for _mn_im2 in sorted(_immo_by_mouse):
+                _cond_im2  = (animal_conditions or {}).get(_mn_im2, 'Unknown')
+                _color_im2 = cond_color_map.get(_cond_im2, 'gray')
+                _marker_im2 = (animal_markers or {}).get(_mn_im2, 'o')
+                _pts_im = sorted(_immo_by_mouse[_mn_im2])
+                plt.plot([p[0] for p in _pts_im], [p[1] for p in _pts_im],
+                         f'-{_marker_im2}',
+                         color=_color_im2,
+                         linewidth=plt.rcParams['lines.linewidth'],
+                         markersize=plt.rcParams['lines.markersize'],
+                         label=_mn_im2)
+            _ax_im2 = plt.gca()
+            _ax_im2.set_xticks(range(1, len(_all_levs_im) + 1))
+            _ax_im2.set_xticklabels(
+                [lv.replace('level_', 'L').replace('.json', '')
+                 for lv in _all_levs_im],
+                rotation=45, ha='right')
+            _ax_im2.set_title(
+                'Immobility Proportion by Level \u2014 Individual Mice\n'
+                '(raw speed = 0 cm/s for \u2265 2 s; within-level window)')
+            _ax_im2.set_xlabel('Level')
+            _ax_im2.set_ylabel('Proportion of level window time immobile')
+            _ax_im2.set_ylim(0, 1.0)
+            _ax_im2.tick_params(axis='both', direction='in')
+            _ax_im2.spines['top'].set_visible(False)
+            _ax_im2.spines['right'].set_visible(False)
+            _immo_legend_handles = [
+                Line2D([0], [0], color=col,
+                       linewidth=plt.rcParams['lines.linewidth'], label=cond)
+                for cond, col in sorted(cond_color_map.items())
+            ]
+            _immo_legend_handles.append(
+                Line2D([0], [0], color='gray', marker='s', linestyle='None',
+                       markersize=plt.rcParams['lines.markersize'], label='Male'))
+            _immo_legend_handles.append(
+                Line2D([0], [0], color='gray', marker='o', linestyle='None',
+                       markersize=plt.rcParams['lines.markersize'], label='Female'))
+            _ax_im2.legend(handles=_immo_legend_handles, frameon=False,
+                           fontsize=plt.rcParams['legend.fontsize'])
+
     # ── Package level data for the descriptive stats report ──────────────────
     _level_stats = {
         'condition_level_reward_rate':   condition_level_data,
@@ -3264,7 +3401,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
         'level_progression':             _prog_by_animal,
     } if (condition_level_data or _prog_by_animal) else None
 
-    return level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_sensitivity_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, last_level_bar_fig, level_survivor_fig, time_to_level2_fig, level_progression_indiv_fig, level_progression_condition_fig, level_progression_bar_fig, _level_stats
+    return level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_sensitivity_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, last_level_bar_fig, level_survivor_fig, time_to_level2_fig, level_progression_indiv_fig, level_progression_condition_fig, level_progression_bar_fig, level_immobility_prop_fig, _level_stats
 
 
 # ── Descriptive statistics report ────────────────────────────────────────────
@@ -13617,6 +13754,84 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                 )
 
     # ── Shuffle Z-score: pre-entry slowing specificity (circular-shift permutation) ──
+    # ── Pre-compute per-level shuffle Z-scores for level-window plots ────────
+    # Builds (animal_id, level_str) -> [z_score, ...] for reward and punish zones.
+    # This replaces the old session-scalar-to-last-level attribution used by
+    # the six level_shuffle_zscore_* and level_punish_shuffle_zscore_* plot blocks.
+    _lev_zscores_rew: dict = {}  # (mouse, level) -> [per-window z-scores]
+    _lev_zscores_pun: dict = {}
+    _level_shuf_needed = any(k in selected_plots for k in (
+        'level_shuffle_zscore', 'level_shuffle_zscore_line', 'level_shuffle_zscore_cond',
+        'level_punish_shuffle_zscore', 'level_punish_shuffle_zscore_line',
+        'level_punish_shuffle_zscore_cond'))
+    if _level_shuf_needed and transitions_csv_path:
+        try:
+            _trans_lvz = pd.read_csv(transitions_csv_path)
+            _trans_lvz['date'] = pd.to_datetime(_trans_lvz['date'])
+            _shuf_rng_lv = np.random.default_rng(42)
+            for _r_lv in all_results:
+                _mn_lv    = _r_lv['mouse']
+                _df_lv    = _r_lv['df']
+                _rew_zp   = _r_lv.get('reward_zone_periods', [])
+                _pun_zp   = _r_lv.get('punish_zone_periods', [])
+                _tm_paths = _r_lv.get('treadmill_paths', [])
+                _mt_lv = (_trans_lvz[
+                    _trans_lvz['animal_id'].str.strip().str.lower() ==
+                    _mn_lv.strip().lower()
+                ] if 'animal_id' in _trans_lvz.columns else pd.DataFrame())
+                if _mt_lv.empty:
+                    continue
+                # Build session date → list of (level_str, start_t, end_t) windows
+                _sess_wins_lv: dict = {}
+                _grp_lv = 'session_num' if 'session_num' in _mt_lv.columns else 'date'
+                for _, _sg_lv in _mt_lv.groupby(_grp_lv):
+                    _sg_lv = (_sg_lv.sort_values('transition_ts')
+                              if 'transition_ts' in _sg_lv.columns else _sg_lv)
+                    _dk_lv  = pd.Timestamp(_sg_lv.iloc[0]['date']).normalize()
+                    _lls_lv = _sg_lv['level'].tolist()
+                    _tts_lv = _sg_lv['transition_ts'].tolist()
+                    _ss_lv  = [0.0] + [float(t) if pd.notna(t) else float('inf')
+                                       for t in _tts_lv[:-1]]
+                    _es_lv  = [float(t) if pd.notna(t) else float('inf')
+                               for t in _tts_lv]
+                    _sess_wins_lv[_dk_lv] = [
+                        (str(lv).replace('.json', ''), s, e)
+                        for lv, s, e in zip(_lls_lv, _ss_lv, _es_lv) if e > s
+                    ]
+                for _si_lv, _row_lv in enumerate(_df_lv.itertuples()):
+                    _dk2_lv  = pd.Timestamp(_row_lv.date).normalize()
+                    _wins_lv = _sess_wins_lv.get(_dk2_lv)
+                    if not _wins_lv:
+                        continue
+                    _tm_p_lv = _tm_paths[_si_lv] if _si_lv < len(_tm_paths) else None
+                    _rzp_lv  = _rew_zp[_si_lv]   if _si_lv < len(_rew_zp)   else []
+                    _pzp_lv  = _pun_zp[_si_lv]   if _si_lv < len(_pun_zp)   else []
+                    if not isinstance(_tm_p_lv, str) or not os.path.isfile(_tm_p_lv):
+                        continue
+                    try:
+                        _t_lv, _sp_lv = uniformly_sample_treadmill(
+                            pd.read_csv(_tm_p_lv))
+                    except Exception:
+                        continue
+                    if len(_sp_lv) < 4:
+                        continue
+                    for _lv_str_w, _s_w, _e_w in _wins_lv:
+                        _kw_lv = (_mn_lv, _lv_str_w)
+                        if _rzp_lv:
+                            _z_r = _compute_zone_zscore_window(
+                                _t_lv, _sp_lv, _rzp_lv, _s_w, _e_w,
+                                n_shuffles=200, rng=_shuf_rng_lv)
+                            if not np.isnan(_z_r):
+                                _lev_zscores_rew.setdefault(_kw_lv, []).append(_z_r)
+                        if _pzp_lv:
+                            _z_p = _compute_zone_zscore_window(
+                                _t_lv, _sp_lv, _pzp_lv, _s_w, _e_w,
+                                n_shuffles=200, rng=_shuf_rng_lv)
+                            if not np.isnan(_z_p):
+                                _lev_zscores_pun.setdefault(_kw_lv, []).append(_z_p)
+        except Exception as _lvz_err:
+            print(f'  [WARN] pre-computing level shuffle Z-scores: {_lvz_err}')
+
     _shuf_plot_keys = {'condition_shuffle_zscore', 'condition_shuffle_zscore_bar',
                        'level_shuffle_zscore', 'level_shuffle_zscore_line',
                        'level_shuffle_zscore_cond'}
@@ -13784,46 +13999,15 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     )
 
             # ── Level bar chart: mean Z-score per level per condition ────────
-            if 'level_shuffle_zscore' in selected_plots and transitions_csv_path:
-                _lev_z_by_cond: dict = {}  # condition -> level -> [z_scores]
-                try:
-                    _tdf_shuf = pd.read_csv(transitions_csv_path)
-                    _tdf_shuf['date'] = pd.to_datetime(_tdf_shuf['date'])
-                    for _r in all_results:
-                        _mname_lsz = _r['mouse']
-                        _cond_lsz  = _r['starting_condition']
-                        _zs_lsz    = _r['_shuffle_zscores']
-                        _df_r_lsz  = _r['df']
-                        # Get transitions for this mouse
-                        _mt_lsz = _tdf_shuf[
-                            _tdf_shuf['animal_id'].str.strip().str.lower() ==
-                            _mname_lsz.strip().lower()
-                        ] if 'animal_id' in _tdf_shuf.columns else pd.DataFrame()
-                        if _mt_lsz.empty:
-                            continue
-                        # Build date -> last level mapping for this mouse
-                        _date_to_lev_lsz: dict = {}
-                        _grp_col = 'session_num' if 'session_num' in _mt_lsz.columns else 'date'
-                        for _sn_lsz, _sg_lsz in _mt_lsz.groupby(_grp_col):
-                            _sg_lsz = (_sg_lsz.sort_values('transition_ts')
-                                       if 'transition_ts' in _sg_lsz.columns else _sg_lsz)
-                            _last_lev_lsz = str(_sg_lsz.iloc[-1]['level']).replace('.json', '')
-                            _sess_dt_lsz  = pd.Timestamp(_sg_lsz.iloc[0]['date']).normalize()
-                            _date_to_lev_lsz[_sess_dt_lsz] = _last_lev_lsz
-                        # Assign each session's Z-score to its level
-                        for _si_lsz, _row_lsz in enumerate(_df_r_lsz.itertuples()):
-                            if _si_lsz >= len(_zs_lsz) or np.isnan(_zs_lsz[_si_lsz]):
-                                continue
-                            _sess_dt_k = pd.Timestamp(_row_lsz.date).normalize()
-                            _lev_lsz   = _date_to_lev_lsz.get(_sess_dt_k)
-                            if _lev_lsz is None:
-                                continue
-                            _lev_z_by_cond.setdefault(_cond_lsz, {}).setdefault(
-                                _lev_lsz, []).append(float(_zs_lsz[_si_lsz]))
-                except Exception as _lev_shuf_err:
-                    print(f'  [WARN] level_shuffle_zscore: failed to map sessions to levels '
-                          f'— {_lev_shuf_err}')
-                    _lev_z_by_cond = {}
+            if 'level_shuffle_zscore' in selected_plots and _lev_zscores_rew:
+                # Build condition->level->z from pre-computed level-window Z-scores
+                _lev_z_by_cond: dict = {}
+                for (_mn_rc, _lv_rc), _zs_rc in _lev_zscores_rew.items():
+                    _cond_rc = next((_r['starting_condition'] for _r in all_results
+                                     if _r['mouse'] == _mn_rc), None)
+                    if _cond_rc:
+                        _lev_z_by_cond.setdefault(_cond_rc, {}).setdefault(
+                            _lv_rc, []).extend(_zs_rc)
 
                 if _lev_z_by_cond:
                     def _lsk_shuf(n):
@@ -13877,42 +14061,9 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     level_shuffle_zscore_fig.tight_layout()
 
             # ── Level line plot: per-mouse mean Z per level (reward zone) ────
-            if 'level_shuffle_zscore_line' in selected_plots and transitions_csv_path:
-                _lev_z_mouse_rw: dict = {}  # (mouse, level) -> [z_scores]
-                try:
-                    _tdf_shuf_ln = pd.read_csv(transitions_csv_path)
-                    _tdf_shuf_ln['date'] = pd.to_datetime(_tdf_shuf_ln['date'])
-                    for _r in all_results:
-                        _mname_lln = _r['mouse']
-                        _zs_lln    = _r['_shuffle_zscores']
-                        _df_r_lln  = _r['df']
-                        _mt_lln = (_tdf_shuf_ln[
-                            _tdf_shuf_ln['animal_id'].str.strip().str.lower() ==
-                            _mname_lln.strip().lower()
-                        ] if 'animal_id' in _tdf_shuf_ln.columns else pd.DataFrame())
-                        if _mt_lln.empty:
-                            continue
-                        _date_to_lev_lln: dict = {}
-                        _grp_col_lln = ('session_num' if 'session_num' in _mt_lln.columns
-                                        else 'date')
-                        for _sn_lln, _sg_lln in _mt_lln.groupby(_grp_col_lln):
-                            _sg_lln = (_sg_lln.sort_values('transition_ts')
-                                       if 'transition_ts' in _sg_lln.columns else _sg_lln)
-                            _last_lev_lln = str(_sg_lln.iloc[-1]['level']).replace('.json', '')
-                            _sess_dt_lln  = pd.Timestamp(_sg_lln.iloc[0]['date']).normalize()
-                            _date_to_lev_lln[_sess_dt_lln] = _last_lev_lln
-                        for _si_lln, _row_lln in enumerate(_df_r_lln.itertuples()):
-                            if _si_lln >= len(_zs_lln) or np.isnan(_zs_lln[_si_lln]):
-                                continue
-                            _sess_dt_k_lln = pd.Timestamp(_row_lln.date).normalize()
-                            _lev_lln = _date_to_lev_lln.get(_sess_dt_k_lln)
-                            if _lev_lln is None:
-                                continue
-                            _lev_z_mouse_rw.setdefault((_mname_lln, _lev_lln), []).append(
-                                float(_zs_lln[_si_lln]))
-                except Exception as _lln_err:
-                    print(f'  [WARN] level_shuffle_zscore_line: {_lln_err}')
-                    _lev_z_mouse_rw = {}
+            if 'level_shuffle_zscore_line' in selected_plots and _lev_zscores_rew:
+                # Use pre-computed level-window Z-scores directly
+                _lev_z_mouse_rw: dict = {k: list(v) for k, v in _lev_zscores_rew.items()}
 
                 if _lev_z_mouse_rw:
                     def _lsk_shuf_ln(n):
@@ -13963,43 +14114,12 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     plt.legend(frameon=False, fontsize=plt.rcParams['legend.fontsize'])
 
             # ── Level condition line: mean ± SEM per condition (reward zone) ─
-            if 'level_shuffle_zscore_cond' in selected_plots and transitions_csv_path:
-                # Reuse _lev_z_mouse_rw if it was computed, otherwise rebuild
+            if 'level_shuffle_zscore_cond' in selected_plots and _lev_zscores_rew:
                 _lev_z_cond_rw: dict = {}  # condition -> level -> [per-mouse means]
-                _src_rw = _lev_z_mouse_rw if '_lev_z_mouse_rw' in dir() else {}
-                if not _src_rw:
-                    # rebuild from scratch using same CSV already loaded
-                    try:
-                        _tdf_scl = pd.read_csv(transitions_csv_path)
-                        _tdf_scl['date'] = pd.to_datetime(_tdf_scl['date'])
-                        for _r in all_results:
-                            _mn_scl = _r['mouse']
-                            _zs_scl = _r['_shuffle_zscores']
-                            _df_scl = _r['df']
-                            _mt_scl = (_tdf_scl[
-                                _tdf_scl['animal_id'].str.strip().str.lower() ==
-                                _mn_scl.strip().lower()
-                            ] if 'animal_id' in _tdf_scl.columns else pd.DataFrame())
-                            if _mt_scl.empty:
-                                continue
-                            _d2l_scl: dict = {}
-                            _gc_scl = ('session_num' if 'session_num' in _mt_scl.columns
-                                       else 'date')
-                            for _, _sg_scl in _mt_scl.groupby(_gc_scl):
-                                _sg_scl = (_sg_scl.sort_values('transition_ts')
-                                           if 'transition_ts' in _sg_scl.columns else _sg_scl)
-                                _d2l_scl[pd.Timestamp(_sg_scl.iloc[0]['date']).normalize()] = \
-                                    str(_sg_scl.iloc[-1]['level']).replace('.json', '')
-                            for _si_scl, _row_scl in enumerate(_df_scl.itertuples()):
-                                if _si_scl >= len(_zs_scl) or np.isnan(_zs_scl[_si_scl]):
-                                    continue
-                                _lv_scl = _d2l_scl.get(
-                                    pd.Timestamp(_row_scl.date).normalize())
-                                if _lv_scl:
-                                    _src_rw.setdefault((_mn_scl, _lv_scl), []).append(
-                                        float(_zs_scl[_si_scl]))
-                    except Exception as _scl_err:
-                        print(f'  [WARN] level_shuffle_zscore_cond: {_scl_err}')
+                # Reuse per-mouse dict if already built, otherwise pull from pre-computed map
+                _src_rw = (_lev_z_mouse_rw
+                           if '_lev_z_mouse_rw' in dir() and _lev_z_mouse_rw
+                           else {k: list(v) for k, v in _lev_zscores_rew.items()})
 
                 # Aggregate per-mouse means then group by condition
                 for (_mn_scl2, _lv_scl2), _vals_scl in _src_rw.items():
@@ -14249,43 +14369,15 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     )
 
             # ── Level bar chart ────────────────────────────────────────────────
-            if 'level_punish_shuffle_zscore' in selected_plots and transitions_csv_path:
+            if 'level_punish_shuffle_zscore' in selected_plots and _lev_zscores_pun:
+                # Build condition->level->z from pre-computed level-window Z-scores
                 _lev_pz_by_cond: dict = {}
-                try:
-                    _tdf_pshuf = pd.read_csv(transitions_csv_path)
-                    _tdf_pshuf['date'] = pd.to_datetime(_tdf_pshuf['date'])
-                    for _r in all_results:
-                        _mname_lpz = _r['mouse']
-                        _cond_lpz  = _r['starting_condition']
-                        _zs_lpz    = _r['_punish_shuffle_zscores']
-                        _df_r_lpz  = _r['df']
-                        _mt_lpz = (_tdf_pshuf[
-                            _tdf_pshuf['animal_id'].str.strip().str.lower() ==
-                            _mname_lpz.strip().lower()
-                        ] if 'animal_id' in _tdf_pshuf.columns else pd.DataFrame())
-                        if _mt_lpz.empty:
-                            continue
-                        _date_to_lev_lpz: dict = {}
-                        _grp_col_lpz = ('session_num' if 'session_num' in _mt_lpz.columns
-                                        else 'date')
-                        for _sn_lpz, _sg_lpz in _mt_lpz.groupby(_grp_col_lpz):
-                            _sg_lpz = (_sg_lpz.sort_values('transition_ts')
-                                       if 'transition_ts' in _sg_lpz.columns else _sg_lpz)
-                            _last_lev_lpz = str(_sg_lpz.iloc[-1]['level']).replace('.json', '')
-                            _sess_dt_lpz  = pd.Timestamp(_sg_lpz.iloc[0]['date']).normalize()
-                            _date_to_lev_lpz[_sess_dt_lpz] = _last_lev_lpz
-                        for _si_lpz, _row_lpz in enumerate(_df_r_lpz.itertuples()):
-                            if _si_lpz >= len(_zs_lpz) or np.isnan(_zs_lpz[_si_lpz]):
-                                continue
-                            _sess_dt_lpz_k = pd.Timestamp(_row_lpz.date).normalize()
-                            _lev_lpz = _date_to_lev_lpz.get(_sess_dt_lpz_k)
-                            if _lev_lpz is None:
-                                continue
-                            _lev_pz_by_cond.setdefault(_cond_lpz, {}).setdefault(
-                                _lev_lpz, []).append(float(_zs_lpz[_si_lpz]))
-                except Exception as _lpz_err:
-                    print(f'  [WARN] level_punish_shuffle_zscore: {_lpz_err}')
-                    _lev_pz_by_cond = {}
+                for (_mn_rpc, _lv_rpc), _zs_rpc in _lev_zscores_pun.items():
+                    _cond_rpc = next((_r['starting_condition'] for _r in all_results
+                                      if _r['mouse'] == _mn_rpc), None)
+                    if _cond_rpc:
+                        _lev_pz_by_cond.setdefault(_cond_rpc, {}).setdefault(
+                            _lv_rpc, []).extend(_zs_rpc)
 
                 if _lev_pz_by_cond:
                     def _lsk_pshuf(n):
@@ -14341,42 +14433,9 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     level_punish_shuffle_zscore_fig.tight_layout()
 
             # ── Level line plot: per-mouse mean Z per level (punishment zone) ─
-            if 'level_punish_shuffle_zscore_line' in selected_plots and transitions_csv_path:
-                _lev_z_mouse_pn: dict = {}  # (mouse, level) -> [z_scores]
-                try:
-                    _tdf_pshuf_ln = pd.read_csv(transitions_csv_path)
-                    _tdf_pshuf_ln['date'] = pd.to_datetime(_tdf_pshuf_ln['date'])
-                    for _r in all_results:
-                        _mname_pln = _r['mouse']
-                        _zs_pln    = _r['_punish_shuffle_zscores']
-                        _df_r_pln  = _r['df']
-                        _mt_pln = (_tdf_pshuf_ln[
-                            _tdf_pshuf_ln['animal_id'].str.strip().str.lower() ==
-                            _mname_pln.strip().lower()
-                        ] if 'animal_id' in _tdf_pshuf_ln.columns else pd.DataFrame())
-                        if _mt_pln.empty:
-                            continue
-                        _date_to_lev_pln: dict = {}
-                        _grp_col_pln = ('session_num' if 'session_num' in _mt_pln.columns
-                                        else 'date')
-                        for _sn_pln, _sg_pln in _mt_pln.groupby(_grp_col_pln):
-                            _sg_pln = (_sg_pln.sort_values('transition_ts')
-                                       if 'transition_ts' in _sg_pln.columns else _sg_pln)
-                            _last_lev_pln = str(_sg_pln.iloc[-1]['level']).replace('.json', '')
-                            _sess_dt_pln  = pd.Timestamp(_sg_pln.iloc[0]['date']).normalize()
-                            _date_to_lev_pln[_sess_dt_pln] = _last_lev_pln
-                        for _si_pln, _row_pln in enumerate(_df_r_pln.itertuples()):
-                            if _si_pln >= len(_zs_pln) or np.isnan(_zs_pln[_si_pln]):
-                                continue
-                            _sess_dt_k_pln = pd.Timestamp(_row_pln.date).normalize()
-                            _lev_pln = _date_to_lev_pln.get(_sess_dt_k_pln)
-                            if _lev_pln is None:
-                                continue
-                            _lev_z_mouse_pn.setdefault((_mname_pln, _lev_pln), []).append(
-                                float(_zs_pln[_si_pln]))
-                except Exception as _pln_err:
-                    print(f'  [WARN] level_punish_shuffle_zscore_line: {_pln_err}')
-                    _lev_z_mouse_pn = {}
+            if 'level_punish_shuffle_zscore_line' in selected_plots and _lev_zscores_pun:
+                # Use pre-computed level-window Z-scores directly
+                _lev_z_mouse_pn: dict = {k: list(v) for k, v in _lev_zscores_pun.items()}
 
                 if _lev_z_mouse_pn:
                     def _lsk_pshuf_ln(n):
@@ -14427,41 +14486,12 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     plt.legend(frameon=False, fontsize=plt.rcParams['legend.fontsize'])
 
             # ── Level condition line: mean ± SEM per condition (punishment zone) ─
-            if 'level_punish_shuffle_zscore_cond' in selected_plots and transitions_csv_path:
+            if 'level_punish_shuffle_zscore_cond' in selected_plots and _lev_zscores_pun:
                 _lev_z_cond_pw: dict = {}  # condition -> level -> [per-mouse means]
-                _src_pw = _lev_z_mouse_pw if '_lev_z_mouse_pw' in dir() else {}
-                if not _src_pw:
-                    try:
-                        _tdf_scp = pd.read_csv(transitions_csv_path)
-                        _tdf_scp['date'] = pd.to_datetime(_tdf_scp['date'])
-                        for _r in all_results:
-                            _mn_scp = _r['mouse']
-                            _zs_scp = _r['_punish_shuffle_zscores']
-                            _df_scp = _r['df']
-                            _mt_scp = (_tdf_scp[
-                                _tdf_scp['animal_id'].str.strip().str.lower() ==
-                                _mn_scp.strip().lower()
-                            ] if 'animal_id' in _tdf_scp.columns else pd.DataFrame())
-                            if _mt_scp.empty:
-                                continue
-                            _d2l_scp: dict = {}
-                            _gc_scp = ('session_num' if 'session_num' in _mt_scp.columns
-                                       else 'date')
-                            for _, _sg_scp in _mt_scp.groupby(_gc_scp):
-                                _sg_scp = (_sg_scp.sort_values('transition_ts')
-                                           if 'transition_ts' in _sg_scp.columns else _sg_scp)
-                                _d2l_scp[pd.Timestamp(_sg_scp.iloc[0]['date']).normalize()] = \
-                                    str(_sg_scp.iloc[-1]['level']).replace('.json', '')
-                            for _si_scp, _row_scp in enumerate(_df_scp.itertuples()):
-                                if _si_scp >= len(_zs_scp) or np.isnan(_zs_scp[_si_scp]):
-                                    continue
-                                _lv_scp = _d2l_scp.get(
-                                    pd.Timestamp(_row_scp.date).normalize())
-                                if _lv_scp:
-                                    _src_pw.setdefault((_mn_scp, _lv_scp), []).append(
-                                        float(_zs_scp[_si_scp]))
-                    except Exception as _scp_err:
-                        print(f'  [WARN] level_punish_shuffle_zscore_cond: {_scp_err}')
+                # Reuse per-mouse dict if already built, otherwise pull from pre-computed map
+                _src_pw = (_lev_z_mouse_pn
+                           if '_lev_z_mouse_pn' in dir() and _lev_z_mouse_pn
+                           else {k: list(v) for k, v in _lev_zscores_pun.items()})
 
                 for (_mn_scp2, _lv_scp2), _vals_scp in _src_pw.items():
                     _cond_scp = next(
@@ -14532,82 +14562,6 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     _ax_scp.spines['right'].set_visible(False)
                     plt.legend(frameon=False, fontsize=plt.rcParams['legend.fontsize'])
 
-    # ── Per-level immobility proportion — individual mice ────────────────────
-    if 'level_immobility_prop' in selected_plots and transitions_csv_path:
-        try:
-            _tdf_immo = pd.read_csv(transitions_csv_path)
-            _tdf_immo['date'] = pd.to_datetime(_tdf_immo['date'])
-            # Build (mouse, level) -> [immobility_prop values] mapping
-            _lev_immo: dict = {}  # (mouse, level) -> [float]
-            for _r in all_results:
-                _mn_im = _r['mouse']
-                _df_im = _r['df']
-                _mt_im = (_tdf_immo[
-                    _tdf_immo['animal_id'].str.strip().str.lower() ==
-                    _mn_im.strip().lower()
-                ] if 'animal_id' in _tdf_immo.columns else pd.DataFrame())
-                if _mt_im.empty:
-                    continue
-                _d2l_im: dict = {}
-                _gc_im = ('session_num' if 'session_num' in _mt_im.columns else 'date')
-                for _, _sg_im in _mt_im.groupby(_gc_im):
-                    _sg_im = (_sg_im.sort_values('transition_ts')
-                              if 'transition_ts' in _sg_im.columns else _sg_im)
-                    _d2l_im[pd.Timestamp(_sg_im.iloc[0]['date']).normalize()] = \
-                        str(_sg_im.iloc[-1]['level']).replace('.json', '')
-                for _row_im in _df_im.itertuples():
-                    _lv_im = _d2l_im.get(pd.Timestamp(_row_im.date).normalize())
-                    if _lv_im and hasattr(_row_im, 'immobility_prop'):
-                        _val_im = float(_row_im.immobility_prop)
-                        if not np.isnan(_val_im):
-                            _lev_immo.setdefault((_mn_im, _lv_im), []).append(_val_im)
-            if _lev_immo:
-                def _lsk_im(n):
-                    parts = n.split('_')
-                    return int(parts[-1]) if parts[-1].isdigit() else 999
-                _all_levs_im = sorted({lv for (_, lv) in _lev_immo}, key=_lsk_im)
-                _all_mice_im = sorted({mn for (mn, _) in _lev_immo})
-                level_immobility_prop_fig = plt.figure(
-                    figsize=plt.rcParams['figure.figsize'], constrained_layout=True)
-                for _mn_im2 in _all_mice_im:
-                    _cond_im = next(
-                        (_r['starting_condition'] for _r in all_results
-                         if _r['mouse'] == _mn_im2), None)
-                    _color_im = condition_color_map.get(_cond_im, 'gray') if _cond_im else 'gray'
-                    _x_im, _y_im = [], []
-                    for _lv_idx_im, _lv_im2 in enumerate(_all_levs_im):
-                        _vals_im = _lev_immo.get((_mn_im2, _lv_im2), [])
-                        if _vals_im:
-                            with warnings.catch_warnings():
-                                warnings.simplefilter('ignore', RuntimeWarning)
-                                _x_im.append(_lv_idx_im + 1)
-                                _y_im.append(float(np.nanmean(_vals_im)))
-                    if _x_im:
-                        plt.plot(_x_im, _y_im, '-o',
-                                 color=_color_im,
-                                 linewidth=plt.rcParams['lines.linewidth'],
-                                 markersize=plt.rcParams['lines.markersize'],
-                                 label=_mn_im2)
-                _ax_im = plt.gca()
-                _ax_im.set_xticks(range(1, len(_all_levs_im) + 1))
-                _ax_im.set_xticklabels(
-                    [lv.replace('level_', 'L').replace('.json', '')
-                     for lv in _all_levs_im],
-                    rotation=45, ha='right',
-                )
-                _ax_im.set_title(
-                    'Immobility Proportion by Level \u2014 Individual Mice\n'
-                    '(raw speed = 0 cm/s for \u2265 2 s)')
-                _ax_im.set_xlabel('Level')
-                _ax_im.set_ylabel('Proportion of session time immobile')
-                _ax_im.set_ylim(0, 1.0)
-                _ax_im.tick_params(axis='both', direction='in')
-                _ax_im.spines['top'].set_visible(False)
-                _ax_im.spines['right'].set_visible(False)
-                plt.legend(frameon=False, fontsize=plt.rcParams['legend.fontsize'])
-        except Exception as _immo_err:
-            print(f'  [WARN] level_immobility_prop: {_immo_err}')
-
     # Create the level-based analysis plots
     level_reward_fig = level_speed_collapsed_fig = level_speed_condition_fig = None
     level_lick_collapsed_fig = level_lick_condition_fig = None
@@ -14629,7 +14583,8 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                                                                    'level_bout_avg_speed', 'level_bout_avg_speed_condition',
                                                                    'level_bout_avg_dist', 'level_bout_avg_dist_condition',
                                                                    'last_level_bar', 'level_survivor', 'time_to_level2', 'level_sensitivity',
-                                                                   'level_progression_indiv', 'level_progression_condition', 'level_progression_bar')):
+                                                                   'level_progression_indiv', 'level_progression_condition', 'level_progression_bar',
+                                                                   'level_immobility_prop')):
         level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, \
         level_lick_collapsed_fig, level_lick_condition_fig, \
         level_sensitivity_fig, \
@@ -14640,6 +14595,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, \
         last_level_bar_fig, level_survivor_fig, time_to_level2_fig, \
         level_progression_indiv_fig, level_progression_condition_fig, level_progression_bar_fig, \
+        level_immobility_prop_fig, \
         _level_stats_data = analyze_levels(
             data_files, transitions_csv_path, animal_conditions=conditions,
             animal_markers=markers,
