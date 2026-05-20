@@ -3039,14 +3039,15 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
                             label=aid, alpha=0.8)
             ax_lpi.set_xlabel('Session')
             ax_lpi.set_ylabel('Ending Level')
+            ax_lpi.set_ylim(0, 40)
+            ax_lpi.set_yticks(range(0, 41, 5))
+            ax_lpi.set_xlim(0, 13)
+            ax_lpi.set_xticks(range(1, 14, 1))
             ax_lpi.set_title('Level Progression — Individual Mice')
             ax_lpi.tick_params(axis='both', direction='in')
             ax_lpi.spines['top'].set_visible(False)
             ax_lpi.spines['right'].set_visible(False)
             _all_lv_nums_pi = [lv for pts in _prog_by_animal.values() for _, lv in pts]
-            if _all_lv_nums_pi:
-                ax_lpi.set_ylim(bottom=0.5, top=max(_all_lv_nums_pi) + 0.5)
-                ax_lpi.set_yticks(sorted(set(_all_lv_nums_pi)))
             ax_lpi.legend(frameon=False, fontsize=plt.rcParams['legend.fontsize'])
             level_progression_indiv_fig.tight_layout()
 
@@ -3086,7 +3087,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
                 ax_lpc.set_title('Level Progression \u2014 Condition Mean \u00b1 SEM')
                 ax_lpc.set_xlim(0, 13)
                 ax_lpc.set_xticks(range(1, 14))
-                ax_lpc.set_ylim(0, 12)
+                ax_lpc.set_ylim(0, 25)
                 ax_lpc.tick_params(axis='both', direction='in')
                 ax_lpc.spines['top'].set_visible(False)
                 ax_lpc.spines['right'].set_visible(False)
