@@ -375,6 +375,14 @@ def _condition_to_color(label: str) -> str:
     return _COLOR_OTHER
 
 
+def _fmt_p(p: float) -> str:
+    """Format a p-value as scientific notation for plot annotations."""
+    if p < 0.05:
+        return f'p={p:.2e}'
+    return f'p={p:.2e}\n(ns)'
+
+
+
 def apply_common_plot_style(
     ax,
     start_x_at_zero: bool = False,
@@ -2895,14 +2903,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
                          _bk_y, _bk_y - _llb_step * 0.2],
                         color='black', linewidth=1.2,
                     )
-                    if _ll_p < 0.001:
-                        _bsig = '***'
-                    elif _ll_p < 0.01:
-                        _bsig = '**'
-                    elif _ll_p < 0.05:
-                        _bsig = '*'
-                    else:
-                        _bsig = f'ns  p={_ll_p:.3f}'
+                    _bsig = _fmt_p(_ll_p)
                     ax_llb.text(
                         (_bx1 + _bx2) / 2.0,
                         _bk_y + _llb_step * 0.05,
@@ -3057,10 +3058,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
                         _, _pv = mannwhitneyu(_v1, _v2, alternative='two-sided')
                         _all_vals = np.concatenate([_v1, _v2])
                         _ymax_bk = float(np.max(_all_vals)) * 1.15
-                        _stars = ('****' if _pv < 0.0001 else
-                                  '***'  if _pv < 0.001  else
-                                  '**'   if _pv < 0.01   else
-                                  '*'    if _pv < 0.05   else 'ns')
+                        _stars = _fmt_p(_pv)
                         _tick = _ymax_bk * 0.03
                         _ax_t2.plot([0, 0, 1, 1],
                                     [_ymax_bk - _tick, _ymax_bk, _ymax_bk, _ymax_bk - _tick],
@@ -3127,8 +3125,8 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
                             label=aid, alpha=0.8)
             ax_lpi.set_xlabel('Session')
             ax_lpi.set_ylabel('Ending Level')
-            ax_lpi.set_ylim(0, 40)
-            ax_lpi.set_yticks(range(0, 41, 5))
+            ax_lpi.set_ylim(0, 14)
+            ax_lpi.set_yticks(range(0, 15, 2))
             ax_lpi.set_xlim(0, 13)
             ax_lpi.set_xticks(range(1, 14, 1))
             ax_lpi.set_title('Level Progression — Individual Mice')
@@ -3248,14 +3246,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
                              _bk_y, _bk_y - _lpb_step * 0.2],
                             color='black', linewidth=1.2,
                         )
-                        if _lpb_p < 0.001:
-                            _bsig_lp = '***'
-                        elif _lpb_p < 0.01:
-                            _bsig_lp = '**'
-                        elif _lpb_p < 0.05:
-                            _bsig_lp = '*'
-                        else:
-                            _bsig_lp = f'ns  p={_lpb_p:.3f}'
+                        _bsig_lp = _fmt_p(_lpb_p)
                         ax_lpb.text(
                             (_bx1 + _bx2) / 2.0,
                             _bk_y + _lpb_step * 0.05,
@@ -4906,6 +4897,10 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                 # ── End cache HIT ─────────────────────────────────────────────────
 
                 # ── Cache MISS: read CSVs in parallel, process normally ────────────
+                # Reset per-session variables that are set conditionally, so a
+                # session that lacks capacitive data never inherits stale values
+                # from the previous iteration.
+                _sess_lick_times = None
                 treadmill_data, capacitive_data, trial_log, missing_files = _read_three_csvs(
                     _s_paths[0], _s_paths[1], _s_paths[2])
 
@@ -5265,7 +5260,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                 # RV cohort        : actual delivery time determined by zone-to-reward
                 #                    matching (_match_rewards_to_zones).
                 _first_lick_lat = float('nan')
-                _sess_lick_arr = _sess_lick_times if '_sess_lick_times' in dir() else np.array([])
+                _sess_lick_arr = _sess_lick_times if _sess_lick_times is not None else np.array([])
                 if trial_log is not None and len(_sess_lick_arr) > 0:
                     try:
                         # Build (zone_entry_time, reward_delivery_time) pairs
@@ -5512,7 +5507,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                                     cap_epoch_event_indices_all.extend(
                                         [_sess_idx] * _cp_mat.shape[0])
                             # ── Lick count epoch (reward zone) ───────────────────────────
-                            if capacitive_data is not None and '_sess_lick_times' in dir():
+                            if capacitive_data is not None and _sess_lick_times is not None:
                                 _lk_mat = _build_lick_epoch_matrix(_sess_lick_times, _zone_times_cap)
                                 if _lk_mat is not None:
                                     with warnings.catch_warnings():
@@ -5555,7 +5550,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                                     punish_cap_epoch_event_indices_all.extend(
                                         [_sess_idx] * _cp_mat.shape[0])
                             # ── Lick count epoch (punishment zone) ──────────────────────
-                            if capacitive_data is not None and '_sess_lick_times' in dir():
+                            if capacitive_data is not None and _sess_lick_times is not None:
                                 _plk_mat = _build_lick_epoch_matrix(_sess_lick_times, _punish_times_cap)
                                 if _plk_mat is not None:
                                     with warnings.catch_warnings():
@@ -5598,7 +5593,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                                         warnings.simplefilter('ignore', RuntimeWarning)
                                         delivery_cap_epoch_session_means_all.append(
                                             np.nanmean(_dcp_mat, axis=0))
-                            if (capacitive_data is not None and '_sess_lick_times' in dir()
+                            if (capacitive_data is not None and _sess_lick_times is not None
                                     and len(_del_times_cap) > 0):
                                 _dlk_mat = _build_lick_epoch_matrix(
                                     _sess_lick_times, _del_times_cap)
@@ -7054,14 +7049,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                      _bk_y, _bk_y - _rpbbar_step * 0.2],
                     color='black', linewidth=1.2,
                 )
-                if _rpb_p < 0.001:
-                    _bsig = '***'
-                elif _rpb_p < 0.01:
-                    _bsig = '**'
-                elif _rpb_p < 0.05:
-                    _bsig = '*'
-                else:
-                    _bsig = f'ns  p={_rpb_p:.3f}'
+                _bsig = _fmt_p(_rpb_p)
                 ax_rpbbar.text(
                     (_bx1 + _bx2) / 2.0,
                     _bk_y + _rpbbar_step * 0.05,
@@ -7199,14 +7187,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                      _bk_y, _bk_y - _fllbar_step * 0.2],
                     color='black', linewidth=1.2,
                 )
-                if _fll_p < 0.001:
-                    _bsig = '***'
-                elif _fll_p < 0.01:
-                    _bsig = '**'
-                elif _fll_p < 0.05:
-                    _bsig = '*'
-                else:
-                    _bsig = f'ns  p={_fll_p:.3f}'
+                _bsig = _fmt_p(_fll_p)
                 ax_fllbar.text(
                     (_bx1 + _bx2) / 2.0,
                     _bk_y + _fllbar_step * 0.05,
@@ -7341,14 +7322,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                      _bk_y, _bk_y - _larp_step * 0.2],
                     color='black', linewidth=1.2,
                 )
-                if _larp_p < 0.001:
-                    _lsig = f'***'
-                elif _larp_p < 0.01:
-                    _lsig = f'**'
-                elif _larp_p < 0.05:
-                    _lsig = f'*'
-                else:
-                    _lsig = f'ns'
+                _lsig = _fmt_p(_larp_p)
                 ax_larpbar.text(
                     (_bx1 + _bx2) / 2.0,
                     _bk_y + _larp_step * 0.05,
@@ -7793,14 +7767,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                      _bk_y, _bk_y - _lrrbar_step * 0.2],
                     color='black', linewidth=1.2,
                 )
-                if _bt_p < 0.001:
-                    _bsig = '***'
-                elif _bt_p < 0.01:
-                    _bsig = '**'
-                elif _bt_p < 0.05:
-                    _bsig = '*'
-                else:
-                    _bsig = f'ns  p={_bt_p:.3f}'
+                _bsig = _fmt_p(_bt_p)
                 ax_lrrbar.text(
                     (_bx1 + _bx2) / 2.0,
                     _bk_y + _lrrbar_step * 0.05,
@@ -7889,14 +7856,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                      _bk_y, _bk_y - _pzbar_step * 0.2],
                     color='black', linewidth=1.2,
                 )
-                if _pz_p < 0.001:
-                    _pzsig = '***'
-                elif _pz_p < 0.01:
-                    _pzsig = '**'
-                elif _pz_p < 0.05:
-                    _pzsig = '*'
-                else:
-                    _pzsig = f'ns  p={_pz_p:.3f}'
+                _pzsig = _fmt_p(_pz_p)
                 ax_pzbar.text(
                     (_bx1 + _bx2) / 2.0,
                     _bk_y + _pzbar_step * 0.05,
@@ -8126,14 +8086,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     [_bk_y - _senbar_step * 0.2, _bk_y,
                      _bk_y, _bk_y - _senbar_step * 0.2],
                     color='black', linewidth=1.2)
-                if _sp < 0.001:
-                    _bsig = f'*** p={_sp:.4f}'
-                elif _sp < 0.01:
-                    _bsig = f'** p={_sp:.3f}'
-                elif _sp < 0.05:
-                    _bsig = f'* p={_sp:.3f}'
-                else:
-                    _bsig = f'ns  p={_sp:.3f}'
+                _bsig = _fmt_p(_sp)
                 ax_senbar.text((_bx1 + _bx2) / 2.0,
                                _bk_y + _senbar_step * 0.05,
                                _bsig, ha='center', va='bottom', fontsize=9)
@@ -11279,14 +11232,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     [_bk_y - _dbar_step * 0.2, _bk_y,
                      _bk_y, _bk_y - _dbar_step * 0.2],
                     color='black', linewidth=1.2)
-                if _dp < 0.001:
-                    _bsig = '***'
-                elif _dp < 0.01:
-                    _bsig = '**'
-                elif _dp < 0.05:
-                    _bsig = '*'
-                else:
-                    _bsig = f'ns  p={_dp:.3f}'
+                _bsig = _fmt_p(_dp)
                 ax_dbar.text((_bx1 + _bx2) / 2.0,
                              _bk_y + _dbar_step * 0.05,
                              _bsig, ha='center', va='bottom', fontsize=9)
@@ -11375,14 +11321,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     [_bk_y - _tbar_step * 0.2, _bk_y,
                      _bk_y, _bk_y - _tbar_step * 0.2],
                     color='black', linewidth=1.2)
-                if _tp < 0.001:
-                    _bsig = '***'
-                elif _tp < 0.01:
-                    _bsig = '**'
-                elif _tp < 0.05:
-                    _bsig = '*'
-                else:
-                    _bsig = f'ns  p={_tp:.3f}'
+                _bsig = _fmt_p(_tp)
                 ax_tbar.text((_bx1 + _bx2) / 2.0,
                              _bk_y + _tbar_step * 0.05,
                              _bsig, ha='center', va='bottom', fontsize=9)
@@ -11895,14 +11834,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     if len(_vals_a_dcde) < 2 or len(_vals_b_dcde) < 2:
                         continue
                     _u_dcde, _p_dcde = mannwhitneyu(_vals_a_dcde, _vals_b_dcde, alternative='two-sided')
-                    if _p_dcde < 0.001:
-                        _sig_dcde = f'p = {_p_dcde:.2e}***'
-                    elif _p_dcde < 0.01:
-                        _sig_dcde = f'p = {_p_dcde:.3f}**'
-                    elif _p_dcde < 0.05:
-                        _sig_dcde = f'p = {_p_dcde:.3f}*'
-                    else:
-                        _sig_dcde = f'p = {_p_dcde:.3f} (ns)'
+                    _sig_dcde = _fmt_p(_p_dcde)
                     _bh_dcde = _bracket_base_dcde + _bracket_step_dcde * (_pi + 0.6)
                     _ax_dcde.plot([_ia, _ia, _ib, _ib],
                                   [_bh_dcde - _bracket_step_dcde * 0.15,
@@ -11997,14 +11929,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     if len(_vals_a_dcde2) < 2 or len(_vals_b_dcde2) < 2:
                         continue
                     _u_dcde2, _p_dcde2 = mannwhitneyu(_vals_a_dcde2, _vals_b_dcde2, alternative='two-sided')
-                    if _p_dcde2 < 0.001:
-                        _sig_dcde2 = f'***'
-                    elif _p_dcde2 < 0.01:
-                        _sig_dcde2 = f'**'
-                    elif _p_dcde2 < 0.05:
-                        _sig_dcde2 = f'*'
-                    else:
-                        _sig_dcde2 = f'ns'
+                    _sig_dcde2 = _fmt_p(_p_dcde2)
                     _bh_dcde2 = _bracket_base_dcde2 + _bracket_step_dcde2 * (_pi2 + 0.6)
                     _ax_dcde2.plot([_ia2, _ia2, _ib2, _ib2],
                                    [_bh_dcde2 - _bracket_step_dcde2 * 0.15,
@@ -12250,14 +12175,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     if len(_vals_a_pd) < 2 or len(_vals_b_pd) < 2:
                         continue
                     _u_stat_pd, _p_val_pd = mannwhitneyu(_vals_a_pd, _vals_b_pd, alternative='two-sided')
-                    if _p_val_pd < 0.001:
-                        _sig_str_pd = f'p = {_p_val_pd:.2e}***'
-                    elif _p_val_pd < 0.01:
-                        _sig_str_pd = f'p = {_p_val_pd:.3f}**'
-                    elif _p_val_pd < 0.05:
-                        _sig_str_pd = f'p = {_p_val_pd:.3f}*'
-                    else:
-                        _sig_str_pd = f'p = {_p_val_pd:.3f} (ns)'
+                    _sig_str_pd = _fmt_p(_p_val_pd)
                     _bh_pd = _bracket_base_pd + _bracket_step_pd * (_pi + 0.6)
                     _ax_pd.plot([_ia, _ia, _ib, _ib],
                                 [_bh_pd - _bracket_step_pd * 0.15,
@@ -12433,14 +12351,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     if len(_vals_a_de) < 2 or len(_vals_b_de) < 2:
                         continue
                     _u_stat_de, _p_val_de = mannwhitneyu(_vals_a_de, _vals_b_de, alternative='two-sided')
-                    if _p_val_de < 0.001:
-                        _sig_str_de = f'p = {_p_val_de:.2e}***'
-                    elif _p_val_de < 0.01:
-                        _sig_str_de = f'p = {_p_val_de:.3f}**'
-                    elif _p_val_de < 0.05:
-                        _sig_str_de = f'p = {_p_val_de:.3f}*'
-                    else:
-                        _sig_str_de = f'p = {_p_val_de:.3f} (ns)'
+                    _sig_str_de = _fmt_p(_p_val_de)
                     _bh_de = _bracket_base_de + _bracket_step_de * (_pi + 0.6)
                     _ax_de.plot([_ia, _ia, _ib, _ib],
                                 [_bh_de - _bracket_step_de * 0.15,
@@ -12534,14 +12445,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     if len(_vals_a_de2) < 2 or len(_vals_b_de2) < 2:
                         continue
                     _u_stat_de2, _p_val_de2 = mannwhitneyu(_vals_a_de2, _vals_b_de2, alternative='two-sided')
-                    if _p_val_de2 < 0.001:
-                        _sig_str_de2 = '***'
-                    elif _p_val_de2 < 0.01:
-                        _sig_str_de2 = '**'
-                    elif _p_val_de2 < 0.05:
-                        _sig_str_de2 = '*'
-                    else:
-                        _sig_str_de2 = 'ns'
+                    _sig_str_de2 = _fmt_p(_p_val_de2)
                     _bh_de2 = _bracket_base_de2 + _bracket_step_de2 * (_pi + 0.6)
                     _ax_de2.plot([_ia, _ia, _ib, _ib],
                                  [_bh_de2 - _bracket_step_de2 * 0.15,
@@ -12713,14 +12617,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     if len(_vals_a_pcd) < 2 or len(_vals_b_pcd) < 2:
                         continue
                     _u_pcd, _p_pcd = mannwhitneyu(_vals_a_pcd, _vals_b_pcd, alternative='two-sided')
-                    if _p_pcd < 0.001:
-                        _sig_pcd = f'p = {_p_pcd:.2e}***'
-                    elif _p_pcd < 0.01:
-                        _sig_pcd = f'p = {_p_pcd:.3f}**'
-                    elif _p_pcd < 0.05:
-                        _sig_pcd = f'p = {_p_pcd:.3f}*'
-                    else:
-                        _sig_pcd = f'p = {_p_pcd:.3f} (ns)'
+                    _sig_pcd = _fmt_p(_p_pcd)
                     _bh_pcd = _bracket_base_pcd + _bracket_step_pcd * (_pi + 0.6)
                     _ax_pcd.plot([_ia, _ia, _ib, _ib],
                                  [_bh_pcd - _bracket_step_pcd * 0.15,
@@ -12895,14 +12792,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     if len(_vals_a_pcde) < 2 or len(_vals_b_pcde) < 2:
                         continue
                     _u_pcde, _p_pcde = mannwhitneyu(_vals_a_pcde, _vals_b_pcde, alternative='two-sided')
-                    if _p_pcde < 0.001:
-                        _sig_pcde = f'p = {_p_pcde:.2e}***'
-                    elif _p_pcde < 0.01:
-                        _sig_pcde = f'p = {_p_pcde:.3f}**'
-                    elif _p_pcde < 0.05:
-                        _sig_pcde = f'p = {_p_pcde:.3f}*'
-                    else:
-                        _sig_pcde = f'p = {_p_pcde:.3f} (ns)'
+                    _sig_pcde = _fmt_p(_p_pcde)
                     _bh_pcde = _bracket_base_pcde + _bracket_step_pcde * (_pi + 0.6)
                     _ax_pcde.plot([_ia, _ia, _ib, _ib],
                                   [_bh_pcde - _bracket_step_pcde * 0.15,
@@ -13079,14 +12969,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     if len(_vals_a) < 2 or len(_vals_b) < 2:
                         continue
                     _u_stat_d, _p_val_d = mannwhitneyu(_vals_a, _vals_b, alternative='two-sided')
-                    if _p_val_d < 0.001:
-                        _sig_str = f'***'
-                    elif _p_val_d < 0.01:
-                        _sig_str = f'**'
-                    elif _p_val_d < 0.05:
-                        _sig_str = f'*'
-                    else:
-                        _sig_str = f'(ns)'
+                    _sig_str = _fmt_p(_p_val_d)
                     _bh = _bracket_base + _bracket_step * (_pi + 0.6)
                     _ax_d.plot([_ia, _ia, _ib, _ib],
                                [_bh - _bracket_step * 0.15,
@@ -13258,14 +13141,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     if len(_vals_a) < 2 or len(_vals_b) < 2:
                         continue
                     _u_stat_cap, _p_val_cap = mannwhitneyu(_vals_a, _vals_b, alternative='two-sided')
-                    if _p_val_cap < 0.001:
-                        _sig_str_cap = f'***'
-                    elif _p_val_cap < 0.01:
-                        _sig_str_cap = f'**'
-                    elif _p_val_cap < 0.05:
-                        _sig_str_cap = f'*'
-                    else:
-                        _sig_str_cap = f'ns'
+                    _sig_str_cap = _fmt_p(_p_val_cap)
                     _bh_cap = _bracket_base_cap + _bracket_step_cap * (_pi + 0.6)
                     _ax_cap_d.plot([_ia, _ia, _ib, _ib],
                                    [_bh_cap - _bracket_step_cap * 0.15,
@@ -13436,14 +13312,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     if len(_vals_a_rde) < 2 or len(_vals_b_rde) < 2:
                         continue
                     _u_stat_rde, _p_val_rde = mannwhitneyu(_vals_a_rde, _vals_b_rde, alternative='two-sided')
-                    if _p_val_rde < 0.001:
-                        _sig_str_rde = f'p = {_p_val_rde:.2e}***'
-                    elif _p_val_rde < 0.01:
-                        _sig_str_rde = f'p = {_p_val_rde:.3f}**'
-                    elif _p_val_rde < 0.05:
-                        _sig_str_rde = f'p = {_p_val_rde:.3f}*'
-                    else:
-                        _sig_str_rde = f'p = {_p_val_rde:.3f} (ns)'
+                    _sig_str_rde = _fmt_p(_p_val_rde)
                     _bh_rde = _bracket_base_rde + _bracket_step_rde * (_pi + 0.6)
                     _ax_rde.plot([_ia, _ia, _ib, _ib],
                                  [_bh_rde - _bracket_step_rde * 0.15,
@@ -13619,14 +13488,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     if len(_vals_a_rde1) < 2 or len(_vals_b_rde1) < 2:
                         continue
                     _u_stat_rde1, _p_val_rde1 = mannwhitneyu(_vals_a_rde1, _vals_b_rde1, alternative='two-sided')
-                    if _p_val_rde1 < 0.001:
-                        _sig_str_rde1 = f'p = {_p_val_rde1:.2e}***'
-                    elif _p_val_rde1 < 0.01:
-                        _sig_str_rde1 = f'p = {_p_val_rde1:.3f}**'
-                    elif _p_val_rde1 < 0.05:
-                        _sig_str_rde1 = f'p = {_p_val_rde1:.3f}*'
-                    else:
-                        _sig_str_rde1 = f'p = {_p_val_rde1:.3f} (ns)'
+                    _sig_str_rde1 = _fmt_p(_p_val_rde1)
                     _bh_rde1 = _bracket_base_rde1 + _bracket_step_rde1 * (_pi + 0.6)
                     _ax_rde1.plot([_ia, _ia, _ib, _ib],
                                   [_bh_rde1 - _bracket_step_rde1 * 0.15,
@@ -13727,14 +13589,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     if len(_vals_a_rde2) < 2 or len(_vals_b_rde2) < 2:
                         continue
                     _u_stat_rde2, _p_val_rde2 = mannwhitneyu(_vals_a_rde2, _vals_b_rde2, alternative='two-sided')
-                    if _p_val_rde2 < 0.001:
-                        _sig_str_rde2 = f'p = {_p_val_rde2:.2e}***'
-                    elif _p_val_rde2 < 0.01:
-                        _sig_str_rde2 = f'p = {_p_val_rde2:.3f}**'
-                    elif _p_val_rde2 < 0.05:
-                        _sig_str_rde2 = f'p = {_p_val_rde2:.3f}*'
-                    else:
-                        _sig_str_rde2 = f'p = {_p_val_rde2:.3f} (ns)'
+                    _sig_str_rde2 = _fmt_p(_p_val_rde2)
                     _bh_rde2 = _bracket_base_rde2 + _bracket_step_rde2 * (_pi + 0.6)
                     _ax_rde2.plot([_ia, _ia, _ib, _ib],
                                   [_bh_rde2 - _bracket_step_rde2 * 0.15,
@@ -14011,10 +13866,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                         _u_szb, _p_szb = mannwhitneyu(_va_szb, _vb_szb, alternative='two-sided')
                         print(f'  [SHUFFLE Z-SCORE] {_shuf_conds_bar[_ia_szb]} vs '
                               f'{_shuf_conds_bar[_ib_szb]}: U={_u_szb:.1f}, p={_p_szb:.4f}')
-                        _sig_szb = (f'p = {_p_szb:.2e}***' if _p_szb < 0.001 else
-                                    f'p = {_p_szb:.3f}**'  if _p_szb < 0.01  else
-                                    f'p = {_p_szb:.3f}*'   if _p_szb < 0.05  else
-                                    f'p = {_p_szb:.3f} (ns)')
+                        _sig_szb = _fmt_p(_p_szb)
                         _bh_szb = _base_szb + _step_szb * (_pi_szb + 0.6)
                         _ax_szbar.plot([_ia_szb, _ia_szb, _ib_szb, _ib_szb],
                                        [_bh_szb - _step_szb * 0.15, _bh_szb,
@@ -14378,10 +14230,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                             _va_pszb, _vb_pszb, alternative='two-sided')
                         print(f'  [PUNISH SHUFFLE Z] {_pshuf_conds_bar[_ia_pszb]} vs '
                               f'{_pshuf_conds_bar[_ib_pszb]}: U={_u_pszb:.1f}, p={_p_pszb:.4f}')
-                        _sig_pszb = (f'p = {_p_pszb:.2e}***' if _p_pszb < 0.001 else
-                                     f'p = {_p_pszb:.3f}**'  if _p_pszb < 0.01  else
-                                     f'p = {_p_pszb:.3f}*'   if _p_pszb < 0.05  else
-                                     f'p = {_p_pszb:.3f} (ns)')
+                        _sig_pszb = _fmt_p(_p_pszb)
                         _bh_pszb = _base_pszb + _step_pszb * (_pi_pszb + 0.6)
                         _ax_pszbar.plot(
                             [_ia_pszb, _ia_pszb, _ib_pszb, _ib_pszb],
@@ -15062,7 +14911,7 @@ def _run_weight_correlations(root, file_paths, animal_info):
                 _grand_ic = float(_y_all[_fin].mean()) - _rmc['slope'] * float(_x_all[_fin].mean())
                 ax.plot(_x_line, _rmc['slope'] * _x_line + _grand_ic,
                         color='black', linewidth=1.4, zorder=4)
-            _p_str = (f"p = {_rmc['p']:.4f}" if _rmc['p'] >= 0.0001 else "p < 0.0001")
+            _p_str = f"p = {_rmc['p']:.2e}"
             _ann = (f"$r_{{rm}}$ = {_rmc['r']:.3f}\n"
                     f"{_p_str}\n"
                     f"95% CI [{_rmc['ci_lo']:.3f}, {_rmc['ci_hi']:.3f}]\n"
@@ -15075,7 +14924,7 @@ def _run_weight_correlations(root, file_paths, animal_info):
                         color='dimgray', linewidth=1.2, linestyle='--', zorder=4)
             if _fin.sum() >= 3:
                 _rho, _pv = _spearmanr(_x_all[_fin], _y_all[_fin])
-                _p_str    = (f"p = {_pv:.4f}" if _pv >= 0.0001 else "p < 0.0001")
+                _p_str    = f"p = {_pv:.2e}"
                 _ann = (f"Spearman \u03c1 = {_rho:.3f}\n{_p_str}\n"
                         f"n = {sub_df['mouse'].nunique()} mice\n"
                         f"(rmcorr unavailable)")
@@ -15488,6 +15337,18 @@ def run_nparld_condition_week_r(
     combined = pd.concat(frames, ignore_index=True)
     combined = combined.rename(columns={'week': 'Week', measure: 'Response'})
 
+    # ── Sanity check: raw per-animal totals ──────────────────────────────────
+    _raw_totals_week = (
+        combined.groupby(['ID', 'Condition'])['Response']
+        .agg(total='sum', n_sessions='count')
+        .reset_index()
+        .sort_values('ID')
+    )
+    print(f"\n  [RAW CHECK — week model] per-animal total '{measure}':")
+    for _, r in _raw_totals_week.iterrows():
+        print(f"    {r['ID']:20s}  {r['Condition']:6s}  total={r['total']:.1f}  n_sessions={int(r['n_sessions'])}")
+    # ─────────────────────────────────────────────────────────────────────────
+
     # Per-animal per-week mean
     weekly = (
         combined
@@ -15565,8 +15426,7 @@ def run_nparld_condition_week_r(
         '}\n'
         'fmt_p <- function(p) {\n'
         '  if(is.na(p)) return("      NA")\n'
-        '  if(p<0.0001) return("< 0.0001")\n'
-        '  sprintf("%.6f", p)\n'
+        '  sprintf("%.2e", p)\n'
         '}\n'
         '\n'
         'cat("\\n--- ANOVA-Type Statistic (ATS) ---\\n")\n'
@@ -15635,9 +15495,9 @@ def run_nparld_condition_week_r(
         '                  paste0(ca," (n=",na_ca,")"), paste0(cb," (n=",nb_cb,")"),\n'
         '                  "NA", "NA"))\n'
         '    } else {\n'
-        '      cat(sprintf("  %-22s  %-22s  %10.6f  %10.6f  %s\\n",\n'
+        '      cat(sprintf("  %-22s  %-22s  %10s  %10s  %s\\n",\n'
         '                  paste0(ca," (n=",na_ca,")"), paste0(cb," (n=",nb_cb,")"),\n'
-        '                  p_raw_all[k], p_holm_all[k], sig_fn(p_holm_all[k])))\n'
+        '                  fmt_p(p_raw_all[k]), fmt_p(p_holm_all[k]), sig_fn(p_holm_all[k])))\n'
         '    }\n'
         '  }\n'
         '} else {\n'
@@ -15674,10 +15534,45 @@ def run_nparld_condition_week_r(
         '      cat(sprintf("  %s (n=%d) vs %s (n=%d) : NA\\n", ca, na_ca, cb, nb_cb))\n'
         '    } else {\n'
         '      sig <- sig_fn(p_holm[k])\n'
-        '      cat(sprintf("  %s (n=%d) vs %s (n=%d) : p_raw=%.6f  p_holm=%.6f  %s\\n",\n'
-        '                  ca, na_ca, cb, nb_cb, p_raw[k], p_holm[k], sig))\n'
+        '      cat(sprintf("  %s (n=%d) vs %s (n=%d) : p_raw=%s  p_holm=%s  %s\\n",\n'
+        '                  ca, na_ca, cb, nb_cb, fmt_p(p_raw[k]), fmt_p(p_holm[k]), sig))\n'
         '    }\n'
         '  }\n'
+        '}\n'
+        '\n'
+        'cat("\\n================================================================\\n")\n'
+        'cat("POST-HOC: Pairwise week comparisons (condition-agnostic)\\n")\n'
+        'cat("  (Wilcoxon signed-rank, paired by animal, Holm corrected)\\n")\n'
+        'cat("================================================================\\n")\n'
+        'week_levels_r <- levels(data$Week)\n'
+        'if (length(week_levels_r) >= 2) {\n'
+        '  wk_pairs <- combn(week_levels_r, 2)\n'
+        '  wk_p_raw <- apply(wk_pairs, 2, function(pr) {\n'
+        '    ids_a <- data$ID[data$Week == pr[1]]\n'
+        '    ids_b <- data$ID[data$Week == pr[2]]\n'
+        '    ids_shared <- intersect(ids_a, ids_b)\n'
+        '    if (length(ids_shared) < 3) return(NA_real_)\n'
+        '    va <- sapply(ids_shared, function(id) mean(data$Response[data$Week==pr[1] & data$ID==id], na.rm=TRUE))\n'
+        '    vb <- sapply(ids_shared, function(id) mean(data$Response[data$Week==pr[2] & data$ID==id], na.rm=TRUE))\n'
+        '    tryCatch(wilcox.test(va, vb, paired=TRUE, exact=FALSE)$p.value, error=function(e) NA_real_)\n'
+        '  })\n'
+        '  wk_p_holm <- p.adjust(wk_p_raw, method="holm")\n'
+        '  cat(sprintf("  %-10s  %-10s  %6s  %10s  %10s  %s\\n",\n'
+        '              "Week A", "Week B", "n", "p_raw", "p_holm", "Sig"))\n'
+        '  cat("  ", strrep("-", 58), "\\n", sep="")\n'
+        '  for (k in seq_len(ncol(wk_pairs))) {\n'
+        '    wa <- wk_pairs[1, k]; wb <- wk_pairs[2, k]\n'
+        '    ids_shared <- intersect(data$ID[data$Week==wa], data$ID[data$Week==wb])\n'
+        '    n_shared <- length(ids_shared)\n'
+        '    if (is.na(wk_p_raw[k])) {\n'
+        '      cat(sprintf("  %-10s  %-10s  %6d  %10s  %10s\\n", wa, wb, n_shared, "NA", "NA"))\n'
+        '    } else {\n'
+        '      cat(sprintf("  %-10s  %-10s  %6d  %10s  %10s  %s\\n",\n'
+        '                  wa, wb, n_shared, fmt_p(wk_p_raw[k]), fmt_p(wk_p_holm[k]), sig_fn(wk_p_holm[k])))\n'
+        '    }\n'
+        '  }\n'
+        '} else {\n'
+        '  cat("  (fewer than 2 weeks -- no pairwise test)\\n")\n'
         '}\n'
         '\n'
         'cat("\\n================================================================\\n")\n'
@@ -15699,8 +15594,10 @@ def run_nparld_condition_week_r(
         'p_cond  <- ats_df["Condition",      ncol(ats_df)]\n'
         'p_week  <- ats_df["Week",           ncol(ats_df)]\n'
         'p_inter <- ats_df["Condition:Week", ncol(ats_df)]\n'
+        'p_cond_box <- box_df["Condition",   ncol(box_df)]\n'
         'cat(sprintf("__ATS_PVALS__ Condition=%.15g Week=%.15g Interaction=%.15g\\n",\n'
         '            p_cond, p_week, p_inter))\n'
+        'cat(sprintf("__BOX_PVALS__ Condition=%.15g\\n", p_cond_box))\n'
     )
 
     tmp_r = Path(tempfile.mktemp(suffix='.R'))
@@ -15767,8 +15664,17 @@ def run_nparld_condition_week_r(
             }
         except ValueError:
             pass
-    # Strip the machine-readable line before display/save
+    # Parse Box approximation p-value for Condition
+    _box_match = _re.search(r'__BOX_PVALS__ Condition=(\S+)', r_output)
+    box_pvalues = {}
+    if _box_match:
+        try:
+            box_pvalues = {'Condition': float(_box_match.group(1))}
+        except ValueError:
+            pass
+    # Strip the machine-readable lines before display/save
     r_output_clean = _re.sub(r'__ATS_PVALS__[^\n]*\n?', '', r_output)
+    r_output_clean = _re.sub(r'__BOX_PVALS__[^\n]*\n?', '', r_output_clean)
 
     print(r_output_clean)
 
@@ -15800,6 +15706,7 @@ def run_nparld_condition_week_r(
             '              Wald-Type Statistic (WTS) -- reference only',
             'Post-hoc    : Between-condition: pairwise Mann-Whitney U, Holm corrected',
             '              Per-week        : pairwise Mann-Whitney U at each week, Holm corrected',
+            '              Across-week     : pairwise Wilcoxon signed-rank (paired by animal, condition-agnostic), Holm corrected',
             '',
             'R output:',
             '-' * 72,
@@ -15816,6 +15723,7 @@ def run_nparld_condition_week_r(
         'conditions': condition_levels,
         'weeks': week_levels,
         'ats_pvalues': ats_pvalues,
+        'box_pvalues': box_pvalues,
         'measure': measure,
     }
 
@@ -15869,6 +15777,8 @@ def _write_nparld_bh_fdr_summary(run_results, output_dir=None,
         '',
         'Note   : Correction is across DVs only; the 3 effects within a',
         '         single model are NOT corrected against each other.',
+        '         Condition p-value: Box approximation (ATS with Box df).',
+        '         Week / Condition:Week p-values: ATS (primary statistic).',
         '',
     ]
 
@@ -15878,7 +15788,13 @@ def _write_nparld_bh_fdr_summary(run_results, output_dir=None,
     print('=' * 72)
 
     for effect in effects:
-        p_vals    = [r['ats_pvalues'].get(effect, float('nan')) for r in run_results]
+        # Condition uses Box approximation; Week and Condition:Week use ATS
+        if effect == 'Condition':
+            p_vals = [r.get('box_pvalues', {}).get('Condition',
+                      r['ats_pvalues'].get('Condition', float('nan')))
+                      for r in run_results]
+        else:
+            p_vals = [r['ats_pvalues'].get(effect, float('nan')) for r in run_results]
         valid_idx = [i for i, p in enumerate(p_vals) if p == p]  # exclude NaN
 
         header = f'Effect: {effect}  (n_valid={len(valid_idx)})'
@@ -15908,7 +15824,8 @@ def _write_nparld_bh_fdr_summary(run_results, output_dir=None,
                       '**'  if p_b < 0.01  else
                       '*'   if p_b < 0.05  else
                       '.'   if p_b < 0.1   else '')
-            row = f'  {m_name:<26}  {p_r:>10.6f}  {p_b:>10.6f}  {sig:<4}'
+            _fmt_bh = lambda v: f'{v:.2e}' if (v < 0.001 or v == 0.0) else f'{v:.6f}'
+            row = f'  {m_name:<26}  {_fmt_bh(p_r):>10}  {_fmt_bh(p_b):>10}  {sig:<4}'
             lines.append(row)
             print(row)
 
@@ -16040,6 +15957,18 @@ def run_nparld_condition_weekday_r(
     combined = pd.concat(frames, ignore_index=True)
     combined = combined.rename(columns={'weekday': 'Weekday', measure: 'Response'})
 
+    # ── Sanity check: raw per-animal totals ──────────────────────────────────
+    _raw_totals_wd = (
+        combined.groupby(['ID', 'Condition'])['Response']
+        .agg(total='sum', n_sessions='count')
+        .reset_index()
+        .sort_values('ID')
+    )
+    print(f"\n  [RAW CHECK — weekday model] per-animal total '{measure}':")
+    for _, r in _raw_totals_wd.iterrows():
+        print(f"    {r['ID']:20s}  {r['Condition']:6s}  total={r['total']:.1f}  n_sessions={int(r['n_sessions'])}")
+    # ─────────────────────────────────────────────────────────────────────────
+
     # Per-animal per-weekday mean
     wd_data = (
         combined
@@ -16116,8 +16045,7 @@ def run_nparld_condition_weekday_r(
         '}\n'
         'fmt_p <- function(p) {\n'
         '  if(is.na(p)) return("      NA")\n'
-        '  if(p<0.0001) return("< 0.0001")\n'
-        '  sprintf("%.6f", p)\n'
+        '  sprintf("%.2e", p)\n'
         '}\n'
         '\n'
         'cat("\\n--- ANOVA-Type Statistic (ATS) ---\\n")\n'
@@ -16185,9 +16113,9 @@ def run_nparld_condition_weekday_r(
         '                  paste0(ca," (n=",na_ca,")"), paste0(cb," (n=",nb_cb,")"),\n'
         '                  "NA", "NA"))\n'
         '    } else {\n'
-        '      cat(sprintf("  %-22s  %-22s  %10.6f  %10.6f  %s\\n",\n'
+        '      cat(sprintf("  %-22s  %-22s  %10s  %10s  %s\\n",\n'
         '                  paste0(ca," (n=",na_ca,")"), paste0(cb," (n=",nb_cb,")"),\n'
-        '                  p_raw_all[k], p_holm_all[k], sig_fn(p_holm_all[k])))\n'
+        '                  fmt_p(p_raw_all[k]), fmt_p(p_holm_all[k]), sig_fn(p_holm_all[k])))\n'
         '    }\n'
         '  }\n'
         '} else {\n'
@@ -16224,8 +16152,8 @@ def run_nparld_condition_weekday_r(
         '      cat(sprintf("  %s (n=%d) vs %s (n=%d) : NA\\n", ca, na_ca, cb, nb_cb))\n'
         '    } else {\n'
         '      sig <- sig_fn(p_holm[k])\n'
-        '      cat(sprintf("  %s (n=%d) vs %s (n=%d) : p_raw=%.6f  p_holm=%.6f  %s\\n",\n'
-        '                  ca, na_ca, cb, nb_cb, p_raw[k], p_holm[k], sig))\n'
+        '      cat(sprintf("  %s (n=%d) vs %s (n=%d) : p_raw=%s  p_holm=%s  %s\\n",\n'
+        '                  ca, na_ca, cb, nb_cb, fmt_p(p_raw[k]), fmt_p(p_holm[k]), sig))\n'
         '    }\n'
         '  }\n'
         '}\n'
