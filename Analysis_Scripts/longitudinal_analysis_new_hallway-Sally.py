@@ -3116,13 +3116,14 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
             for aid, pts in _prog_by_animal.items():
                 cond = _prog_animal_cond.get(aid, 'Unknown')
                 color = cond_color_map.get(cond, 'gray')
+                marker = (animal_markers or {}).get(aid, 'o')
                 xs = [p[0] for p in pts]
                 ys = [p[1] for p in pts]
-                ax_lpi.plot(xs, ys, '-o',
+                ax_lpi.plot(xs, ys, f'-{marker}',
                             color=color,
                             linewidth=plt.rcParams['lines.linewidth'],
                             markersize=plt.rcParams['lines.markersize'],
-                            label=aid, alpha=0.8)
+                            alpha=0.8)
             ax_lpi.set_xlabel('Session')
             ax_lpi.set_ylabel('Ending Level')
             ax_lpi.set_ylim(0, 14)
@@ -3133,8 +3134,19 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
             ax_lpi.tick_params(axis='both', direction='in')
             ax_lpi.spines['top'].set_visible(False)
             ax_lpi.spines['right'].set_visible(False)
-            _all_lv_nums_pi = [lv for pts in _prog_by_animal.values() for _, lv in pts]
-            ax_lpi.legend(frameon=False, fontsize=plt.rcParams['legend.fontsize'])
+            _lpi_legend_handles = [
+                Line2D([0], [0], color=col,
+                       linewidth=plt.rcParams['lines.linewidth'], label=cond)
+                for cond, col in sorted(cond_color_map.items())
+            ]
+            _lpi_legend_handles.append(
+                Line2D([0], [0], color='gray', marker='s', linestyle='None',
+                       markersize=plt.rcParams['lines.markersize'], label='Male'))
+            _lpi_legend_handles.append(
+                Line2D([0], [0], color='gray', marker='o', linestyle='None',
+                       markersize=plt.rcParams['lines.markersize'], label='Female'))
+            ax_lpi.legend(handles=_lpi_legend_handles, frameon=False,
+                          fontsize=plt.rcParams['legend.fontsize'])
             level_progression_indiv_fig.tight_layout()
 
         # Condition-averaged plot: mean ± SEM per session rank, per condition
@@ -3561,7 +3573,7 @@ def generate_descriptive_stats_report(all_results, level_stats_data=None, output
         ("d\u2019  (detectability)",      'dprime',                  "d-prime"),
         ('Lick Count',                    'lick_count',              'Lick Count'),
         ('Lick Rate (licks/min)',          _lick_rate_fn,             'Lick Rate'),
-        ('Avg Capacitive (z-score)',       'avg_cap',                 'Avg Cap'),
+        ('Avg Capacitive (raw mean)',       'avg_cap',                 'Avg Cap'),
         ('Lick-After-Reward Proportion',  'lick_after_reward_prop',  'Lick-Rew Prop'),
         ('Rewards per Bout',              'rewards_per_bout',        'Rew per Bout'),
         ('Total Distance (m)',            _dist_m_fn,                'Distance'),
@@ -5699,11 +5711,6 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         results_df['weekday'] = [_DOW_CYCLE[i % 4] for i in range(len(results_df))]
         # Assign training week (4 sessions per week: sessions 1-4 = week 1, etc.)
         results_df['week'] = [i // 4 + 1 for i in range(len(results_df))]
-        
-        # Remove the first date as requested for hits, misses, and sensitivity analysis
-        results_df.loc[1:, 'hits'] = results_df.loc[1:, 'hits']  # Keep only hits after first date
-        results_df.loc[1:, 'misses'] = results_df.loc[1:, 'misses']  # Keep only misses after first date
-        results_df.loc[1:, 'sensitivity'] = results_df.loc[1:, 'sensitivity']  # Keep only sensitivity after first date
         
         # Get mouse name
         mouse_name = os.path.basename(data_file).split("_")[0]
@@ -16408,10 +16415,744 @@ def _run_nparld_weekday_menu(all_results, output_dir=None):
         return
 
 
+def _ask_top_level_mode(root):
+    """Ask whether to run a single-cohort analysis or an across-cohort comparison.
+
+    Returns 'single', 'across', or None if the dialog is dismissed.
+    """
+    result = [None]
+    dialog = tk.Toplevel(root)
+    dialog.title('Analysis Mode')
+    dialog.resizable(False, False)
+    dialog.grab_set()
+
+    tk.Label(
+        dialog,
+        text='Choose analysis scope:',
+        font=('Arial', 11, 'bold'),
+    ).pack(padx=24, pady=(18, 8))
+
+    def _choose(mode):
+        result[0] = mode
+        dialog.destroy()
+
+    btn_frame = tk.Frame(dialog)
+    btn_frame.pack(padx=24, pady=(4, 18))
+    tk.Button(
+        btn_frame, text='Single-Cohort Analysis', width=26,
+        command=lambda: _choose('single'),
+    ).pack(side='left', padx=8)
+    tk.Button(
+        btn_frame, text='Across-Cohort Comparison', width=26,
+        command=lambda: _choose('across'),
+    ).pack(side='left', padx=8)
+
+    dialog.update_idletasks()
+    dialog.geometry(
+        f"+{root.winfo_screenwidth() // 2 - dialog.winfo_reqwidth() // 2}"
+        f"+{root.winfo_screenheight() // 2 - dialog.winfo_reqheight() // 2}"
+    )
+    root.wait_window(dialog)
+    return result[0]
+
+
+# =============================================================================
+# ACROSS-COHORT COMPARISON PIPELINE
+# =============================================================================
+
+def _cohort_prefix(animal_id: str) -> str:
+    """Return the alphabetic prefix of an animal ID (e.g. 'CAH' from 'CAH1')."""
+    import re
+    m = re.match(r'^([A-Za-z]+)', animal_id.strip())
+    return m.group(1).upper() if m else animal_id.strip()
+
+
+def _load_master_csv(path: str) -> dict:
+    """Read a cohort master CSV and return {animal_id: {sex, starting_condition}}."""
+    df = pd.read_csv(path)
+    df.columns = df.columns.str.strip()
+    df['animal_id'] = df['animal_id'].str.strip()
+    df['sex'] = df['sex'].str.strip().str.lower()
+    df['starting_condition'] = df['starting_condition'].str.strip()
+    info = {}
+    for _, row in df.iterrows():
+        info[row['animal_id']] = {
+            'sex': row['sex'],
+            'starting_condition': row['starting_condition'],
+        }
+    return info
+
+
+def _across_cohort_summary_stats(all_file_paths, combined_animal_info, output_dir=None):
+    """Compute per-mouse and per-group averages of hits and distances across sessions.
+
+    Groups mice into four categories:  <Cohort1> 0%,  <Cohort1> 2%,
+                                        <Cohort2> 0%,  <Cohort2> 2%.
+
+    For each mouse  : mean hits per session, mean distance per session (m).
+    For each group  : mean ± SEM of the per-mouse averages.
+
+    Parameters
+    ----------
+    all_file_paths      : list of str  — paths to all mouse *_data.csv files
+    combined_animal_info: dict         — {animal_id: {sex, starting_condition, cohort}}
+    output_dir          : str or None  — if given, CSVs are saved here
+
+    Returns
+    -------
+    (mouse_df, group_df) — both as pandas DataFrames
+
+    Notes
+    -----
+    analyze_mouse_data is called **separately per cohort** so that the
+    within-function missing-data report only compares dates inside the same
+    cohort.  Running both cohorts in a single call would cause every CAH mouse
+    to show all RV session dates as "NO SESSION" (and vice versa) because the
+    cohorts ran ~3 months apart.
+    """
+    # ── Partition files by cohort ─────────────────────────────────────────────
+    cohort_buckets: dict = {}   # {cohort_label: {'paths': [], 'markers': [], 'conditions': []}}
+    for fp in all_file_paths:
+        aid = os.path.basename(fp).split('_')[0]
+        info = combined_animal_info.get(aid)
+        if info is None:
+            print(f"  [WARNING] {aid} not in combined_animal_info — skipping")
+            continue
+        cohort = info['cohort']
+        if cohort not in cohort_buckets:
+            cohort_buckets[cohort] = {'paths': [], 'markers': [], 'conditions': []}
+        cohort_buckets[cohort]['paths'].append(fp)
+        cohort_buckets[cohort]['markers'].append('s' if info['sex'] == 'male' else 'o')
+        cohort_buckets[cohort]['conditions'].append(info['starting_condition'])
+
+    if not cohort_buckets:
+        print("  [ERROR] No valid data files found.")
+        return None, None
+
+    # ── Run analyze_mouse_data once per cohort ────────────────────────────────
+    all_results = []
+    for cohort_label, bucket in cohort_buckets.items():
+        n = len(bucket['paths'])
+        print(f"\nRunning session-level analysis for cohort '{cohort_label}' "
+              f"({n} mice, no plots)…")
+        *_, cohort_results, _ = analyze_mouse_data(
+            bucket['paths'], bucket['markers'], bucket['conditions'],
+            transitions_csv_path=None,
+            selected_plots=frozenset(),
+        )
+        all_results.extend(cohort_results)
+
+    # ── Per-mouse averages ────────────────────────────────────────────────────
+    rows = []
+    for result in all_results:
+        aid = result['mouse']
+        info = combined_animal_info.get(aid, {})
+        cohort    = info.get('cohort', _cohort_prefix(aid))
+        condition = result['starting_condition']
+        group     = f"{cohort} {condition}"
+        sex       = result.get('sex', info.get('sex', ''))
+
+        hits_arr = np.array(result['hits'], dtype=float)
+        dist_arr = np.array(result['total_distances'], dtype=float)  # mm
+
+        rows.append({
+            'animal_id':                   aid,
+            'cohort':                      cohort,
+            'condition':                   condition,
+            'group':                       group,
+            'sex':                         sex,
+            'n_sessions':                  int(np.sum(~np.isnan(hits_arr))),
+            'avg_hits_per_session':        float(np.nanmean(hits_arr)),
+            'avg_distance_m_per_session':  float(np.nanmean(dist_arr) / 1000.0),
+        })
+
+    mouse_df = pd.DataFrame(rows).sort_values(['group', 'animal_id']).reset_index(drop=True)
+
+    # ── Group averages (mean ± SEM across mice) ───────────────────────────────
+    def _sem(x):
+        n = x.notna().sum()
+        return x.std(ddof=1) / np.sqrt(n) if n > 1 else float('nan')
+
+    group_df = (
+        mouse_df.groupby('group', sort=True)
+        .agg(
+            cohort=('cohort', 'first'),
+            condition=('condition', 'first'),
+            n_mice=('animal_id', 'count'),
+            mean_hits_per_session=('avg_hits_per_session', 'mean'),
+            sem_hits_per_session=('avg_hits_per_session', _sem),
+            mean_distance_m_per_session=('avg_distance_m_per_session', 'mean'),
+            sem_distance_m_per_session=('avg_distance_m_per_session', _sem),
+        )
+        .reset_index()
+    )
+
+    # ── Console output ────────────────────────────────────────────────────────
+    print(f"\n{'═' * 74}")
+    print("  ACROSS-COHORT SUMMARY — Per-Mouse Averages Across Sessions")
+    print(f"{'═' * 74}")
+    hdr = (f"  {'Animal':12s}  {'Group':12s}  {'Sex':6s}  "
+           f"{'N Sess':>6s}  {'Avg Hits/Sess':>14s}  {'Avg Dist/Sess (m)':>18s}")
+    print(hdr)
+    print(f"  {'─'*12}  {'─'*12}  {'─'*6}  {'─'*6}  {'─'*14}  {'─'*18}")
+    prev_group = None
+    for _, r in mouse_df.iterrows():
+        if r['group'] != prev_group and prev_group is not None:
+            print()          # blank line between groups
+        prev_group = r['group']
+        print(f"  {r['animal_id']:12s}  {r['group']:12s}  {r['sex']:6s}  "
+              f"{int(r['n_sessions']):6d}  "
+              f"{r['avg_hits_per_session']:14.2f}  "
+              f"{r['avg_distance_m_per_session']:18.2f}")
+
+    print(f"\n{'─' * 74}")
+    print("  GROUP AVERAGES  (mean ± SEM across mice within group)")
+    print(f"{'─' * 74}")
+    ghdr = (f"  {'Group':12s}  {'N Mice':>7s}  "
+            f"{'Hits/Sess (mean±SEM)':>22s}  {'Dist/Sess m (mean±SEM)':>24s}")
+    print(ghdr)
+    print(f"  {'─'*12}  {'─'*7}  {'─'*22}  {'─'*24}")
+    for _, r in group_df.iterrows():
+        hits_str = f"{r['mean_hits_per_session']:.2f} ± {r['sem_hits_per_session']:.2f}"
+        dist_str = f"{r['mean_distance_m_per_session']:.2f} ± {r['sem_distance_m_per_session']:.2f}"
+        print(f"  {r['group']:12s}  {int(r['n_mice']):7d}  {hits_str:>22s}  {dist_str:>24s}")
+    print(f"{'═' * 74}\n")
+
+    # ── Save CSVs ─────────────────────────────────────────────────────────────
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        per_mouse_path = os.path.join(output_dir, f'across_cohort_per_mouse_{ts}.csv')
+        group_path     = os.path.join(output_dir, f'across_cohort_group_averages_{ts}.csv')
+        mouse_df.to_csv(per_mouse_path, index=False)
+        group_df.to_csv(group_path,     index=False)
+        print(f"  Saved per-mouse table  → {per_mouse_path}")
+        print(f"  Saved group averages   → {group_path}\n")
+
+    return mouse_df, group_df
+
+
+# ── Cohort colour map (used by all across-cohort plots) ───────────────────────
+# Add entries here if new cohort prefixes are introduced.
+_COHORT_COLORS: dict = {
+    'CAH': '#4472c4',   # medium blue
+    'RV':  '#ed7d31',   # orange
+}
+
+def _cohort_color(label: str) -> str:
+    """Return a colour for a cohort label, falling back to purple."""
+    return _COHORT_COLORS.get(label.upper(), '#7f3f98')
+
+
+def _plot_across_cohort_bars(mouse_df, root, output_dir=None):
+    """Produce two bar plots (one per metric) comparing cohorts.
+
+    Plot 1 — Hits per session  : mean ± SEM bar, jittered individual points,
+                                  Mann-Whitney U bracket for CAH vs RV.
+    Plot 2 — Distance per session (m): same layout.
+
+    Parameters
+    ----------
+    mouse_df   : DataFrame returned by _across_cohort_summary_stats
+                 (columns: animal_id, cohort, avg_hits_per_session,
+                            avg_distance_m_per_session, …)
+    root       : tk.Tk root window (for save dialogs)
+    output_dir : str or None — auto-save destination; None → ask via dialog
+    """
+    from scipy.stats import mannwhitneyu as _mwu
+
+    cohorts = sorted(mouse_df['cohort'].unique())
+    rng     = np.random.default_rng(seed=42)
+
+    metrics = [
+        ('avg_hits_per_session',       'Hits per Session',        'Hits / Session'),
+        ('avg_distance_m_per_session', 'Distance per Session (m)', 'Distance (m)'),
+    ]
+
+    figs = []
+    for col, title, ylabel in metrics:
+        fig, ax = plt.subplots(figsize=plt.rcParams.get('figure.figsize', (4.0, 2.5)))
+
+        cohort_vals: dict[str, np.ndarray] = {}
+        for ci, coh in enumerate(cohorts):
+            vals = mouse_df.loc[mouse_df['cohort'] == coh, col].dropna().to_numpy(float)
+            cohort_vals[coh] = vals
+            mean_v = float(np.mean(vals))
+            sem_v  = float(np.std(vals, ddof=1) / np.sqrt(len(vals))) if len(vals) > 1 else 0.0
+            color  = _cohort_color(coh)
+
+            ax.bar(ci, mean_v, width=0.5, color=color, alpha=0.7,
+                   yerr=sem_v,
+                   error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'),
+                   zorder=2)
+            jitter = (rng.random(len(vals)) - 0.5) * 0.22
+            ax.scatter(ci + jitter, vals,
+                       color=color, edgecolors='black',
+                       linewidths=plt.rcParams['lines.linewidth'],
+                       s=plt.rcParams['lines.markersize'] ** 2, zorder=3)
+
+        # ── MWU significance bracket (CAH vs RV) ─────────────────────────────
+        import itertools as _it_bar
+        pairs = list(_it_bar.combinations(range(len(cohorts)), 2))
+        bracket_results = []
+        for i, j in pairs:
+            v1, v2 = cohort_vals[cohorts[i]], cohort_vals[cohorts[j]]
+            if len(v1) >= 2 and len(v2) >= 2:
+                stat, pval = _mwu(v1, v2, alternative='two-sided')
+                bracket_results.append((i, j, float(stat), float(pval)))
+                print(f'  [{title}] {cohorts[i]} vs {cohorts[j]}: '
+                      f'U={stat:.1f}, p={pval:.4f}')
+
+        all_vals_flat = np.concatenate(list(cohort_vals.values()))
+        y_max = float(np.nanmax(all_vals_flat)) if len(all_vals_flat) else 1.0
+        y_max = max(y_max, ax.get_ylim()[1])
+        step  = y_max * 0.14
+        for bk_idx, (i, j, stat, pval) in enumerate(bracket_results):
+            bk_y = y_max + step * (bk_idx + 1)
+            ax.plot([i, i, j, j],
+                    [bk_y - step * 0.2, bk_y, bk_y, bk_y - step * 0.2],
+                    color='black', linewidth=1.2)
+            ax.text((i + j) / 2.0, bk_y + step * 0.05,
+                    _fmt_p(pval), ha='center', va='bottom', fontsize=9)
+        if bracket_results:
+            ax.set_ylim(bottom=0, top=y_max + step * (len(bracket_results) + 1.8))
+        else:
+            ax.set_ylim(bottom=0)
+
+        ax.set_xticks(np.arange(len(cohorts)))
+        ax.set_xticklabels(cohorts)
+        ax.set_xlabel('Cohort')
+        ax.set_ylabel(f'{ylabel} (Mean \u00b1 SEM)')
+        ax.set_title(f'{title} by Cohort\n(collapsed across all sessions; Mann-Whitney U)')
+        ax.tick_params(axis='both', direction='in')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        fig.tight_layout()
+        figs.append((fig, col, title))
+
+    # ── Show then save ────────────────────────────────────────────────────────
+    plt.show()
+
+    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+    for fig, col, title in figs:
+        if output_dir:
+            save_path = os.path.join(output_dir,
+                                     f'across_cohort_{col}_{ts}.svg')
+            fig.savefig(save_path, format='svg')
+            print(f"  Saved: {save_path}")
+        else:
+            save_path = filedialog.asksaveasfilename(
+                defaultextension='.svg',
+                filetypes=[('SVG files', '*.svg'), ('All files', '*.*')],
+                title=f'Save {title} bar plot as',
+                initialfile=f'across_cohort_{col}.svg',
+            )
+            if save_path:
+                fig.savefig(save_path, format='svg')
+                print(f"  Saved: {save_path}")
+
+
+def _plot_condition_matched_bars(mouse_df, root, output_dir=None):
+    """Condition-matched cohort comparisons.
+
+    Plot 1 — CAH 0% vs RV 0%  : avg_distance_m_per_session
+    Plot 2 — CAH 2% vs RV 2%  : avg_hits_per_session
+
+    Each plot: mean ± SEM bar, jittered individual points, MWU bracket.
+    """
+    from scipy.stats import mannwhitneyu as _mwu
+
+    rng = np.random.default_rng(seed=42)
+
+    # (condition_filter, col, group_labels, title, ylabel, file_stem)
+    comparisons = [
+        ('0%',  'avg_distance_m_per_session',
+         None,   # filled in below
+         'Distance per Session — 0% Condition (CAH vs RV)',
+         'Distance (m)',
+         'cond0pct_distance'),
+        ('2%',  'avg_hits_per_session',
+         None,
+         'Hits per Session — 2% Condition (CAH vs RV)',
+         'Hits / Session',
+         'cond2pct_hits'),
+        ('0%',  'avg_hits_per_session',
+         None,
+         'Hits per Session — 0% Condition (CAH vs RV)',
+         'Hits / Session',
+         'cond0pct_hits'),
+        ('2%',  'avg_distance_m_per_session',
+         None,
+         'Distance per Session — 2% Condition (CAH vs RV)',
+         'Distance (m)',
+         'cond2pct_distance'),
+    ]
+
+    ts   = datetime.now().strftime('%Y%m%d_%H%M%S')
+    figs = []
+
+    for cond, col, _, title, ylabel, stem in comparisons:
+        sub = mouse_df[mouse_df['condition'] == cond].copy()
+        cohorts = sorted(sub['cohort'].unique())
+
+        if len(cohorts) < 2:
+            print(f'  [SKIP] {title}: fewer than 2 cohorts found for condition {cond}')
+            continue
+
+        fig, ax = plt.subplots(figsize=plt.rcParams.get('figure.figsize', (4.0, 2.5)))
+
+        group_vals: dict[str, np.ndarray] = {}
+        for ci, coh in enumerate(cohorts):
+            vals = sub.loc[sub['cohort'] == coh, col].dropna().to_numpy(float)
+            group_vals[coh] = vals
+            mean_v = float(np.mean(vals))
+            sem_v  = float(np.std(vals, ddof=1) / np.sqrt(len(vals))) if len(vals) > 1 else 0.0
+            color  = _cohort_color(coh)
+
+            ax.bar(ci, mean_v, width=0.5, color=color, alpha=0.7,
+                   yerr=sem_v,
+                   error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'),
+                   zorder=2)
+            jitter = (rng.random(len(vals)) - 0.5) * 0.22
+            ax.scatter(ci + jitter, vals,
+                       color=color, edgecolors='black',
+                       linewidths=plt.rcParams['lines.linewidth'],
+                       s=plt.rcParams['lines.markersize'] ** 2, zorder=3)
+
+        # ── MWU bracket ───────────────────────────────────────────────────────
+        import itertools as _it_cm
+        bracket_results = []
+        for i, j in _it_cm.combinations(range(len(cohorts)), 2):
+            v1, v2 = group_vals[cohorts[i]], group_vals[cohorts[j]]
+            if len(v1) >= 2 and len(v2) >= 2:
+                stat, pval = _mwu(v1, v2, alternative='two-sided')
+                bracket_results.append((i, j, float(stat), float(pval)))
+                print(f'  [{title}] {cohorts[i]} vs {cohorts[j]}: '
+                      f'U={stat:.1f}, p={pval:.4f}')
+
+        all_flat = np.concatenate(list(group_vals.values()))
+        y_max = float(np.nanmax(all_flat)) if len(all_flat) else 1.0
+        y_max = max(y_max, ax.get_ylim()[1])
+        step  = y_max * 0.14
+        for bk_idx, (i, j, stat, pval) in enumerate(bracket_results):
+            bk_y = y_max + step * (bk_idx + 1)
+            ax.plot([i, i, j, j],
+                    [bk_y - step * 0.2, bk_y, bk_y, bk_y - step * 0.2],
+                    color='black', linewidth=1.2)
+            ax.text((i + j) / 2.0, bk_y + step * 0.05,
+                    _fmt_p(pval), ha='center', va='bottom', fontsize=9)
+        if bracket_results:
+            ax.set_ylim(bottom=0, top=y_max + step * (len(bracket_results) + 1.8))
+        else:
+            ax.set_ylim(bottom=0)
+
+        ax.set_xticks(np.arange(len(cohorts)))
+        ax.set_xticklabels([f'{c} {cond}' for c in cohorts])
+        ax.set_xlabel('Group')
+        ax.set_ylabel(f'{ylabel} (Mean \u00b1 SEM)')
+        ax.set_title(f'{title}\n(collapsed across all sessions; Mann-Whitney U)')
+        ax.tick_params(axis='both', direction='in')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        fig.tight_layout()
+        figs.append((fig, stem, title))
+
+    plt.show()
+
+    for fig, stem, title in figs:
+        if output_dir:
+            save_path = os.path.join(output_dir, f'{stem}_{ts}.svg')
+            fig.savefig(save_path, format='svg')
+            print(f"  Saved: {save_path}")
+        else:
+            save_path = filedialog.asksaveasfilename(
+                defaultextension='.svg',
+                filetypes=[('SVG files', '*.svg'), ('All files', '*.*')],
+                title=f'Save {title} bar plot as',
+                initialfile=f'{stem}.svg',
+            )
+            if save_path:
+                fig.savefig(save_path, format='svg')
+                print(f"  Saved: {save_path}")
+
+
+def _plot_condition_collapsed_bars(mouse_df, root, output_dir=None):
+    """Compare all 0% mice vs all 2% mice (both cohorts combined).
+
+    Produces two figures:
+      Plot 1 — 0% vs 2%  : avg_hits_per_session
+      Plot 2 — 0% vs 2%  : avg_distance_m_per_session
+
+    Each plot: mean ± SEM bar, jittered individual points, MWU bracket.
+    """
+    from scipy.stats import mannwhitneyu as _mwu
+
+    rng = np.random.default_rng(seed=42)
+    ts  = datetime.now().strftime('%Y%m%d_%H%M%S')
+
+    metrics = [
+        ('avg_hits_per_session',       'Hits per Session (0% vs 2%, all cohorts)',
+         'Hits / Session',             'condition_collapsed_hits'),
+        ('avg_distance_m_per_session', 'Distance per Session (0% vs 2%, all cohorts)',
+         'Distance (m)',               'condition_collapsed_distance'),
+    ]
+
+    conditions = sorted(mouse_df['condition'].unique())   # e.g. ['0%', '2%']
+    cond_colors = {c: _condition_to_color(c) for c in conditions}
+
+    figs = []
+    for col, title, ylabel, stem in metrics:
+        fig, ax = plt.subplots(figsize=plt.rcParams.get('figure.figsize', (4.0, 2.5)))
+
+        cond_vals: dict[str, np.ndarray] = {}
+        for ci, cond in enumerate(conditions):
+            vals = mouse_df.loc[mouse_df['condition'] == cond, col].dropna().to_numpy(float)
+            cond_vals[cond] = vals
+            mean_v = float(np.mean(vals))
+            sem_v  = float(np.std(vals, ddof=1) / np.sqrt(len(vals))) if len(vals) > 1 else 0.0
+            color  = cond_colors[cond]
+
+            ax.bar(ci, mean_v, width=0.5, color=color, alpha=0.7,
+                   yerr=sem_v,
+                   error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'),
+                   zorder=2)
+            jitter = (rng.random(len(vals)) - 0.5) * 0.22
+            ax.scatter(ci + jitter, vals,
+                       color=color, edgecolors='black',
+                       linewidths=plt.rcParams['lines.linewidth'],
+                       s=plt.rcParams['lines.markersize'] ** 2, zorder=3)
+
+        # ── MWU bracket ───────────────────────────────────────────────────────
+        import itertools as _it_cc
+        bracket_results = []
+        for i, j in _it_cc.combinations(range(len(conditions)), 2):
+            v1, v2 = cond_vals[conditions[i]], cond_vals[conditions[j]]
+            if len(v1) >= 2 and len(v2) >= 2:
+                stat, pval = _mwu(v1, v2, alternative='two-sided')
+                bracket_results.append((i, j, float(stat), float(pval)))
+                print(f'  [{title}] {conditions[i]} vs {conditions[j]}: '
+                      f'U={stat:.1f}, p={pval:.4f}')
+
+        all_flat = np.concatenate(list(cond_vals.values()))
+        y_max = float(np.nanmax(all_flat)) if len(all_flat) else 1.0
+        y_max = max(y_max, ax.get_ylim()[1])
+        step  = y_max * 0.14
+        for bk_idx, (i, j, stat, pval) in enumerate(bracket_results):
+            bk_y = y_max + step * (bk_idx + 1)
+            ax.plot([i, i, j, j],
+                    [bk_y - step * 0.2, bk_y, bk_y, bk_y - step * 0.2],
+                    color='black', linewidth=1.2)
+            ax.text((i + j) / 2.0, bk_y + step * 0.05,
+                    _fmt_p(pval), ha='center', va='bottom', fontsize=9)
+        if bracket_results:
+            ax.set_ylim(bottom=0, top=y_max + step * (len(bracket_results) + 1.8))
+        else:
+            ax.set_ylim(bottom=0)
+
+        ax.set_xticks(np.arange(len(conditions)))
+        ax.set_xticklabels(conditions)
+        ax.set_xlabel('Starting Condition')
+        ax.set_ylabel(f'{ylabel} (Mean \u00b1 SEM)')
+        ax.set_title(f'{title}\n(both cohorts combined; Mann-Whitney U)')
+        ax.tick_params(axis='both', direction='in')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        fig.tight_layout()
+        figs.append((fig, stem, title))
+
+    plt.show()
+
+    for fig, stem, title in figs:
+        if output_dir:
+            save_path = os.path.join(output_dir, f'{stem}_{ts}.svg')
+            fig.savefig(save_path, format='svg')
+            print(f"  Saved: {save_path}")
+        else:
+            save_path = filedialog.asksaveasfilename(
+                defaultextension='.svg',
+                filetypes=[('SVG files', '*.svg'), ('All files', '*.*')],
+                title=f'Save {title} bar plot as',
+                initialfile=f'{stem}.svg',
+            )
+            if save_path:
+                fig.savefig(save_path, format='svg')
+                print(f"  Saved: {save_path}")
+
+
+def run_across_cohort_pipeline(root):
+    """Interactive pipeline for comparing two cohorts.
+
+    Workflow
+    --------
+    1. Select master CSV for cohort 1  →  derive cohort label from animal ID prefix
+    2. Select data files for cohort 1
+    3. Select master CSV for cohort 2  →  derive cohort label from animal ID prefix
+    4. Select data files for cohort 2
+    5. Merge into a single combined animal_info dict, tagging each animal with
+       its cohort label (e.g. 'CAH', 'RV')
+    6. Print a summary of what was loaded
+    7. [Placeholder] — call across-cohort analysis functions here as they are
+       developed.  The combined data structures passed to those functions are:
+           combined_animal_info  — {animal_id: {sex, starting_condition, cohort}}
+           all_file_paths        — sorted list of all data file paths
+           cohort_labels         — {animal_id: cohort_prefix}
+    """
+    # ── Cohort 1 master CSV ───────────────────────────────────────────────────
+    master_path_1 = filedialog.askopenfilename(
+        title='Cohort 1 — Select master CSV (animal_id, sex, starting_condition)',
+        filetypes=[('CSV files', '*.csv')],
+        initialdir=os.getcwd(),
+    )
+    if not master_path_1:
+        print("No master CSV selected for cohort 1. Exiting across-cohort pipeline.")
+        return
+
+    try:
+        animal_info_1 = _load_master_csv(master_path_1)
+    except Exception as exc:
+        print(f"Error reading cohort 1 master CSV: {exc}")
+        return
+
+    # Derive cohort 1 label from animal IDs
+    cohort_label_1 = _cohort_prefix(next(iter(animal_info_1)))
+    print(f"Cohort 1 label: '{cohort_label_1}'  ({len(animal_info_1)} animals)")
+
+    # ── Cohort 1 data files ───────────────────────────────────────────────────
+    file_paths_1 = filedialog.askopenfilenames(
+        title=f'Cohort 1 ({cohort_label_1}) — Select mouse data files',
+        filetypes=[('CSV files', '*.csv')],
+        initialdir=os.path.dirname(master_path_1),
+    )
+    if not file_paths_1:
+        print("No data files selected for cohort 1. Exiting across-cohort pipeline.")
+        return
+
+    # ── Cohort 2 master CSV ───────────────────────────────────────────────────
+    master_path_2 = filedialog.askopenfilename(
+        title='Cohort 2 — Select master CSV (animal_id, sex, starting_condition)',
+        filetypes=[('CSV files', '*.csv')],
+        initialdir=os.getcwd(),
+    )
+    if not master_path_2:
+        print("No master CSV selected for cohort 2. Exiting across-cohort pipeline.")
+        return
+
+    try:
+        animal_info_2 = _load_master_csv(master_path_2)
+    except Exception as exc:
+        print(f"Error reading cohort 2 master CSV: {exc}")
+        return
+
+    cohort_label_2 = _cohort_prefix(next(iter(animal_info_2)))
+    print(f"Cohort 2 label: '{cohort_label_2}'  ({len(animal_info_2)} animals)")
+
+    # ── Cohort 2 data files ───────────────────────────────────────────────────
+    file_paths_2 = filedialog.askopenfilenames(
+        title=f'Cohort 2 ({cohort_label_2}) — Select mouse data files',
+        filetypes=[('CSV files', '*.csv')],
+        initialdir=os.path.dirname(master_path_2),
+    )
+    if not file_paths_2:
+        print("No data files selected for cohort 2. Exiting across-cohort pipeline.")
+        return
+
+    # ── Merge cohort info ─────────────────────────────────────────────────────
+    combined_animal_info = {}
+    cohort_labels = {}
+
+    for aid, info in animal_info_1.items():
+        combined_animal_info[aid] = {**info, 'cohort': cohort_label_1}
+        cohort_labels[aid] = cohort_label_1
+
+    for aid, info in animal_info_2.items():
+        if aid in combined_animal_info:
+            print(f"  [WARNING] Animal ID '{aid}' appears in both cohorts — "
+                  "cohort 2 entry will overwrite cohort 1.")
+        combined_animal_info[aid] = {**info, 'cohort': cohort_label_2}
+        cohort_labels[aid] = cohort_label_2
+
+    all_file_paths = list(file_paths_1) + list(file_paths_2)
+
+    # ── Summary ───────────────────────────────────────────────────────────────
+    print(
+        f"\n{'─' * 60}\n"
+        f"Across-Cohort Pipeline — Data Loaded Successfully\n"
+        f"{'─' * 60}"
+    )
+    print(f"  Cohort 1 : {cohort_label_1:10s}  {len(file_paths_1):3d} data file(s)")
+    print(f"  Cohort 2 : {cohort_label_2:10s}  {len(file_paths_2):3d} data file(s)")
+    print(f"  Total    :             {len(all_file_paths):3d} data file(s)")
+    print()
+
+    unrecognised = []
+    for fp in all_file_paths:
+        aid = os.path.basename(fp).split('_')[0]
+        entry = combined_animal_info.get(aid)
+        if entry is None:
+            unrecognised.append(aid)
+            continue
+        print(
+            f"  {aid:12s}  cohort={entry['cohort']:6s}  "
+            f"sex={entry['sex']:6s}  "
+            f"condition={entry['starting_condition']}"
+        )
+    if unrecognised:
+        print(f"\n  [WARNING] The following animal IDs were not found in either "
+              f"master CSV and will be skipped: {unrecognised}")
+
+    print(f"\n{'─' * 60}")
+    print("  Across-cohort analysis functions will be added here.")
+    print(f"{'─' * 60}\n")
+
+    # ── Output directory ──────────────────────────────────────────────────────
+    output_dir = filedialog.askdirectory(
+        title='Select output folder for across-cohort results (cancel to skip saving)',
+        initialdir=os.path.dirname(list(file_paths_1)[0]),
+    ) or None
+    if output_dir:
+        print(f"Output folder: {output_dir}")
+    else:
+        print("No output folder selected — results will be printed only.")
+
+    # ── [PLACEHOLDER] — future across-cohort analyses ─────────────────────────
+    # When specific analyses are requested, add function calls below.
+    # All functions should accept:
+    #   all_file_paths        : list of str  — paths to all mouse data CSV files
+    #   combined_animal_info  : dict         — {animal_id: {sex, starting_condition, cohort}}
+    #   cohort_labels         : dict         — {animal_id: cohort_prefix}
+    #   cohort_label_1        : str
+    #   cohort_label_2        : str
+    #   output_dir            : str or None
+
+    # ── Summary stats: hits and distances by group ────────────────────────────
+    mouse_df, group_df = _across_cohort_summary_stats(
+        all_file_paths, combined_animal_info, output_dir=output_dir
+    )
+
+    # ── Bar plots: CAH vs RV for hits/session and dist/session ───────────────
+    if mouse_df is not None:
+        _plot_across_cohort_bars(mouse_df, root, output_dir=output_dir)
+        _plot_condition_matched_bars(mouse_df, root, output_dir=output_dir)
+        _plot_condition_collapsed_bars(mouse_df, root, output_dir=output_dir)
+    # ─────────────────────────────────────────────────────────────────────────
+
+
 def main():
     # Create and hide the root window
     root = tk.Tk()
     root.withdraw()
+
+    # ── Top-level scope selection ─────────────────────────────────────────────
+    top_mode = _ask_top_level_mode(root)
+    if top_mode is None:
+        print("No analysis scope selected. Exiting...")
+        return
+
+    if top_mode == 'across':
+        run_across_cohort_pipeline(root)
+        return
+
+    # ── Single-cohort pipeline (original flow) ────────────────────────────────
 
     # Open file dialog to select the master CSV file
     master_csv_path = filedialog.askopenfilename(
