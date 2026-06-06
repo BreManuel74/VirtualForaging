@@ -110,7 +110,7 @@ SESSION_CACHE_DIR = os.path.join(script_dir, '.session_cache')
 if not os.path.exists(SESSION_CACHE_DIR):
     os.makedirs(SESSION_CACHE_DIR)
 
-_SESSION_CACHE_VERSION = 12  # bump this to invalidate all cached sessions after code changes
+_SESSION_CACHE_VERSION = 13  # bump this to invalidate all cached sessions after code changes
 
 # ── Levels-analysis treadmill/lick cache (separate from main session cache) ───
 _LEVELS_SESS_CACHE_DIR = os.path.join(SESSION_CACHE_DIR, 'levels')
@@ -2192,7 +2192,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
                 vals = cond_data.get(level, [])
                 if vals:
                     means.append(float(np.mean(vals)))
-                    sems.append(float(np.std(vals) / np.sqrt(len(vals))))
+                    sems.append(float(np.std(vals, ddof=1) / np.sqrt(len(vals))))
                     ns.append(len(vals))
                 else:
                     means.append(np.nan)
@@ -2247,7 +2247,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
         for lv in all_levels_spd:
             vals = collapsed_level_speed[lv]
             sc_means.append(float(np.mean(vals)))
-            sc_sems.append(float(np.std(vals) / np.sqrt(len(vals))))
+            sc_sems.append(float(np.std(vals, ddof=1) / np.sqrt(len(vals))))
             sc_ns.append(len(vals))
         ax_sc.bar(x_sc, sc_means, yerr=sc_sems, capsize=4, color='steelblue',
                   error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
@@ -2289,7 +2289,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
                 vals = cdata.get(lv, [])
                 if vals:
                     means_c.append(float(np.mean(vals)))
-                    sems_c.append(float(np.std(vals) / np.sqrt(len(vals))))
+                    sems_c.append(float(np.std(vals, ddof=1) / np.sqrt(len(vals))))
                     ns_c.append(len(vals))
                 else:
                     means_c.append(np.nan)
@@ -2337,7 +2337,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
         for lv in all_levels_lk:
             vals = collapsed_level_lick[lv]
             lk_means.append(float(np.mean(vals)))
-            lk_sems.append(float(np.std(vals) / np.sqrt(len(vals))))
+            lk_sems.append(float(np.std(vals, ddof=1) / np.sqrt(len(vals))))
             lk_ns.append(len(vals))
         ax_lk.bar(x_lk, lk_means, yerr=lk_sems, capsize=4, color='steelblue',
                   error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
@@ -2379,7 +2379,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
                 vals = cdata.get(lv, [])
                 if vals:
                     means_lkc.append(float(np.mean(vals)))
-                    sems_lkc.append(float(np.std(vals) / np.sqrt(len(vals))))
+                    sems_lkc.append(float(np.std(vals, ddof=1) / np.sqrt(len(vals))))
                     ns_lkc.append(len(vals))
                 else:
                     means_lkc.append(np.nan)
@@ -2427,7 +2427,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
         for lv in all_levels_dc:
             vals = collapsed_level_dist[lv]
             dc_means.append(float(np.mean(vals)))
-            dc_sems.append(float(np.std(vals) / np.sqrt(len(vals))))
+            dc_sems.append(float(np.std(vals, ddof=1) / np.sqrt(len(vals))))
             dc_ns.append(len(vals))
         ax_dc.bar(x_dc, dc_means, yerr=dc_sems, capsize=4, color='steelblue',
                   error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
@@ -2469,7 +2469,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
                 vals = cdata.get(lv, [])
                 if vals:
                     means_dcc.append(float(np.mean(vals)))
-                    sems_dcc.append(float(np.std(vals) / np.sqrt(len(vals))))
+                    sems_dcc.append(float(np.std(vals, ddof=1) / np.sqrt(len(vals))))
                     ns_dcc.append(len(vals))
                 else:
                     means_dcc.append(np.nan)
@@ -2526,7 +2526,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
                 vals = cdata.get(lv, [])
                 if vals:
                     means_dcx.append(float(np.mean(vals)))
-                    sems_dcx.append(float(np.std(vals) / np.sqrt(len(vals))))
+                    sems_dcx.append(float(np.std(vals, ddof=1) / np.sqrt(len(vals))))
                     ns_dcx.append(len(vals))
                 else:
                     means_dcx.append(np.nan)
@@ -2574,7 +2574,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
         for lv in all_levels_bc:
             vals = collapsed_level_bout[lv]
             bc_means.append(float(np.mean(vals)))
-            bc_sems.append(float(np.std(vals) / np.sqrt(len(vals))) if len(vals) > 1 else 0.0)
+            bc_sems.append(float(np.std(vals, ddof=1) / np.sqrt(len(vals))) if len(vals) > 1 else 0.0)
             bc_ns.append(len(vals))
         ax_bc.bar(x_bc, bc_means, yerr=bc_sems, capsize=4, color='steelblue',
                   error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
@@ -2616,7 +2616,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
                 vals = cdata.get(lv, [])
                 if vals:
                     means_bcc.append(float(np.mean(vals)))
-                    sems_bcc.append(float(np.std(vals) / np.sqrt(len(vals))) if len(vals) > 1 else 0.0)
+                    sems_bcc.append(float(np.std(vals, ddof=1) / np.sqrt(len(vals))) if len(vals) > 1 else 0.0)
                     ns_bcc.append(len(vals))
                 else:
                     means_bcc.append(np.nan)
@@ -2664,7 +2664,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
         for lv in all_levels_bas:
             vals = collapsed_level_bout_avg_spd[lv]
             bas_means.append(float(np.mean(vals)))
-            bas_sems.append(float(np.std(vals) / np.sqrt(len(vals))) if len(vals) > 1 else 0.0)
+            bas_sems.append(float(np.std(vals, ddof=1) / np.sqrt(len(vals))) if len(vals) > 1 else 0.0)
             bas_ns.append(len(vals))
         ax_bas.bar(x_bas, bas_means, yerr=bas_sems, capsize=4, color='steelblue',
                    error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
@@ -2706,7 +2706,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
                 vals = cdata.get(lv, [])
                 if vals:
                     means_basc.append(float(np.mean(vals)))
-                    sems_basc.append(float(np.std(vals) / np.sqrt(len(vals))) if len(vals) > 1 else 0.0)
+                    sems_basc.append(float(np.std(vals, ddof=1) / np.sqrt(len(vals))) if len(vals) > 1 else 0.0)
                     ns_basc.append(len(vals))
                 else:
                     means_basc.append(np.nan)
@@ -2754,7 +2754,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
         for lv in all_levels_bad:
             vals = collapsed_level_bout_avg_dist_lvl[lv]
             bad_means.append(float(np.mean(vals)))
-            bad_sems.append(float(np.std(vals) / np.sqrt(len(vals))) if len(vals) > 1 else 0.0)
+            bad_sems.append(float(np.std(vals, ddof=1) / np.sqrt(len(vals))) if len(vals) > 1 else 0.0)
             bad_ns.append(len(vals))
         ax_bad.bar(x_bad, bad_means, yerr=bad_sems, capsize=4, color='steelblue',
                    error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
@@ -2796,7 +2796,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
                 vals = cdata.get(lv, [])
                 if vals:
                     means_badc.append(float(np.mean(vals)))
-                    sems_badc.append(float(np.std(vals) / np.sqrt(len(vals))) if len(vals) > 1 else 0.0)
+                    sems_badc.append(float(np.std(vals, ddof=1) / np.sqrt(len(vals))) if len(vals) > 1 else 0.0)
                     ns_badc.append(len(vals))
                 else:
                     means_badc.append(np.nan)
@@ -5038,17 +5038,12 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                 # ── Capacitive-derived metrics ────────────────────────────
                 if capacitive_data is not None:
                     session_length_minutes = float(capacitive_data['elapsed_time'].max()) / 60.0
-                    # If any gaps exist in the cap file, the cap timestamps cannot be trusted
-                    # for total session duration (e.g. a trailing gap makes the file appear
-                    # shorter than the actual session).  Fall back to treadmill max time.
-                    if (_cap_gap_info['has_gaps']
-                            and treadmill_data is not None
-                            and 'global_time' in treadmill_data.columns):
-                        _tm_times_vsl = pd.to_numeric(
-                            treadmill_data['global_time'], errors='coerce').dropna()
-                        valid_session_length_minutes = (
-                            float(_tm_times_vsl.max()) / 60.0
-                            if len(_tm_times_vsl) > 0 else session_length_minutes)
+                    # Use gap-excluded valid duration so lick rate is not diluted by
+                    # trimmed segments.  compute_valid_session_duration() sums only the
+                    # inter-sample intervals ≤ 1 s, giving the true recorded time.
+                    _valid_dur_s = compute_valid_session_duration(capacitive_data)
+                    if np.isfinite(_valid_dur_s) and _valid_dur_s > 0:
+                        valid_session_length_minutes = _valid_dur_s / 60.0
                     else:
                         valid_session_length_minutes = session_length_minutes
 
