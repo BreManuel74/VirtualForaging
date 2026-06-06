@@ -36,7 +36,7 @@ plt.rcParams.update({
     "figure.titlesize": 10,
     "lines.linewidth": 0.9,
     "lines.markersize": 3,
-    "figure.figsize": (5, 2.5), #5, 2.5 ; 6, 2.5 for survivor ; 5.5, 2.5 weekday, 3.5, 3 time to first transition
+    "figure.figsize": (4, 2.5), #5, 2.5 ; 6, 2.5 for survivor ; 5.5, 2.5 weekday, 3.5, 3 time to first transition
 })
 import sys
 import pickle
@@ -1379,6 +1379,7 @@ _ALL_PLOT_KEYS = {
     'epoch_delivery_speed_sess', 'epoch_delivery_cap_sess', 'epoch_delivery_lick_sess',
     'epoch_delivery_cap_diff_entry',
     'epoch_delivery_cap_diff_065s',
+    'epoch_delivery_lick_diff_065s',
     'condition_shuffle_zscore', 'condition_shuffle_zscore_bar',
     'level_shuffle_zscore',
     'condition_punish_shuffle_zscore', 'condition_punish_shuffle_zscore_bar',
@@ -1483,6 +1484,7 @@ _PLOT_LABELS = [
     ('epoch_delivery_lick_sess',  'Epoch: Lick count — session-averaged, aligned to reward DELIVERY time (gap-excluded; per-mouse + condition)'),
     ('epoch_delivery_cap_diff_entry', 'Epoch: Capacitive (z-scored) — post-minus-pre reward delivery difference bar chart (1 s windows), by condition (Mann-Whitney U)'),
     ('epoch_delivery_cap_diff_065s',  'Epoch: Capacitive (z-scored) — post-minus-pre reward delivery difference bar chart (±0.65 s windows), by condition (Mann-Whitney U)'),
+    ('epoch_delivery_lick_diff_065s',  'Epoch: Lick rate (licks/s) — post-minus-pre reward delivery difference bar chart (±0.65 s windows), by condition (Mann-Whitney U)'),
     ('condition_shuffle_zscore',     'Shuffle: Zone speed Z-score (reward zone) — line plot over sessions by condition (circular-shift permutation; −ve = slower than chance inside zone)'),
     ('condition_shuffle_zscore_bar', 'Shuffle: Zone speed Z-score (reward zone) — collapsed bar chart, one avg per mouse by condition (Mann-Whitney U)'),
     ('level_shuffle_zscore',         'Shuffle: Zone speed Z-score (reward zone) by level — grouped bar chart by condition (requires transitions CSV)'),
@@ -11525,6 +11527,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     epoch_del_lick_per_mouse_fig  = epoch_del_lick_cond_fig  = None
     epoch_del_cap_diff_entry_fig  = None
     epoch_del_cap_diff_065s_fig   = None
+    epoch_del_lick_diff_065s_fig  = None
     condition_shuffle_zscore_fig     = None
     condition_shuffle_zscore_bar_fig = None
     level_shuffle_zscore_fig         = None
@@ -11539,7 +11542,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     level_rew_zone_immobility_prop_cond_fig = None
     level_immobility_prop_fig               = None
     _epoch_keys = {'epoch_delivery_speed_sess', 'epoch_delivery_cap_sess', 'epoch_delivery_lick_sess',
-                   'epoch_delivery_cap_diff_entry', 'epoch_delivery_cap_diff_065s',
+                   'epoch_delivery_cap_diff_entry', 'epoch_delivery_cap_diff_065s', 'epoch_delivery_lick_diff_065s',
                    'epoch_reward_speed', 'epoch_reward_cap',
                    'epoch_reward_speed_sess', 'epoch_reward_cap_sess',
                    'epoch_reward_speed_early_late', 'epoch_reward_cap_early_late',
@@ -11986,14 +11989,105 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         if 'epoch_delivery_lick_sess' in selected_plots and _any_del_lick:
             epoch_del_lick_per_mouse_fig, epoch_del_lick_cond_fig = _plot_epoch_panels(
                 all_results, 'delivery_lick_epoch_session_means',
-                ylabel='Lick count (licks per 500 ms bin)',
-                title_prefix='Lick Count Aligned to Reward Delivery',
+                ylabel='Lick rate (licks/s)',
+                title_prefix='Lick Rate Aligned to Reward Delivery',
                 condition_color_map=condition_color_map,
                 hierarchy='session',
                 reward_delivery_vline=True,
                 show_individual_traces=False,
                 canonical_time=LICK_EPOCH_TIME,
+                y_scale=2.0,
+                xticks=list(range(-5, 6)),
+                ylim=_LICK_EPOCH_YLIM,
             )
+
+        # ── Reward delivery lick: post-minus-pre 0.65 s difference bar chart ────
+        if 'epoch_delivery_lick_diff_065s' in selected_plots and _any_del_lick:
+            _dlde_pre_mask  = (LICK_EPOCH_TIME >= -0.65) & (LICK_EPOCH_TIME <  0.0)
+            _dlde_post_mask = (LICK_EPOCH_TIME >= 0.0)   & (LICK_EPOCH_TIME <= 0.65)
+            _dlde_by_cond: dict = {}
+            for _r in all_results:
+                _sess_mat = _r.get('delivery_lick_epoch_session_means')
+                if _sess_mat is None or _sess_mat.shape[0] == 0:
+                    continue
+                _cond = _r['starting_condition']
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    # ×2 converts licks/0.5 s bin → licks/s
+                    _pre_dlde  = float(np.nanmean(np.nanmean(_sess_mat[:, _dlde_pre_mask],  axis=1))) * 2.0
+                    _post_dlde = float(np.nanmean(np.nanmean(_sess_mat[:, _dlde_post_mask], axis=1))) * 2.0
+                _dlde_by_cond.setdefault(_cond, []).append((_r['mouse'], _post_dlde - _pre_dlde))
+
+            if _dlde_by_cond:
+                _conds_dlde   = sorted(_dlde_by_cond.keys())
+                _n_conds_dlde = len(_conds_dlde)
+                epoch_del_lick_diff_065s_fig, _ax_dlde = plt.subplots()
+                _all_dlde_vals = []
+                _rng_dlde = np.random.default_rng(seed=42)
+                for _ci, _cond in enumerate(_conds_dlde):
+                    _color      = condition_color_map.get(_cond, 'steelblue')
+                    _entries    = _dlde_by_cond[_cond]
+                    _n_dlde     = len(_entries)
+                    _dvals_dlde = [e[1] for e in _entries]
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _mn_dlde  = float(np.nanmean(_dvals_dlde))
+                        _sem_dlde = (float(np.nanstd(_dvals_dlde, ddof=1) / np.sqrt(_n_dlde))
+                                     if _n_dlde > 1 else 0.0)
+                    _all_dlde_vals.extend(_dvals_dlde + [_mn_dlde + _sem_dlde, _mn_dlde - _sem_dlde])
+                    _ax_dlde.bar(_ci, _mn_dlde, width=0.55, color=_color, alpha=0.7,
+                                 yerr=_sem_dlde, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
+                    _jitter_dlde = (_rng_dlde.random(_n_dlde) - 0.5) * 0.22
+                    _ax_dlde.scatter(_ci + _jitter_dlde, _dvals_dlde,
+                                     color=_color, edgecolors='black',
+                                     linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
+                _ax_dlde.axhline(0, color='black', linestyle='--', zorder=1)
+                _ax_dlde.set_xticks(np.arange(_n_conds_dlde))
+                _ax_dlde.set_xticklabels(_conds_dlde)
+                _ax_dlde.set_ylabel('Lick Rate Difference (licks/s)')
+                _ax_dlde.set_xlabel('CA%')
+                _ax_dlde.set_ylim(0, 8)
+                _ax_dlde.tick_params(axis='both', direction='in')
+                _ax_dlde.spines['top'].set_visible(False)
+                _ax_dlde.spines['right'].set_visible(False)
+
+                import itertools as _itertools_dlde
+                _pairs_dlde = list(_itertools_dlde.combinations(range(_n_conds_dlde), 2))
+                _ylim_cur_dlde = list(_ax_dlde.get_ylim())
+                _bracket_step_dlde = (_ylim_cur_dlde[1] - _ylim_cur_dlde[0]) * 0.14
+                _bracket_base_dlde = _ylim_cur_dlde[1] * 0.75
+                for _pi, (_ia, _ib) in enumerate(_pairs_dlde):
+                    _vals_a_dlde = [e[1] for e in _dlde_by_cond[_conds_dlde[_ia]]]
+                    _vals_b_dlde = [e[1] for e in _dlde_by_cond[_conds_dlde[_ib]]]
+                    if len(_vals_a_dlde) < 2 or len(_vals_b_dlde) < 2:
+                        continue
+                    _u_dlde, _p_dlde = mannwhitneyu(_vals_a_dlde, _vals_b_dlde, alternative='two-sided')
+                    _sig_dlde = _fmt_p(_p_dlde)
+                    _bh_dlde = _bracket_base_dlde + _bracket_step_dlde * (_pi + 0.6)
+                    _ax_dlde.plot([_ia, _ia, _ib, _ib],
+                                  [_bh_dlde - _bracket_step_dlde * 0.15,
+                                   _bh_dlde, _bh_dlde,
+                                   _bh_dlde - _bracket_step_dlde * 0.15],
+                                  color='black')
+                    _ax_dlde.text((_ia + _ib) / 2, _bh_dlde + _bracket_step_dlde * 0.05,
+                                  _sig_dlde, ha='center', va='bottom')
+                if _pairs_dlde:
+                    _new_top_dlde = _bracket_base_dlde + _bracket_step_dlde * (len(_pairs_dlde) + 1.5)
+                    _ax_dlde.set_ylim(0, _new_top_dlde)
+                _ax_dlde.set_ylim(bottom=0, top=8)
+
+                epoch_del_lick_diff_065s_fig.suptitle(
+                    'Post- vs Pre-Delivery Lick Rate Difference by Condition\n',
+                )
+                epoch_del_lick_diff_065s_fig.tight_layout()
+                _write_mwu_report(
+                    output_dir, 'epoch_delivery_lick_diff_065s',
+                    'Lick rate difference (licks/s)',
+                    [(_conds_dlde[_ia], _conds_dlde[_ib],
+                      [e[1] for e in _dlde_by_cond[_conds_dlde[_ia]]],
+                      [e[1] for e in _dlde_by_cond[_conds_dlde[_ib]]])
+                     for _ia, _ib in _pairs_dlde],
+                )
 
         # ── Reward delivery cap: pre/post 1 s difference bar chart ─────────────
         if 'epoch_delivery_cap_diff_entry' in selected_plots and _any_del_cap:
@@ -14895,7 +14989,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     # Print weekday alignment table so the user can verify Mon→Tue→Thu→Fri cycle
     print_session_weekday_alignment(all_results)
 
-    return speed_fig, sensitivity_fig, lick_fig, reward_fig, lick_reward_ratio_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, avg_sex_speed_fig, distance_fig, immobility_prop_fig, bout_count_fig, avg_bout_count_fig, rewards_per_bout_fig, first_lick_latency_fig, condition_rewards_per_bout_fig, condition_rewards_per_bout_bar_fig, condition_first_lick_latency_fig, condition_first_lick_latency_bar_fig, condition_lick_after_reward_prop_fig, condition_lick_after_reward_prop_bar_fig, condition_lick_after_reward_prop_5s_bar_fig, weekday_reward_bar_fig, weekday_reward_bar_condition_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_lick_reward_ratio_fig, condition_lick_reward_ratio_bar_fig, condition_punish_zone_pct_bar_fig, condition_bar_fig, condition_speed_bar_fig, condition_sensitivity_fig, condition_sensitivity_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_sensitivity_fig, level_immobility_prop_fig, level_rew_zone_immobility_prop_fig, level_rew_zone_immobility_prop_cond_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, last_level_bar_fig, level_survivor_fig, time_to_level2_fig, level_progression_indiv_fig, level_progression_condition_fig, level_progression_bar_fig, epoch_del_speed_per_mouse_fig, epoch_del_speed_cond_fig, epoch_del_cap_per_mouse_fig, epoch_del_cap_cond_fig, epoch_del_lick_per_mouse_fig, epoch_del_lick_cond_fig, epoch_del_cap_diff_entry_fig, epoch_del_cap_diff_065s_fig, condition_shuffle_zscore_fig, condition_shuffle_zscore_bar_fig, level_shuffle_zscore_fig, level_shuffle_zscore_line_fig, level_shuffle_zscore_cond_fig, condition_punish_shuffle_zscore_fig, condition_punish_shuffle_zscore_bar_fig, level_punish_shuffle_zscore_fig, level_punish_shuffle_zscore_line_fig, level_punish_shuffle_zscore_cond_fig, epoch_speed_per_mouse_fig, epoch_speed_cond_fig, epoch_cap_per_mouse_fig, epoch_cap_cond_fig, epoch_speed_sess_per_mouse_fig, epoch_speed_sess_cond_fig, epoch_cap_sess_per_mouse_fig, epoch_cap_sess_cond_fig, epoch_speed_early_per_mouse_fig, epoch_speed_late_per_mouse_fig, epoch_speed_early_cond_fig, epoch_speed_late_cond_fig, epoch_cap_early_per_mouse_fig, epoch_cap_late_per_mouse_fig, epoch_cap_early_cond_fig, epoch_cap_late_cond_fig, epoch_speed_early_ev_per_mouse_fig, epoch_speed_late_ev_per_mouse_fig, epoch_speed_early_ev_cond_fig, epoch_speed_late_ev_cond_fig, epoch_cap_early_ev_per_mouse_fig, epoch_cap_late_ev_per_mouse_fig, epoch_cap_early_ev_cond_fig, epoch_cap_late_ev_cond_fig, epoch_speed_early_ev_cond_clean_fig, epoch_speed_late_ev_cond_clean_fig, epoch_cap_early_ev_cond_clean_fig, epoch_cap_late_ev_cond_clean_fig, epoch_speed_sess_cond_clean_fig, epoch_cap_sess_cond_clean_fig, epoch_speed_early_cond_clean_fig, epoch_speed_late_cond_clean_fig, epoch_cap_early_cond_clean_fig, epoch_cap_late_cond_clean_fig, punish_speed_per_mouse_fig, punish_speed_cond_fig, punish_cap_per_mouse_fig, punish_cap_cond_fig, punish_speed_sess_per_mouse_fig, punish_speed_sess_cond_fig, punish_cap_sess_per_mouse_fig, punish_cap_sess_cond_fig, punish_speed_sess_cond_clean_fig, punish_cap_sess_cond_clean_fig, sex_speed_fig, sex_distance_indiv_fig, sex_reward_indiv_fig, epoch_speed_sess_sex_per_mouse_fig, epoch_speed_sess_sex_fig, epoch_cap_sess_sex_per_mouse_fig, epoch_cap_sess_sex_fig, epoch_punish_speed_sess_sex_per_mouse_fig, epoch_punish_speed_sess_sex_fig, epoch_punish_cap_sess_sex_per_mouse_fig, epoch_punish_cap_sess_sex_fig, epoch_reward_speed_pre_post_fig, epoch_reward_speed_diff_fig, epoch_reward_cap_pre_post_fig, epoch_reward_cap_diff_fig, epoch_reward_speed_pre_post_entry_fig, epoch_reward_speed_diff_entry_fig, epoch_reward_speed_pre_post_entry_1s_fig, epoch_reward_speed_diff_entry_1s_fig, epoch_reward_speed_diff_entry_2s_fig, epoch_reward_lick_count_sess_per_mouse_fig, epoch_reward_lick_count_sess_cond_fig, epoch_reward_lick_count_sess_cond_clean_fig, epoch_reward_lick_diff_entry_065s_fig, epoch_punish_lick_count_sess_per_mouse_fig, epoch_punish_lick_count_sess_cond_fig, epoch_punish_lick_count_sess_cond_clean_fig, epoch_punish_speed_pre_post_fig, epoch_punish_speed_diff_fig, epoch_punish_speed_pre_post_entry_fig, epoch_punish_speed_diff_entry_fig, epoch_punish_speed_diff_entry_2s_fig, epoch_punish_cap_pre_post_fig, epoch_punish_cap_diff_fig, epoch_punish_cap_pre_post_entry_fig, epoch_punish_cap_diff_entry_fig, expl_speed_histogram_fig, expl_speed_distfit_fig, expl_speed_boxplot_fig, expl_speed_rm_anova_resid_fig, expl_cap_histogram_fig, expl_cap_boxplot_fig, expl_cap_rm_anova_resid_fig, expl_cap_distfit_fig, expl_lick_distfit_fig, expl_lick_boxplot_fig, expl_lick_rm_anova_resid_fig, expl_lick_rate_distfit_fig, expl_lick_reward_ratio_distfit_fig, all_results, _level_stats_data
+    return speed_fig, sensitivity_fig, lick_fig, reward_fig, lick_reward_ratio_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, avg_sex_speed_fig, distance_fig, immobility_prop_fig, bout_count_fig, avg_bout_count_fig, rewards_per_bout_fig, first_lick_latency_fig, condition_rewards_per_bout_fig, condition_rewards_per_bout_bar_fig, condition_first_lick_latency_fig, condition_first_lick_latency_bar_fig, condition_lick_after_reward_prop_fig, condition_lick_after_reward_prop_bar_fig, condition_lick_after_reward_prop_5s_bar_fig, weekday_reward_bar_fig, weekday_reward_bar_condition_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_lick_reward_ratio_fig, condition_lick_reward_ratio_bar_fig, condition_punish_zone_pct_bar_fig, condition_bar_fig, condition_speed_bar_fig, condition_sensitivity_fig, condition_sensitivity_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_sensitivity_fig, level_immobility_prop_fig, level_rew_zone_immobility_prop_fig, level_rew_zone_immobility_prop_cond_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, last_level_bar_fig, level_survivor_fig, time_to_level2_fig, level_progression_indiv_fig, level_progression_condition_fig, level_progression_bar_fig, epoch_del_speed_per_mouse_fig, epoch_del_speed_cond_fig, epoch_del_cap_per_mouse_fig, epoch_del_cap_cond_fig, epoch_del_lick_per_mouse_fig, epoch_del_lick_cond_fig, epoch_del_cap_diff_entry_fig, epoch_del_cap_diff_065s_fig, epoch_del_lick_diff_065s_fig, condition_shuffle_zscore_fig, condition_shuffle_zscore_bar_fig, level_shuffle_zscore_fig, level_shuffle_zscore_line_fig, level_shuffle_zscore_cond_fig, condition_punish_shuffle_zscore_fig, condition_punish_shuffle_zscore_bar_fig, level_punish_shuffle_zscore_fig, level_punish_shuffle_zscore_line_fig, level_punish_shuffle_zscore_cond_fig, epoch_speed_per_mouse_fig, epoch_speed_cond_fig, epoch_cap_per_mouse_fig, epoch_cap_cond_fig, epoch_speed_sess_per_mouse_fig, epoch_speed_sess_cond_fig, epoch_cap_sess_per_mouse_fig, epoch_cap_sess_cond_fig, epoch_speed_early_per_mouse_fig, epoch_speed_late_per_mouse_fig, epoch_speed_early_cond_fig, epoch_speed_late_cond_fig, epoch_cap_early_per_mouse_fig, epoch_cap_late_per_mouse_fig, epoch_cap_early_cond_fig, epoch_cap_late_cond_fig, epoch_speed_early_ev_per_mouse_fig, epoch_speed_late_ev_per_mouse_fig, epoch_speed_early_ev_cond_fig, epoch_speed_late_ev_cond_fig, epoch_cap_early_ev_per_mouse_fig, epoch_cap_late_ev_per_mouse_fig, epoch_cap_early_ev_cond_fig, epoch_cap_late_ev_cond_fig, epoch_speed_early_ev_cond_clean_fig, epoch_speed_late_ev_cond_clean_fig, epoch_cap_early_ev_cond_clean_fig, epoch_cap_late_ev_cond_clean_fig, epoch_speed_sess_cond_clean_fig, epoch_cap_sess_cond_clean_fig, epoch_speed_early_cond_clean_fig, epoch_speed_late_cond_clean_fig, epoch_cap_early_cond_clean_fig, epoch_cap_late_cond_clean_fig, punish_speed_per_mouse_fig, punish_speed_cond_fig, punish_cap_per_mouse_fig, punish_cap_cond_fig, punish_speed_sess_per_mouse_fig, punish_speed_sess_cond_fig, punish_cap_sess_per_mouse_fig, punish_cap_sess_cond_fig, punish_speed_sess_cond_clean_fig, punish_cap_sess_cond_clean_fig, sex_speed_fig, sex_distance_indiv_fig, sex_reward_indiv_fig, epoch_speed_sess_sex_per_mouse_fig, epoch_speed_sess_sex_fig, epoch_cap_sess_sex_per_mouse_fig, epoch_cap_sess_sex_fig, epoch_punish_speed_sess_sex_per_mouse_fig, epoch_punish_speed_sess_sex_fig, epoch_punish_cap_sess_sex_per_mouse_fig, epoch_punish_cap_sess_sex_fig, epoch_reward_speed_pre_post_fig, epoch_reward_speed_diff_fig, epoch_reward_cap_pre_post_fig, epoch_reward_cap_diff_fig, epoch_reward_speed_pre_post_entry_fig, epoch_reward_speed_diff_entry_fig, epoch_reward_speed_pre_post_entry_1s_fig, epoch_reward_speed_diff_entry_1s_fig, epoch_reward_speed_diff_entry_2s_fig, epoch_reward_lick_count_sess_per_mouse_fig, epoch_reward_lick_count_sess_cond_fig, epoch_reward_lick_count_sess_cond_clean_fig, epoch_reward_lick_diff_entry_065s_fig, epoch_punish_lick_count_sess_per_mouse_fig, epoch_punish_lick_count_sess_cond_fig, epoch_punish_lick_count_sess_cond_clean_fig, epoch_punish_speed_pre_post_fig, epoch_punish_speed_diff_fig, epoch_punish_speed_pre_post_entry_fig, epoch_punish_speed_diff_entry_fig, epoch_punish_speed_diff_entry_2s_fig, epoch_punish_cap_pre_post_fig, epoch_punish_cap_diff_fig, epoch_punish_cap_pre_post_entry_fig, epoch_punish_cap_diff_entry_fig, expl_speed_histogram_fig, expl_speed_distfit_fig, expl_speed_boxplot_fig, expl_speed_rm_anova_resid_fig, expl_cap_histogram_fig, expl_cap_boxplot_fig, expl_cap_rm_anova_resid_fig, expl_cap_distfit_fig, expl_lick_distfit_fig, expl_lick_boxplot_fig, expl_lick_rm_anova_resid_fig, expl_lick_rate_distfit_fig, expl_lick_reward_ratio_distfit_fig, all_results, _level_stats_data
 
 def _run_weight_correlations(root, file_paths, animal_info):
     """Load a weight CSV, match to session data by mouse ID + date, and produce
@@ -17701,7 +17795,7 @@ def main():
         os.path.dirname(os.path.abspath(file_paths[0])),
         f'stats_reports_{_report_ts}',
     )
-    speed_fig, sensitivity_fig, lick_fig, reward_fig, lick_reward_ratio_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, avg_sex_speed_fig, distance_fig, immobility_prop_fig, bout_count_fig, avg_bout_count_fig, rewards_per_bout_fig, first_lick_latency_fig, condition_rewards_per_bout_fig, condition_rewards_per_bout_bar_fig, condition_first_lick_latency_fig, condition_first_lick_latency_bar_fig, condition_lick_after_reward_prop_fig, condition_lick_after_reward_prop_bar_fig, condition_lick_after_reward_prop_5s_bar_fig, weekday_reward_bar_fig, weekday_reward_bar_condition_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_lick_reward_ratio_fig, condition_lick_reward_ratio_bar_fig, condition_punish_zone_pct_bar_fig, condition_bar_fig, condition_speed_bar_fig, condition_sensitivity_fig, condition_sensitivity_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_sensitivity_fig, level_immobility_prop_fig, level_rew_zone_immobility_prop_fig, level_rew_zone_immobility_prop_cond_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, last_level_bar_fig, level_survivor_fig, time_to_level2_fig, level_progression_indiv_fig, level_progression_condition_fig, level_progression_bar_fig, epoch_del_speed_per_mouse_fig, epoch_del_speed_cond_fig, epoch_del_cap_per_mouse_fig, epoch_del_cap_cond_fig, epoch_del_lick_per_mouse_fig, epoch_del_lick_cond_fig, epoch_del_cap_diff_entry_fig, epoch_del_cap_diff_065s_fig, condition_shuffle_zscore_fig, condition_shuffle_zscore_bar_fig, level_shuffle_zscore_fig, level_shuffle_zscore_line_fig, level_shuffle_zscore_cond_fig, condition_punish_shuffle_zscore_fig, condition_punish_shuffle_zscore_bar_fig, level_punish_shuffle_zscore_fig, level_punish_shuffle_zscore_line_fig, level_punish_shuffle_zscore_cond_fig, epoch_speed_per_mouse_fig, epoch_speed_cond_fig, epoch_cap_per_mouse_fig, epoch_cap_cond_fig, epoch_speed_sess_per_mouse_fig, epoch_speed_sess_cond_fig, epoch_cap_sess_per_mouse_fig, epoch_cap_sess_cond_fig, epoch_speed_early_per_mouse_fig, epoch_speed_late_per_mouse_fig, epoch_speed_early_cond_fig, epoch_speed_late_cond_fig, epoch_cap_early_per_mouse_fig, epoch_cap_late_per_mouse_fig, epoch_cap_early_cond_fig, epoch_cap_late_cond_fig, epoch_speed_early_ev_per_mouse_fig, epoch_speed_late_ev_per_mouse_fig, epoch_speed_early_ev_cond_fig, epoch_speed_late_ev_cond_fig, epoch_cap_early_ev_per_mouse_fig, epoch_cap_late_ev_per_mouse_fig, epoch_cap_early_ev_cond_fig, epoch_cap_late_ev_cond_fig, epoch_speed_early_ev_cond_clean_fig, epoch_speed_late_ev_cond_clean_fig, epoch_cap_early_ev_cond_clean_fig, epoch_cap_late_ev_cond_clean_fig, epoch_speed_sess_cond_clean_fig, epoch_cap_sess_cond_clean_fig, epoch_speed_early_cond_clean_fig, epoch_speed_late_cond_clean_fig, epoch_cap_early_cond_clean_fig, epoch_cap_late_cond_clean_fig, punish_speed_per_mouse_fig, punish_speed_cond_fig, punish_cap_per_mouse_fig, punish_cap_cond_fig, punish_speed_sess_per_mouse_fig, punish_speed_sess_cond_fig, punish_cap_sess_per_mouse_fig, punish_cap_sess_cond_fig, punish_speed_sess_cond_clean_fig, punish_cap_sess_cond_clean_fig, sex_speed_fig, sex_distance_indiv_fig, sex_reward_indiv_fig, epoch_speed_sess_sex_per_mouse_fig, epoch_speed_sess_sex_fig, epoch_cap_sess_sex_per_mouse_fig, epoch_cap_sess_sex_fig, epoch_punish_speed_sess_sex_per_mouse_fig, epoch_punish_speed_sess_sex_fig, epoch_punish_cap_sess_sex_per_mouse_fig, epoch_punish_cap_sess_sex_fig, epoch_reward_speed_pre_post_fig, epoch_reward_speed_diff_fig, epoch_reward_cap_pre_post_fig, epoch_reward_cap_diff_fig, epoch_reward_speed_pre_post_entry_fig, epoch_reward_speed_diff_entry_fig, epoch_reward_speed_pre_post_entry_1s_fig, epoch_reward_speed_diff_entry_1s_fig, epoch_reward_speed_diff_entry_2s_fig, epoch_reward_lick_count_sess_per_mouse_fig, epoch_reward_lick_count_sess_cond_fig, epoch_reward_lick_count_sess_cond_clean_fig, epoch_reward_lick_diff_entry_065s_fig, epoch_punish_lick_count_sess_per_mouse_fig, epoch_punish_lick_count_sess_cond_fig, epoch_punish_lick_count_sess_cond_clean_fig, epoch_punish_speed_pre_post_fig, epoch_punish_speed_diff_fig, epoch_punish_speed_pre_post_entry_fig, epoch_punish_speed_diff_entry_fig, epoch_punish_speed_diff_entry_2s_fig, epoch_punish_cap_pre_post_fig, epoch_punish_cap_diff_fig, epoch_punish_cap_pre_post_entry_fig, epoch_punish_cap_diff_entry_fig, expl_speed_histogram_fig, expl_speed_distfit_fig, expl_speed_boxplot_fig, expl_speed_rm_anova_resid_fig, expl_cap_histogram_fig, expl_cap_boxplot_fig, expl_cap_rm_anova_resid_fig, expl_cap_distfit_fig, expl_lick_distfit_fig, expl_lick_boxplot_fig, expl_lick_rm_anova_resid_fig, expl_lick_rate_distfit_fig, expl_lick_reward_ratio_distfit_fig, all_results, _level_stats_data = analyze_mouse_data(
+    speed_fig, sensitivity_fig, lick_fig, reward_fig, lick_reward_ratio_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, avg_sex_speed_fig, distance_fig, immobility_prop_fig, bout_count_fig, avg_bout_count_fig, rewards_per_bout_fig, first_lick_latency_fig, condition_rewards_per_bout_fig, condition_rewards_per_bout_bar_fig, condition_first_lick_latency_fig, condition_first_lick_latency_bar_fig, condition_lick_after_reward_prop_fig, condition_lick_after_reward_prop_bar_fig, condition_lick_after_reward_prop_5s_bar_fig, weekday_reward_bar_fig, weekday_reward_bar_condition_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_lick_reward_ratio_fig, condition_lick_reward_ratio_bar_fig, condition_punish_zone_pct_bar_fig, condition_bar_fig, condition_speed_bar_fig, condition_sensitivity_fig, condition_sensitivity_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_sensitivity_fig, level_immobility_prop_fig, level_rew_zone_immobility_prop_fig, level_rew_zone_immobility_prop_cond_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, last_level_bar_fig, level_survivor_fig, time_to_level2_fig, level_progression_indiv_fig, level_progression_condition_fig, level_progression_bar_fig, epoch_del_speed_per_mouse_fig, epoch_del_speed_cond_fig, epoch_del_cap_per_mouse_fig, epoch_del_cap_cond_fig, epoch_del_lick_per_mouse_fig, epoch_del_lick_cond_fig, epoch_del_cap_diff_entry_fig, epoch_del_cap_diff_065s_fig, epoch_del_lick_diff_065s_fig, condition_shuffle_zscore_fig, condition_shuffle_zscore_bar_fig, level_shuffle_zscore_fig, level_shuffle_zscore_line_fig, level_shuffle_zscore_cond_fig, condition_punish_shuffle_zscore_fig, condition_punish_shuffle_zscore_bar_fig, level_punish_shuffle_zscore_fig, level_punish_shuffle_zscore_line_fig, level_punish_shuffle_zscore_cond_fig, epoch_speed_per_mouse_fig, epoch_speed_cond_fig, epoch_cap_per_mouse_fig, epoch_cap_cond_fig, epoch_speed_sess_per_mouse_fig, epoch_speed_sess_cond_fig, epoch_cap_sess_per_mouse_fig, epoch_cap_sess_cond_fig, epoch_speed_early_per_mouse_fig, epoch_speed_late_per_mouse_fig, epoch_speed_early_cond_fig, epoch_speed_late_cond_fig, epoch_cap_early_per_mouse_fig, epoch_cap_late_per_mouse_fig, epoch_cap_early_cond_fig, epoch_cap_late_cond_fig, epoch_speed_early_ev_per_mouse_fig, epoch_speed_late_ev_per_mouse_fig, epoch_speed_early_ev_cond_fig, epoch_speed_late_ev_cond_fig, epoch_cap_early_ev_per_mouse_fig, epoch_cap_late_ev_per_mouse_fig, epoch_cap_early_ev_cond_fig, epoch_cap_late_ev_cond_fig, epoch_speed_early_ev_cond_clean_fig, epoch_speed_late_ev_cond_clean_fig, epoch_cap_early_ev_cond_clean_fig, epoch_cap_late_ev_cond_clean_fig, epoch_speed_sess_cond_clean_fig, epoch_cap_sess_cond_clean_fig, epoch_speed_early_cond_clean_fig, epoch_speed_late_cond_clean_fig, epoch_cap_early_cond_clean_fig, epoch_cap_late_cond_clean_fig, punish_speed_per_mouse_fig, punish_speed_cond_fig, punish_cap_per_mouse_fig, punish_cap_cond_fig, punish_speed_sess_per_mouse_fig, punish_speed_sess_cond_fig, punish_cap_sess_per_mouse_fig, punish_cap_sess_cond_fig, punish_speed_sess_cond_clean_fig, punish_cap_sess_cond_clean_fig, sex_speed_fig, sex_distance_indiv_fig, sex_reward_indiv_fig, epoch_speed_sess_sex_per_mouse_fig, epoch_speed_sess_sex_fig, epoch_cap_sess_sex_per_mouse_fig, epoch_cap_sess_sex_fig, epoch_punish_speed_sess_sex_per_mouse_fig, epoch_punish_speed_sess_sex_fig, epoch_punish_cap_sess_sex_per_mouse_fig, epoch_punish_cap_sess_sex_fig, epoch_reward_speed_pre_post_fig, epoch_reward_speed_diff_fig, epoch_reward_cap_pre_post_fig, epoch_reward_cap_diff_fig, epoch_reward_speed_pre_post_entry_fig, epoch_reward_speed_diff_entry_fig, epoch_reward_speed_pre_post_entry_1s_fig, epoch_reward_speed_diff_entry_1s_fig, epoch_reward_speed_diff_entry_2s_fig, epoch_reward_lick_count_sess_per_mouse_fig, epoch_reward_lick_count_sess_cond_fig, epoch_reward_lick_count_sess_cond_clean_fig, epoch_reward_lick_diff_entry_065s_fig, epoch_punish_lick_count_sess_per_mouse_fig, epoch_punish_lick_count_sess_cond_fig, epoch_punish_lick_count_sess_cond_clean_fig, epoch_punish_speed_pre_post_fig, epoch_punish_speed_diff_fig, epoch_punish_speed_pre_post_entry_fig, epoch_punish_speed_diff_entry_fig, epoch_punish_speed_diff_entry_2s_fig, epoch_punish_cap_pre_post_fig, epoch_punish_cap_diff_fig, epoch_punish_cap_pre_post_entry_fig, epoch_punish_cap_diff_entry_fig, expl_speed_histogram_fig, expl_speed_distfit_fig, expl_speed_boxplot_fig, expl_speed_rm_anova_resid_fig, expl_cap_histogram_fig, expl_cap_boxplot_fig, expl_cap_rm_anova_resid_fig, expl_cap_distfit_fig, expl_lick_distfit_fig, expl_lick_boxplot_fig, expl_lick_rm_anova_resid_fig, expl_lick_rate_distfit_fig, expl_lick_reward_ratio_distfit_fig, all_results, _level_stats_data = analyze_mouse_data(
         file_paths, markers, starting_conditions,
         transitions_csv_path=transitions_csv_path,
         selected_plots=selected_plots,
@@ -17732,6 +17826,7 @@ def main():
         epoch_del_lick_per_mouse_fig,  epoch_del_lick_cond_fig,
         epoch_del_cap_diff_entry_fig,
         epoch_del_cap_diff_065s_fig,
+        epoch_del_lick_diff_065s_fig,
         condition_shuffle_zscore_fig,
         condition_shuffle_zscore_bar_fig,
         level_shuffle_zscore_fig,
@@ -17915,6 +18010,7 @@ def main():
         (epoch_del_cap_cond_fig,        'epoch_delivery_cap_sess_condition',   'Capacitive epoch aligned to reward delivery — by condition'),
         (epoch_del_lick_per_mouse_fig,  'epoch_delivery_lick_sess_per_mouse',  'Lick count epoch aligned to reward delivery — per mouse'),
         (epoch_del_lick_cond_fig,       'epoch_delivery_lick_sess_condition',  'Lick count epoch aligned to reward delivery — by condition'),
+        (epoch_del_lick_diff_065s_fig,  'epoch_delivery_lick_diff_neg065to0s_vs_0to065s', 'Post- vs pre-delivery lick rate difference by condition (\u00b10.65 s windows, Mann-Whitney U)'),
         (epoch_del_cap_diff_entry_fig,  'epoch_delivery_cap_diff_entry_neg1to0s_vs_0to1s', 'Post- vs pre-delivery capacitive difference by condition (1 s windows, Mann-Whitney U)'),
         (epoch_del_cap_diff_065s_fig,   'epoch_delivery_cap_diff_neg065to0s_vs_0to065s',   'Post- vs pre-delivery capacitive difference by condition (\u00b10.65 s windows, Mann-Whitney U)'),
         (condition_shuffle_zscore_fig,     'condition_shuffle_zscore',     'Zone speed Z-score (reward zone) — line plot by condition (circular-shift permutation)'),
