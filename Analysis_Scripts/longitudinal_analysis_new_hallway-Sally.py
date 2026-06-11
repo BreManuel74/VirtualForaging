@@ -1,13 +1,128 @@
-﻿"""Longitudinal analysis of behavioral data across multiple mice.
+﻿"""
+================================================================================
+  *** MAIN ANALYSIS SCRIPT — CITRIC ACID PROJECT ***
+================================================================================
+
+longitudinal_analysis_new_hallway-Sally.py
+Sipe Lab  |  Citric Acid Movement Tasks Behavioral Analysis
 Original Author: Brenna Manuel
 
-TEST COUNTING LOGIC:
-To test the zone/event counting logic on a single trial_log file before running the full analysis:
-    
-    from longitudinal_analysis_new_hallway import test_matching_logic
-    test_matching_logic('path/to/your/trial_log.csv')
-    
-Or run this script and call the function interactively in Python console.
+OVERVIEW
+--------
+Primary analysis pipeline for the running and stopping task virtual-hallway
+experiment.  Loads treadmill, capacitive-sensor, and trial-log CSVs across
+all sessions and all mice, computes a comprehensive set of behavioral metrics,
+and generates publication-quality figures.  A Tkinter GUI lets the user select
+which plots to generate at runtime.
+
+The script supports both single-cohort analysis and an across-cohort comparison
+mode (CAH = running task; RV = stopping task) via a top-level mode selector dialog.
+
+INPUT FILES (per session, per mouse)
+-------------------------------------
+  *_treadmill.csv       — encoder distance / speed (timestamp, distance, speed)
+  *_capacitive.csv      — lick/capacitive sensor (arduino_timestamp, elapsed_time,
+                          capacitive_value)
+  *<ts>trial_log.csv    — zone/texture/reward/puff event log produced by
+                          hallway_generate.py / KaufmanModule.TrialLogging
+
+  transitions_<ts>.csv  — optional level-transition log from run_me_gui.py;
+                          required for all 'level_*' plots
+
+  cohort_master CSV     — maps mouse IDs to starting_condition, sex, batch_id
+                          (loaded via the across-cohort pipeline or manually)
+
+METRICS COMPUTED (per session)
+-------------------------------
+  Behavioral performance
+    sensitivity, specificity, d-prime, false alarms, correct rejections
+    reward count, reward rate (rewards/min)
+    lick count, lick rate (licks/s)
+    lick/reward ratio
+    lick after reward proportion (2 s and 5 s post-delivery windows)
+    first-lick latency after reward delivery
+
+  Locomotion
+    total distance (m), valid session duration, treadmill speed
+    locomotion bout count, average bout speed, average bout distance
+    rewards per bout
+    proportion of session time immobile (speed = 0 for ≥ 2 s)
+    proportion of reward-zone time immobile (speed ≤ 0 for ≥ 250 ms)
+
+  Epoch analyses (±5 s, 501-sample canonical time axis)
+    speed and capacitive (z-scored) aligned to reward zone entry
+    speed and capacitive aligned to punishment zone entry
+    speed and capacitive aligned to reward DELIVERY time
+    lick rate (500 ms sliding window, 250 ms steps) for all epoch types
+    early vs late session splits, per-level splits, sex splits
+    pre/post difference bar charts and Mann-Whitney U tests for all epochs
+
+  Shuffle Z-scores
+    circular-shift permutation (200 shuffles) for reward and punishment zones
+    per-session, per-level, and collapsed bar charts by condition
+
+PLOT CATALOGUE
+--------------
+  > 100 named plot keys in _ALL_PLOT_KEYS / _PLOT_LABELS, selectable at
+  runtime via the Tkinter checklist GUI.  Categories include:
+    Individual, Aggregate, Condition, Level, Sex, Weekday,
+    Epoch (speed / capacitive / lick), Shuffle Z-score, Exploratory
+
+CACHING
+-------
+  .session_cache/       — per-session pickle cache keyed by file path+size+mtime;
+                          version-gated (_SESSION_CACHE_VERSION); re-runs load in
+                          seconds instead of re-processing every CSV
+  .session_cache/levels/— separate cache for levels-analysis treadmill/lick data
+                          (_LEVELS_CACHE_VERSION)
+  .kde_cache/           — KDE lick-threshold values cached per capacitive file
+
+STATISTICAL OUTPUTS
+-------------------
+  Mann-Whitney U reports  — saved as TXT to the output directory for all
+                            collapsed bar chart comparisons
+  nparLD (R-based)        — nonparametric two-way repeated-measures ANOVA
+                            (condition × week and condition × weekday designs);
+                            requires R + nparLD package installed
+  Descriptive stats CSV   — per-mouse and cohort-level summary statistics
+
+ACROSS-COHORT MODE
+------------------
+  Loads master CSVs for multiple cohorts (e.g. CAH, RV), merges animal info,
+  and generates cohort-comparison bar charts for reward rate, sensitivity,
+  speed, lick rate, and starting-condition-matched comparisons.
+
+KEY FUNCTIONS
+-------------
+  analyze_mouse_data()            — core per-mouse session loop; populates
+                                    all_results for downstream plotting
+  analyze_levels()                — level-stratified metric extraction and
+                                    plotting (requires transitions CSV)
+  generate_descriptive_stats_report() — writes summary stats CSV + console table
+  run_nparld_condition_week_r()   — R-bridge for nparLD condition × week ANOVA
+  run_nparld_condition_weekday_r()— R-bridge for nparLD condition × weekday ANOVA
+  run_across_cohort_pipeline()    — multi-cohort comparison pipeline
+  test_matching_logic()           — unit-test helper for zone/event counting
+  main()                          — Tkinter entry point; handles all mode
+                                    selection, file picking, and plot dispatch
+
+USAGE
+-----
+  Run directly:
+      python longitudinal_analysis_new_hallway-Sally.py
+
+  Test zone counting logic on a single file:
+      from longitudinal_analysis_new_hallway_Sally import test_matching_logic
+      test_matching_logic('path/to/your/trial_log.csv')
+
+DEPENDENCIES
+------------
+  Standard library : os, sys, ast, math, hashlib, pickle, datetime, pathlib,
+                     concurrent.futures, tkinter
+  Third-party      : numpy, pandas, matplotlib, scipy (stats, signal),
+                     timeline_refactored (local), lick_detection_algorithm (local)
+  Optional         : rpy2 / R + nparLD (for nonparametric RM-ANOVA)
+================================================================================
 """
 
 import ast
