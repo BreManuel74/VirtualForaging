@@ -1,10 +1,80 @@
 #!/usr/bin/env python3
 
 """
-Infinite Corridor using Panda3D that constantly recycles original wall segments as the user moves forward or backward.
+hallway_running_task.py  |  Sipe Lab – Hallway Phase File (Running Task / Recycle)
 Original Author: Jake Gronemeyer
 Modified and upgraded by: Brenna Manuel
 
+OVERVIEW
+--------
+Infinite-corridor Panda3D application for the running (continuous locomotion)
+behavioral task.  Like hallway_recycle.py it uses the fixed-pool recycling
+strategy for efficient memory usage, but the reward logic is adapted for a
+running task: the animal is rewarded for maintaining movement through the
+corridor rather than stopping.  All core subsystems (serial I/O, TCP, FSM,
+logging) are self-contained within this file.
+
+CORRIDOR & TEXTURE SYSTEM
+--------------------------
+  - Fixed-pool recycling  : wall/floor/ceiling segments are repositioned to the
+                            far end of the pool on each segment crossing
+  - Texture scheduling    : walls alternate between go_texture and stop_texture
+                            at intervals sampled from Gaussian distributions;
+                            stop_texture_probability controls the mix
+  - Zone duration         : segments_until_revert drawn per-zone from
+                            rounded_stay_data or rounded_go_data
+  - Probe stimuli         : temporary neutral textures (neutral_stim_1–4)
+                            applied for probe_duration seconds after a zone
+                            exits; probe_probability gates each probe event
+  - Reward summoner       : reward_summoner() task periodically checks running
+                            speed and issues water rewards during active
+                            locomotion (go-texture zones)
+
+KEY CLASSES
+-----------
+  DataGenerator         – Gaussian segment-count sampler from config
+  CapacitiveData /
+  CapacitiveSensorLogger– dataclass + CSV logger for lick/capacitive readings
+  TreadmillData /
+  TreadmillLogger       – dataclass + CSV logger for encoder distance/speed
+  Corridor              – recycle-strategy corridor; drives texture scheduling
+                          (schedule_texture_change, change_wall_textures,
+                          change_wall_textures_temporarily_once,
+                          revert_temporary_textures, revert_wall_textures)
+                          and logs all events to trial_df CSV
+  FogEffect             – scene fog management
+  SerialInputManager    – Teensy + Arduino serial readers on Panda3D tasks
+  SerialOutputManager   – sends integer reward/puff codes to Arduino
+  RewardOrPuff (FSM)    – Puff / Reward / Neutral FSM; broadcasts "REWARD:"
+                          to run_me_gui.py TCP server on each water delivery
+  RewardCalculator      – computes reward pulse duration from batch calibration
+                          CSV via linear equation
+  TCPStreamClient       – connects to run_me_gui.py TCP server; handles
+                          CHANGE_LEVEL hot-reload without process restart;
+                          resamples Gaussian distributions on level change
+  MousePortal           – main ShowBase; owns all subsystems, per-frame
+                          update() task, set_key() handler, reward_summoner()
+                          task, and signal/window-close cleanup
+
+CONFIG KEYS (JSON level file)
+------------------------------
+  segment_length, corridor_width, wall_height, num_segments
+  left_wall_texture, right_wall_texture, ceiling_texture, floor_texture
+  go_texture, stop_texture, neutral_stim_1–4
+  probe_onset, probe_duration, probe_probability
+  stop_texture_probability, stay_zone_reward_probability
+  base_hallway_data, stay_data, go_data  (Gaussian loc/scale dicts)
+  puff_duration, puff_to_neutral_time, reward_threshold
+  reward_file, teensy_port
+
+LAUNCH
+------
+Spawned as a subprocess by run_me_gui.py.  Reads environment variables:
+  LEVEL_CONFIG_PATH – path to the initial JSON level file
+  TCP_SERVER_PORT   – port of the run_me_gui.py TCP server
+  OUTPUT_DIR        – directory for all output CSVs
+  BATCH_ID          – solenoid calibration identifier
+  TEENSY_PORT       – serial port for the Teensy encoder board
 """
 
 import json

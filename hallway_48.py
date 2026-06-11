@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Infinite Corridor using Panda3D that constantly generates and pops new segments as the user moves forward or backward.
-Currently supports a stop/don't stop mouse behavioral task loaded from KaufmanModule.
+Currently supports a stop/don't stop mouse behavioral task loaded from KaufmanModule48.
 Original Author: Jake Gronemeyer
 Modified and upgraded by: Brenna Manuel
 

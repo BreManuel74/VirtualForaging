@@ -1,13 +1,76 @@
 """
-KaufmanModule: Shared classes for Virtual Foraging Task
+KaufmanModule.py  |  Sipe Lab – Shared Module for VirtualForaging / Hallway Tasks
 
-Contains:
-- TrialLogging
-- DataGenerator
-- TextureSwapper
-- RewardOrPuff
-- RewardCalculator
-- Stopwatch + global_stopwatch (shared timing source)
+OVERVIEW
+--------
+Centralized library of reusable classes shared across hallway phase files
+(primarily hallway_generate.py).  Importing from here keeps the individual
+phase files lean and ensures consistent behavior across experiment types.
+
+CONTENTS
+--------
+  TrialLogging
+    - Pre-allocates a fixed-size pandas DataFrame (default 1000 rows) at
+      session start and writes it to a timestamped CSV after every append
+    - Provides named helper methods for every loggable event type:
+      texture history, go/stay texture change times, zone re-entry,
+      stay-zone active state, segments_until_revert / segments_to_wait,
+      probe texture/time, puff/reward events, and hits
+    - Avoids repeated DataFrame resizing by filling NaN slots in-place
+
+  DataGenerator
+    - Generates Gaussian-distributed integer arrays from JSON config keys
+      (each key has a "loc" and "scale" sub-dict)
+    - Supports an optional min_value filter that resamples until the
+      constraint is satisfied
+
+  TextureSwapper
+    - Operates on a Corridor instance; encapsulates all texture-change logic
+      so Corridor itself stays focused on geometry
+    - change_wall_textures()      : selects stop vs. go texture by probability,
+                                    paints the appropriate forward/near segment
+                                    window, logs zone length and texture
+    - apply_probe_texture()       : applies a random neutral stimulus to a
+                                    12-segment forward window and schedules revert
+    - apply_probe_locked_texture(): same but uses a session-fixed probe texture
+    - revert_probe_texture()      : restores right_wall_texture on probe-flagged
+                                    segments and resets floor/ceiling
+    - exit_special_zones()        : logs zone-exit times (go vs. stay), optionally
+                                    fires a probe after the zone ends
+    - schedule_texture_change()   : samples segments_to_wait from base_hallway_data
+                                    and stores next-change countdown
+    - update_texture_change()     : called every frame segment-crossing; triggers
+                                    change_wall_textures when countdown reaches 0
+
+  RewardOrPuff (FSM)
+    - Three-state FSM: Puff → Neutral, Reward → Neutral
+    - Sends integer-encoded solenoid commands to SerialOutputManager
+    - Logs puff and reward events via TrialLogging
+    - Broadcasts "REWARD:" back to run_me_gui.py over TCP on every water delivery
+      so the GUI reward counter and threshold logic stay in sync
+    - _transitionToNeutral() inspects the wall texture currently in front of
+      the camera before releasing a Puff hold
+
+  RewardCalculator
+    - Reads a per-cohort calibration CSV (reward_file config key)
+    - extract_linear_data(batch_id) filters to the correct batch and returns
+      slope/intercept columns
+    - calculate_x(y, slope, intercept) inverts y = mx + b to compute the
+      solenoid open-time (ms) for a target reward volume
+
+  global_stopwatch
+    - A module-level Stopwatch instance (from global_stopwatch.py) shared
+      across all classes that import this module, providing a single
+      consistent elapsed-time reference for the entire session
+
+USAGE
+-----
+Import the classes you need in a phase file:
+
+    from KaufmanModule import (
+        TrialLogging, DataGenerator, TextureSwapper,
+        RewardOrPuff, RewardCalculator, global_stopwatch,
+    )
 """
 
 from __future__ import annotations

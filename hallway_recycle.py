@@ -1,10 +1,88 @@
 #!/usr/bin/env python3
 
 """
-Infinite Corridor using Panda3D that constantly recycles original wall segments as the user moves forward or backward.
+hallway_recycle.py  |  Sipe Lab – Hallway Phase File (Recycle Strategy)
 Original Author: Jake Gronemeyer
 Modified and upgraded by: Brenna Manuel
 
+OVERVIEW
+--------
+Infinite-corridor Panda3D application used primarily for the stopping-task
+cohort, though the design is experiment-agnostic.  Rather than creating and
+destroying geometry, the corridor maintains a fixed pool of wall/floor/ceiling
+segments that are repositioned ("recycled") as the animal moves forward or
+backward, keeping memory usage constant regardless of session length.
+
+CORRIDOR & TEXTURE SYSTEM
+--------------------------
+  - Fixed-pool recycling  : left wall, right wall, ceiling, and floor segments
+                            are repositioned to the far end whenever the camera
+                            crosses a segment boundary
+  - Texture changes       : walls switch between go_texture and stop_texture at
+                            intervals drawn from Gaussian distributions defined
+                            in the JSON level config
+  - Stop/go probability   : stop_texture_probability (config) controls the
+                            ratio of stop vs. go zones
+  - Zone duration         : segments_until_revert drawn from rounded_stay_data
+                            or rounded_go_data depending on selected texture
+  - Probe stimuli         : optional neutral stimuli (neutral_stim_1–4) applied
+                            temporarily after a zone exits; supports locked-probe
+                            mode (probe_lock) for a fixed probe texture
+  - Probe probability     : probe_probability (config) gates whether a probe
+                            fires after each zone transition
+  - Reward zone           : stay_zone_reward_probability determines whether the
+                            animal can receive water during a stop-texture zone
+
+KEY CLASSES
+-----------
+  DataGenerator         – generates Gaussian-distributed segment counts from
+                          config keys (loc, scale)
+  CapacitiveData /
+  CapacitiveSensorLogger– dataclass + CSV logger for lick/capacitive sensor
+                          readings; listens for 'readCapacitive' events
+  TreadmillData /
+  TreadmillLogger       – dataclass + CSV logger for encoder distance/speed;
+                          includes global elapsed time column
+  Corridor              – builds and recycles wall segments; drives all texture
+                          scheduling via schedule_texture_change() and
+                          change_wall_textures(); logs to trial_df CSV
+  FogEffect             – applies exponential fog to the Panda3D scene
+  SerialInputManager    – reads Teensy (encoder) and Arduino (capacitive)
+                          serial streams on background tasks; fires messenger
+                          events consumed by the app
+  SerialOutputManager   – sends integer-encoded reward/puff signals to Arduino
+  RewardOrPuff (FSM)    – finite-state machine with Puff / Reward / Neutral
+                          states; sends solenoid signals via SerialOutputManager
+                          and broadcasts "REWARD:" back to run_me_gui.py over TCP
+  RewardCalculator      – reads a calibration CSV and computes reward pulse
+                          duration from a per-batch linear equation (y = mx + b)
+  TCPStreamClient       – connects to the TCP server spawned by run_me_gui.py;
+                          receives CHANGE_LEVEL commands and hot-reloads the
+                          corridor config without restarting the process;
+                          also resamples all Gaussian distributions on level change
+  MousePortal           – main ShowBase subclass; owns all subsystems, drives the
+                          per-frame update() task, handles signal/window-close
+                          cleanup
+
+CONFIG KEYS (JSON level file)
+------------------------------
+  segment_length, corridor_width, wall_height, num_segments
+  left_wall_texture, right_wall_texture, ceiling_texture, floor_texture
+  go_texture, stop_texture, neutral_stim_1–4
+  probe_onset, probe_duration, probe_probability, probe_lock
+  stop_texture_probability, stay_zone_reward_probability
+  base_hallway_data, stay_data, go_data  (Gaussian loc/scale dicts)
+  puff_duration, puff_to_neutral_time, reward_threshold
+  reward_file, teensy_port (overridable via TEENSY_PORT env var)
+
+LAUNCH
+------
+Spawned as a subprocess by run_me_gui.py.  Reads environment variables:
+  LEVEL_CONFIG_PATH – path to the initial JSON level file
+  TCP_SERVER_PORT   – port of the run_me_gui.py TCP server
+  OUTPUT_DIR        – directory for all output CSVs and logs
+  BATCH_ID          – solenoid calibration identifier
+  TEENSY_PORT       – serial port for the Teensy encoder board
 """
 
 import json

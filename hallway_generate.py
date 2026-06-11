@@ -1,10 +1,86 @@
 #!/usr/bin/env python3
 """
-Infinite Corridor using Panda3D that constantly generates and pops new segments as the user moves forward or backward.
-Currently supports a stop/don't stop mouse behavioral task loaded from KaufmanModule.
+hallway_generate.py  |  Sipe Lab – Hallway Phase File (Dynamic Generate Strategy)
 Original Author: Jake Gronemeyer
 Modified and upgraded by: Brenna Manuel
 
+OVERVIEW
+--------
+Infinite-corridor Panda3D application for the stop/don't-stop mouse behavioral
+task.  Unlike hallway_recycle.py, this file uses a fully dynamic generate-and-
+delete strategy: segments are created ahead of the camera as the animal moves
+forward and removed once they fall behind the view window.  This allows
+arbitrarily large corridors with precise per-segment texture control.
+
+This file imports shared logic (DataGenerator, TextureSwapper, RewardOrPuff,
+RewardCalculator, TrialLogging, global_stopwatch) from KaufmanModule.py,
+keeping the corridor-specific code lean.
+
+CORRIDOR & TEXTURE SYSTEM
+--------------------------
+  - Dynamic generate/delete : _create_segment() builds new CardMaker geometry
+                              at a target Y position; _delete_segment() removes
+                              it when it exits the view window
+  - update_corridor()       : called every frame; maintains segments within
+                              [camera_y - half_view, camera_y + half_view] and
+                              keeps lists sorted by Y position
+  - Per-segment flags       : segment_flag and probe_flag stored as Python tags
+                              on each NodePath for targeted texture operations
+  - TextureSwapper          : imported from KaufmanModule; selects stop vs. go
+                              textures by probability, applies them to
+                              get_forward_segments_far() / get_forward_segments_near()
+                              windows, and schedules reversions
+  - Cave mode               : optional config flag that blacks out the floor/
+                              ceiling during go-texture zones
+  - Probe stimuli           : locked or random neutral textures applied to a
+                              12-segment forward window; probe flags mark
+                              affected segments so revert_probe_texture() can
+                              selectively restore them
+  - Segment selectors       : get_forward_segments_far(), get_forward_segments_near(),
+                              get_forward_segments_far_probe_revert(),
+                              get_forward_segments_far_floor_and_ceiling(),
+                              get_middle_segments() for targeted zone painting
+
+KEY CLASSES
+-----------
+  CapacitiveData /
+  CapacitiveSensorLogger– dataclass + CSV logger for lick/capacitive sensor data
+  TreadmillData /
+  TreadmillLogger       – dataclass + CSV logger for encoder distance/speed
+  Corridor              – dynamic corridor geometry manager; delegates texture
+                          logic to TextureSwapper (KaufmanModule); maintains
+                          segment lists, zone_gap, and per-segment flags
+  FogEffect             – applies scene fog
+  SerialInputManager    – Teensy encoder + Arduino capacitive serial readers
+  SerialOutputManager   – sends reward/puff integer codes to Arduino
+  TCPStreamClient       – connects to run_me_gui.py TCP server; handles
+                          CHANGE_LEVEL by calling _reload_corridor_config() which
+                          rebuilds the Corridor in-place and resamples all
+                          distributions; sends "REWARD:" messages on water delivery
+  MousePortal           – main ShowBase; owns all subsystems and the per-frame
+                          update() task
+  (RewardOrPuff, RewardCalculator, DataGenerator, TextureSwapper, TrialLogging,
+   global_stopwatch imported from KaufmanModule)
+
+CONFIG KEYS (JSON level file)
+------------------------------
+  segment_length, corridor_width, wall_height, num_segments
+  left_wall_texture, right_wall_texture, ceiling_texture, floor_texture
+  go_texture, stop_texture, cave_texture, neutral_stim_1–4
+  probe_onset, probe_duration, probe_probability, probe_lock
+  stop_texture_probability, stay_zone_reward_probability, cave
+  base_hallway_data, stay_data, go_data  (Gaussian loc/scale dicts)
+  puff_duration, puff_to_neutral_time, reward_threshold
+  reward_file, teensy_port
+
+LAUNCH
+------
+Spawned as a subprocess by run_me_gui.py.  Reads environment variables:
+  LEVEL_CONFIG_PATH – path to the initial JSON level file
+  TCP_SERVER_PORT   – port of the run_me_gui.py TCP server
+  OUTPUT_DIR        – directory for all output CSVs
+  BATCH_ID          – solenoid calibration identifier
+  TEENSY_PORT       – serial port for the Teensy encoder board
 """
 
 import json

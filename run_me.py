@@ -1,7 +1,20 @@
 """
-A script to run a Panda3D game application with dynamic level changing via TCP.
-Provides an interactive command interface to send commands to the game.
+================================================================================
+  *** OUTDATED — USE run_me_gui.py INSTEAD ***
+
+  This is the legacy command-line version of the hallway runner.
+  It has been superseded by run_me_gui.py, which provides a full Tkinter GUI,
+  automatic reward tracking, progress report resumption, thorcam integration,
+  and thread-safe level management.  This file is kept for reference only and
+  is no longer actively maintained.
+================================================================================
+
+run_me.py  |  Legacy CLI launcher for the Panda3D hallway
 Original Author: Brenna Manuel
+
+Launches the Panda3D game subprocess with a TCP server and an interactive
+terminal-based command interface for manually sending level-change and other
+commands.  All of these capabilities are now handled by run_me_gui.py.
 """
 import os
 import subprocess
