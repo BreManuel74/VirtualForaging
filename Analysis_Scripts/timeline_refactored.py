@@ -20,6 +20,7 @@ import os
 from tkinter import filedialog
 import tkinter as tk
 import matplotlib.cm as cm
+import matplotlib.colors as mcolors
 from scipy.stats import ttest_rel, ttest_ind, kurtosis, skew
 from sklearn.mixture import GaussianMixture
 
@@ -1029,7 +1030,8 @@ def plot_raster_heatmap(windows_padded, aligned_time, event_trials, title,
                        ylabel, colormap, output_folder, filename, vmin=None, vmax=None,
                        center_time=0, event_label="Event", show_zone_entries=False, 
                        zone_entry_color='black', zone_entry_linewidth=3.0,
-                       show_delivery_markers=False, center_line_color='black'):
+                       show_delivery_markers=False, center_line_color='black',
+                       figsize=(14, 8)):
     """Create a raster heatmap plot for aligned data
     
     Args:
@@ -1055,7 +1057,7 @@ def plot_raster_heatmap(windows_padded, aligned_time, event_trials, title,
         print(f"Skipping {filename} - no data available")
         return
     
-    fig, ax = plt.subplots(figsize=(14, 8))
+    fig, ax = plt.subplots(figsize=figsize)
     
     # Create heatmap
     im = ax.imshow(windows_padded, aspect='auto', cmap=colormap, 
@@ -1694,7 +1696,19 @@ def analyze_reward_zones(reward_zone_trials, trial_log_df, cap_time, cap_val, sp
     cap_windows, aligned_time_cap = create_aligned_windows(
         cap_time, cap_val, zone_entry_times, window
     )
-    
+
+    # Z-score capacitive windows using session-level mean and std (same method as
+    # longitudinal_analysis_new_hallway-Sally.py: per-session z = (x - mu) / sigma).
+    if cap_windows is not None:
+        _cp_mu  = np.nanmean(cap_val)
+        _cp_sig = np.nanstd(cap_val, ddof=1)
+        if _cp_sig > 0:
+            cap_windows_z = (cap_windows - _cp_mu) / _cp_sig
+        else:
+            cap_windows_z = cap_windows - _cp_mu
+    else:
+        cap_windows_z = None
+
     # Calculate capacitive scale from reward EVENT average trace (mean + SEM)
     # Get all reward event times from trial log to match what's shown in average trace plots
     reward_event_times = pd.to_numeric(trial_log_df['reward_event'], errors='coerce').dropna()
@@ -1747,18 +1761,56 @@ def analyze_reward_zones(reward_zone_trials, trial_log_df, cap_time, cap_val, sp
             show_delivery_markers=True, center_line_color='black'
         )
     
-    # Plot raster for capacitive at zone entry
-    if cap_windows is not None:
-        plot_raster_heatmap(
-            cap_windows, aligned_time_cap, reward_zone_trials,
-            f'Capacitive (Licking) Raster: Individual Trials Aligned to Reward Zone Entry (n={len(reward_zone_trials)} trials)',
-            'Capacitive Value (a.u.)', 'binary', output_folder,
-            'capacitive_raster_reward_zones',
-            vmin=cap_vmin,
-            vmax=cap_vmax,
-            center_time=0, event_label="Reward Zone Entry",
-            show_delivery_markers=True, center_line_color='blue'
-        )
+    # ── Figure size for the capacitive lick raster (reward zone entry) ────────
+    # Change this tuple to resize the plot, e.g. (10, 6) for a smaller figure.
+    _CAP_RASTER_REWARD_FIGSIZE = (7, 3)
+
+    # ── Colormap for the capacitive lick raster ───────────────────────────────
+    # 'binary'       → white (low) to black (high)
+    # 'Reds'         → white (low) to red  (high)
+    # Switch by changing the string below.
+    # white_fraction controls how much of the low end stays pure white (0.0–1.0).
+    _white_fraction = 0.05
+    _CAP_RASTER_COLORMAP = mcolors.LinearSegmentedColormap.from_list(
+        'Reds_white_heavy',
+        [(0.0,            (1.0, 1.0, 1.0, 1.0)),   # white
+         (_white_fraction, (1.0, 1.0, 1.0, 1.0)),  # white plateau
+         (1.0,            plt.cm.Reds(1.0))],       # dark red at the top
+    )
+
+    # Plot raster for capacitive at zone entry (z-scored)
+    if cap_windows_z is not None:
+        # Colour limits: 0 at bottom, upper bound at 99.5th percentile of z-scores
+        _cap_z_vmax = max(np.nanpercentile(cap_windows_z, 99.5), 1.0)
+        # Apply Sally-file canonical style (font sizes, linewidths) to this plot only
+        _sally_rc = {
+            'font.family':      'sans-serif',
+            'font.sans-serif':  ['Arial'],
+            'svg.fonttype':     'none',
+            'font.size':        8,
+            'axes.titlesize':   10,
+            'axes.labelsize':   8,
+            'xtick.labelsize':  8,
+            'ytick.labelsize':  8,
+            'legend.fontsize':  7.5,
+            'figure.titlesize': 10,
+            'lines.linewidth':  0.9,
+            'lines.markersize': 3,
+            'xtick.direction':  'in',
+            'ytick.direction':  'in',
+        }
+        with plt.rc_context(_sally_rc):
+            plot_raster_heatmap(
+                cap_windows_z, aligned_time_cap, reward_zone_trials,
+                f'Capacitive (Licking) Raster',
+                'Capacitive Value (z-score)', _CAP_RASTER_COLORMAP, output_folder,
+                'capacitive_raster_reward_zones',
+                vmin=0,
+                vmax=_cap_z_vmax,
+                center_time=0, event_label="Reward Zone Entry",
+                show_delivery_markers=True, center_line_color='blue',
+                figsize=_CAP_RASTER_REWARD_FIGSIZE,
+            )
     
     # Analyze reward deliveries - pass trial_log_df to get ALL reward events
     print(f"Analyzing reward deliveries...")
