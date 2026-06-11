@@ -2,7 +2,7 @@
 # Virtual Foraging Hallway
 
 
- Renders infinite corridor with different zones using Panda3D for locomotion-controlled animal behavioral research.
+ Renders infinite corridor with different zones using Panda3D for locomotion-controlled animal behavioral research. run_me_GUI.py is the main application launcher.
 
 # Current Features:
 - JSON parameterization for highly configurable level creation
