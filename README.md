@@ -15,7 +15,7 @@
 - Fog rendering for immersion
 - Gaussian distributions for ITI and ISI generated and saved for each session
 - Reward delivery calculator and solenoid calibration script
-- ThorCam triggering and via MicroManager
+- ThorCam triggering via MicroManager
 - TCP socket server for live video game interaction
 - Live GUI for dynamic level control and monitoring
 - Automatic level progression via configurable level parameters
