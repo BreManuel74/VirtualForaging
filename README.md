@@ -2,20 +2,20 @@
 # Virtual Foraging Hallway
 
 
- Renders infinite corridor using Panda3D for animal behavioral research
+ Renders infinite corridor with different zones using Panda3D for locomotion-controlled animal behavioral research. run_me_GUI.py is the main application launcher.
 
 # Current Features:
 - JSON parameterization for highly configurable level creation
 - Treadmill, capacitive sensor, and trial log data logging to CSV
 - Customizable textures for corridor walls
 - Both segment recycling and infinite rendering hallway options
-- Renders in puff and reward texture zones
-- Triggers reward and puff deliveries via I/O interface with Arduino
+- Renders in different texture zones
+- Triggers solenoid openings via I/O interface with Arduino
 - Synchronous global stopwatch
 - Fog rendering for immersion
 - Gaussian distributions for ITI and ISI generated and saved for each session
 - Reward delivery calculator and solenoid calibration script
-- ThorCam triggering and live viewing via MicroManager
+- ThorCam triggering via MicroManager
 - TCP socket server for live video game interaction
 - Live GUI for dynamic level control and monitoring
 - Automatic level progression via configurable level parameters

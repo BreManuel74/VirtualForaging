@@ -84,6 +84,24 @@ CAH_LEVEL_THRESHOLD_MATCHER: dict[str, int] = {
     'level_50.json': 15,
 }
 
+RV_LEVEL_THRESHOLD_MATCHER: dict[str, int] = {
+    'level_1.json': 20,
+    'level_2.json': 30,
+    'level_3.json': 30,
+    'level_4.json': 30,
+    'level_5.json': 30,
+    'level_6.json': 30,
+    'level_7.json': 30,
+    'level_8.json': 30,
+    'level_9.json': 30,
+    'level_10.json': 30,
+    'level_11.json': 30,
+    'level_12.json': 30,
+    'level_13.json': 30,
+    'level_14.json': 30,
+    'level_15.json': 30,
+
+}
 
 def get_reward_threshold(level_str: str, animal_id: str) -> int | None:
     """
@@ -97,8 +115,12 @@ def get_reward_threshold(level_str: str, animal_id: str) -> int | None:
     level_str  : e.g. 'level_6.json'
     animal_id  : e.g. 'CAH1' or 'VF11'
     """
-    if isinstance(animal_id, str) and animal_id.upper().startswith('CAH'):
-        return CAH_LEVEL_THRESHOLD_MATCHER.get(level_str)
+    if isinstance(animal_id, str):
+        prefix = animal_id.upper()
+        if prefix.startswith('CAH'):
+            return CAH_LEVEL_THRESHOLD_MATCHER.get(level_str)
+        if prefix.startswith('RV'):
+            return RV_LEVEL_THRESHOLD_MATCHER.get(level_str)
     return None
 
 

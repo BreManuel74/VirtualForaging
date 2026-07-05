@@ -1,13 +1,128 @@
-"""Longitudinal analysis of behavioral data across multiple mice.
+﻿"""
+================================================================================
+  *** MAIN ANALYSIS SCRIPT — CITRIC ACID PROJECT ***
+================================================================================
+
+longitudinal_analysis_new_hallway-Sally.py
+Sipe Lab  |  Citric Acid Movement Tasks Behavioral Analysis
 Original Author: Brenna Manuel
 
-TEST COUNTING LOGIC:
-To test the zone/event counting logic on a single trial_log file before running the full analysis:
-    
-    from longitudinal_analysis_new_hallway import test_matching_logic
-    test_matching_logic('path/to/your/trial_log.csv')
-    
-Or run this script and call the function interactively in Python console.
+OVERVIEW
+--------
+Primary analysis pipeline for the running and stopping task virtual-hallway
+experiment.  Loads treadmill, capacitive-sensor, and trial-log CSVs across
+all sessions and all mice, computes a comprehensive set of behavioral metrics,
+and generates publication-quality figures.  A Tkinter GUI lets the user select
+which plots to generate at runtime.
+
+The script supports both single-cohort analysis and an across-cohort comparison
+mode (CAH = running task; RV = stopping task) via a top-level mode selector dialog.
+
+INPUT FILES (per session, per mouse)
+-------------------------------------
+  *_treadmill.csv       — encoder distance / speed (timestamp, distance, speed)
+  *_capacitive.csv      — lick/capacitive sensor (arduino_timestamp, elapsed_time,
+                          capacitive_value)
+  *<ts>trial_log.csv    — zone/texture/reward/puff event log produced by
+                          hallway_generate.py / KaufmanModule.TrialLogging
+
+  transitions_<ts>.csv  — optional level-transition log from run_me_gui.py;
+                          required for all 'level_*' plots
+
+  cohort_master CSV     — maps mouse IDs to starting_condition, sex, batch_id
+                          (loaded via the across-cohort pipeline or manually)
+
+METRICS COMPUTED (per session)
+-------------------------------
+  Behavioral performance
+    sensitivity, specificity, d-prime, false alarms, correct rejections
+    reward count, reward rate (rewards/min)
+    lick count, lick rate (licks/s)
+    lick/reward ratio
+    lick after reward proportion (2 s and 5 s post-delivery windows)
+    first-lick latency after reward delivery
+
+  Locomotion
+    total distance (m), valid session duration, treadmill speed
+    locomotion bout count, average bout speed, average bout distance
+    rewards per bout
+    proportion of session time immobile (speed = 0 for ≥ 2 s)
+    proportion of reward-zone time immobile (speed ≤ 0 for ≥ 250 ms)
+
+  Epoch analyses (±5 s, 501-sample canonical time axis)
+    speed and capacitive (z-scored) aligned to reward zone entry
+    speed and capacitive aligned to punishment zone entry
+    speed and capacitive aligned to reward DELIVERY time
+    lick rate (500 ms sliding window, 250 ms steps) for all epoch types
+    early vs late session splits, per-level splits, sex splits
+    pre/post difference bar charts and Mann-Whitney U tests for all epochs
+
+  Shuffle Z-scores
+    circular-shift permutation (200 shuffles) for reward and punishment zones
+    per-session, per-level, and collapsed bar charts by condition
+
+PLOT CATALOGUE
+--------------
+  > 100 named plot keys in _ALL_PLOT_KEYS / _PLOT_LABELS, selectable at
+  runtime via the Tkinter checklist GUI.  Categories include:
+    Individual, Aggregate, Condition, Level, Sex, Weekday,
+    Epoch (speed / capacitive / lick), Shuffle Z-score, Exploratory
+
+CACHING
+-------
+  .session_cache/       — per-session pickle cache keyed by file path+size+mtime;
+                          version-gated (_SESSION_CACHE_VERSION); re-runs load in
+                          seconds instead of re-processing every CSV
+  .session_cache/levels/— separate cache for levels-analysis treadmill/lick data
+                          (_LEVELS_CACHE_VERSION)
+  .kde_cache/           — KDE lick-threshold values cached per capacitive file
+
+STATISTICAL OUTPUTS
+-------------------
+  Mann-Whitney U reports  — saved as TXT to the output directory for all
+                            collapsed bar chart comparisons
+  nparLD (R-based)        — nonparametric two-way repeated-measures ANOVA
+                            (condition × week and condition × weekday designs);
+                            requires R + nparLD package installed
+  Descriptive stats CSV   — per-mouse and cohort-level summary statistics
+
+ACROSS-COHORT MODE
+------------------
+  Loads master CSVs for multiple cohorts (e.g. CAH, RV), merges animal info,
+  and generates cohort-comparison bar charts for reward rate, sensitivity,
+  speed, lick rate, and starting-condition-matched comparisons.
+
+KEY FUNCTIONS
+-------------
+  analyze_mouse_data()            — core per-mouse session loop; populates
+                                    all_results for downstream plotting
+  analyze_levels()                — level-stratified metric extraction and
+                                    plotting (requires transitions CSV)
+  generate_descriptive_stats_report() — writes summary stats CSV + console table
+  run_nparld_condition_week_r()   — R-bridge for nparLD condition × week ANOVA
+  run_nparld_condition_weekday_r()— R-bridge for nparLD condition × weekday ANOVA
+  run_across_cohort_pipeline()    — multi-cohort comparison pipeline
+  test_matching_logic()           — unit-test helper for zone/event counting
+  main()                          — Tkinter entry point; handles all mode
+                                    selection, file picking, and plot dispatch
+
+USAGE
+-----
+  Run directly:
+      python longitudinal_analysis_new_hallway-Sally.py
+
+  Test zone counting logic on a single file:
+      from longitudinal_analysis_new_hallway_Sally import test_matching_logic
+      test_matching_logic('path/to/your/trial_log.csv')
+
+DEPENDENCIES
+------------
+  Standard library : os, sys, ast, math, hashlib, pickle, datetime, pathlib,
+                     concurrent.futures, tkinter
+  Third-party      : numpy, pandas, matplotlib, scipy (stats, signal),
+                     timeline_refactored (local), lick_detection_algorithm (local)
+  Optional         : rpy2 / R + nparLD (for nonparametric RM-ANOVA)
+================================================================================
 """
 
 import ast
@@ -17,19 +132,43 @@ import tkinter as tk
 from tkinter import filedialog
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+from matplotlib.lines import Line2D
 from datetime import datetime
 import colorsys
+
+# ── Global Matplotlib defaults ────────────────────────────────────────────────
+plt.rcParams["font.family"] = "sans-serif"
+plt.rcParams["font.sans-serif"] = ["Arial"]
+plt.rcParams["svg.fonttype"] = "none"
+plt.rcParams.update({
+    "font.size": 8,
+    "axes.titlesize": 10,
+    "axes.labelsize": 8,
+    "xtick.labelsize": 8,
+    "ytick.labelsize": 8,
+    "legend.fontsize": 7.5,
+    "figure.titlesize": 10,
+    "lines.linewidth": 0.9,
+    "lines.markersize": 3,
+    "figure.figsize": (4, 2.5), #5, 2.5 ; 6, 2.5 for survivor ; 5.5, 2.5 weekday, 3.5, 3 time to first transition
+})
 import sys
 import pickle
 import hashlib
 import warnings
 import math
+import subprocess
+import shutil
+import tempfile
+from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor as _TPE
 
 # Add Analysis_Scripts to path to import lick detection algorithm
 script_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, script_dir)
 import lick_detection_algorithm as lda
-from scipy.stats import norm
+from scipy.stats import norm, mannwhitneyu
 from scipy.signal import butter, filtfilt
 from timeline_refactored import (
     safe_literal_eval,
@@ -77,6 +216,212 @@ def cache_kde_value(capacitive_filepath, kde_value):
     except Exception as e:
         # If caching fails, just continue without caching
         print(f"Warning: Cache write failed for {capacitive_filepath}: {e}")
+
+
+# ── Session-level result cache ────────────────────────────────────────────────
+# Caches all per-session computed metrics so that re-runs load in seconds
+# instead of re-reading and re-processing every CSV file.
+SESSION_CACHE_DIR = os.path.join(script_dir, '.session_cache')
+if not os.path.exists(SESSION_CACHE_DIR):
+    os.makedirs(SESSION_CACHE_DIR)
+
+_SESSION_CACHE_VERSION = 13  # bump this to invalidate all cached sessions after code changes
+
+# ── Levels-analysis treadmill/lick cache (separate from main session cache) ───
+_LEVELS_SESS_CACHE_DIR = os.path.join(SESSION_CACHE_DIR, 'levels')
+if not os.path.exists(_LEVELS_SESS_CACHE_DIR):
+    os.makedirs(_LEVELS_SESS_CACHE_DIR)
+_LEVELS_CACHE_VERSION = 4  # bump to invalidate levels cache independently
+
+# ── Diagnostic mode ───────────────────────────────────────────────────────────
+# Set to True to print per-trial matching, lick-latency, and lick-prop traces
+# to the console while sessions are being processed.  Has no effect on results.
+_DIAGNOSTIC_MODE = False
+
+
+def _session_cache_key(paths):
+    """Hash a list of file paths by path + size + mtime to create a unique session key."""
+    parts = []
+    for p in paths:
+        p = str(p) if p else ''
+        if p and os.path.exists(p):
+            st = os.stat(p)
+            parts.append(f"{p}|{st.st_size}|{st.st_mtime}")
+        else:
+            parts.append(f"missing:{p}")
+    return hashlib.md5("|".join(parts).encode('utf-8')).hexdigest()
+
+
+def _load_session_cache(key):
+    """Return cached session data dict, or None on miss / version mismatch."""
+    cache_file = os.path.join(SESSION_CACHE_DIR, f"{key}.pkl")
+    if os.path.exists(cache_file):
+        try:
+            with open(cache_file, 'rb') as f:
+                data = pickle.load(f)
+            if data.get('_version') == _SESSION_CACHE_VERSION:
+                return data
+        except Exception:
+            pass
+    return None
+
+
+def _save_session_cache(key, data):
+    """Persist session data dict to disk."""
+    data['_version'] = _SESSION_CACHE_VERSION
+    cache_file = os.path.join(SESSION_CACHE_DIR, f"{key}.pkl")
+    try:
+        with open(cache_file, 'wb') as f:
+            pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+    except Exception as e:
+        print(f"Warning: session cache write failed: {e}")
+
+
+def _lvl_sess_cache_key(treadmill_path, capacitive_path):
+    """Hash (treadmill, capacitive) paths by path+size+mtime for the levels cache."""
+    parts = []
+    for p in [treadmill_path, capacitive_path]:
+        p = str(p) if p else ''
+        if p and os.path.exists(p):
+            st = os.stat(p)
+            parts.append(f"{p}|{st.st_size}|{st.st_mtime}")
+        else:
+            parts.append(f"missing:{p}")
+    return hashlib.md5("|".join(parts).encode('utf-8')).hexdigest()
+
+
+def _load_lvl_sess_cache(key):
+    """Return cached levels-session data dict, or None on miss / version mismatch."""
+    cache_file = os.path.join(_LEVELS_SESS_CACHE_DIR, f"{key}.pkl")
+    if os.path.exists(cache_file):
+        try:
+            with open(cache_file, 'rb') as f:
+                data = pickle.load(f)
+            if data.get('_lvl_version') == _LEVELS_CACHE_VERSION:
+                return data
+        except Exception:
+            pass
+    return None
+
+
+def _save_lvl_sess_cache(key, data):
+    """Persist levels-session data dict to disk."""
+    data['_lvl_version'] = _LEVELS_CACHE_VERSION
+    cache_file = os.path.join(_LEVELS_SESS_CACHE_DIR, f"{key}.pkl")
+    try:
+        with open(cache_file, 'wb') as f:
+            pickle.dump(data, f, protocol=pickle.HIGHEST_PROTOCOL)
+    except Exception as e:
+        print(f"  [WARN] levels cache write failed: {e}")
+
+
+def _read_three_csvs(path_treadmill, path_capacitive, path_trial_log):
+    """Read three session CSV files in parallel (I/O-bound, uses threads).
+
+    Returns
+    -------
+    treadmill_df, capacitive_df, trial_log_df : DataFrames or None
+    missing : list of label strings for files that could not be read
+    """
+    results = [None, None, None]
+    missing = []
+    labels  = ['treadmill', 'capacitive', 'trial_log']
+    paths   = [path_treadmill, path_capacitive, path_trial_log]
+
+    def _read(idx):
+        try:
+            results[idx] = pd.read_csv(paths[idx])
+        except Exception:
+            pass  # results[idx] stays None
+
+    with _TPE(max_workers=3) as ex:
+        list(ex.map(_read, range(3)))
+
+    for i, label in enumerate(labels):
+        if results[i] is None:
+            missing.append(label)
+
+    return results[0], results[1], results[2], missing
+
+
+def detect_capacitive_gaps(cap_df: pd.DataFrame,
+                            max_gap_s: float = 1.0) -> dict:
+    """Detect time gaps in a capacitive recording that exceed max_gap_s.
+
+    The sensor runs at ~50 Hz (20 ms per sample). Any inter-sample interval
+    longer than max_gap_s indicates a section of data was deliberately removed
+    (e.g. by the baseline-spike trimmer). Knowing where these gaps are is
+    required for correct epoch alignment and lick-bout analysis.
+
+    Parameters
+    ----------
+    cap_df : DataFrame with an 'elapsed_time' column
+    max_gap_s : minimum inter-sample interval (seconds) to count as a gap
+
+    Returns
+    -------
+    dict with keys:
+        'has_gaps'   : bool
+        'n_gaps'     : int
+        'gaps'       : list of (gap_start_s, gap_end_s, gap_duration_s) tuples
+        'total_gap_s': float  — total trimmed time
+    """
+    if 'elapsed_time' not in cap_df.columns:
+        return {'has_gaps': False, 'n_gaps': 0, 'gaps': [], 'total_gap_s': 0.0}
+
+    times = pd.to_numeric(cap_df['elapsed_time'], errors='coerce').dropna().values
+    if len(times) < 2:
+        return {'has_gaps': False, 'n_gaps': 0, 'gaps': [], 'total_gap_s': 0.0}
+
+    diffs = np.diff(times)
+    gap_mask = diffs > max_gap_s
+    gap_indices = np.where(gap_mask)[0]
+
+    gaps = []
+    for idx in gap_indices:
+        t_start = float(times[idx])
+        t_end   = float(times[idx + 1])
+        gaps.append((t_start, t_end, t_end - t_start))
+
+    total_gap_s = sum(g[2] for g in gaps)
+    return {
+        'has_gaps':    len(gaps) > 0,
+        'n_gaps':      len(gaps),
+        'gaps':        gaps,
+        'total_gap_s': total_gap_s,
+    }
+
+
+def compute_valid_session_duration(cap_df: pd.DataFrame,
+                                    max_gap_s: float = 1.0) -> float:
+    """Return the true valid data duration of a (possibly trimmed) capacitive file.
+
+    For un-trimmed files this equals elapsed_time.max() - elapsed_time.min().
+    For trimmed files (where trim_baseline_spikes.py removed rows) the
+    elapsed_time column retains the original timestamps from the full session,
+    so elapsed_time.max() would over-count by the total trimmed time.
+
+    This function sums only the inter-sample intervals that are <= max_gap_s
+    (normal ~20 ms steps at 50 Hz), giving the total time actually covered by
+    valid data — excluding any removed segments.
+
+    Parameters
+    ----------
+    cap_df    : DataFrame with an 'elapsed_time' column
+    max_gap_s : inter-sample threshold above which an interval counts as a gap
+
+    Returns
+    -------
+    float — valid data duration in seconds (NaN if elapsed_time is absent)
+    """
+    if 'elapsed_time' not in cap_df.columns:
+        return float('nan')
+    times = pd.to_numeric(cap_df['elapsed_time'], errors='coerce').dropna().values
+    if len(times) < 2:
+        return float(times[0]) if len(times) == 1 else 0.0
+    diffs = np.diff(times)
+    return float(diffs[diffs <= max_gap_s].sum())
+
 
 def compute_session_distance(treadmill_df):
     """Compute total distance traversed in a session from raw treadmill data.
@@ -128,6 +473,123 @@ def generate_colors(n):
         rgb = colorsys.hsv_to_rgb(hue, saturation, value)
         colors.append(rgb)
     return colors
+
+# ── Canonical condition colours ───────────────────────────────────────────────
+_COLOR_0PCT  = "#000000"   # 0% CA starting condition (black)
+_COLOR_2PCT  = "#e8262a"   # 2% CA starting condition (red)
+_COLOR_OTHER = "#7f3f98"   # fallback (purple)
+
+
+def _condition_to_color(label: str) -> str:
+    """Map a starting_condition label to its canonical hex colour."""
+    lo = str(label).lower()
+    if "0%" in lo:
+        return _COLOR_0PCT
+    if "2%" in lo:
+        return _COLOR_2PCT
+    return _COLOR_OTHER
+
+
+def _fmt_p(p: float) -> str:
+    """Format a p-value as scientific notation for plot annotations."""
+    if p < 0.05:
+        return f'p={p:.2e}'
+    return f'p={p:.2e}\n(ns)'
+
+
+
+def apply_common_plot_style(
+    ax,
+    start_x_at_zero: bool = False,
+    remove_top_right: bool = True,
+    remove_x_margins: bool = True,
+    remove_y_margins: bool = True,
+    ticks_in: bool = True,
+    draw_zero_dotted_line: bool = True,
+):
+    """Apply common styling: remove top/right spines, set tick directions, adjust margins."""
+    if remove_top_right:
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+
+    if ticks_in:
+        ax.tick_params(direction='in', which='both', length=5)
+
+    if remove_x_margins:
+        ax.margins(x=0)
+
+    if remove_y_margins:
+        ax.margins(y=0)
+        ax.autoscale(axis='y', tight=True)
+
+    if start_x_at_zero:
+        left, right = ax.get_xlim()
+        ax.set_xlim(left=0, right=right)
+
+    if draw_zero_dotted_line:
+        try:
+            ax.axhline(0, linestyle='-', color='0', linewidth=1.0, alpha=0.8, zorder=1)
+        except Exception:
+            pass
+
+    return ax
+
+
+def _auto_integer_step(
+    vmin: float,
+    vmax: float,
+    target_ticks: int = 7,
+    allow_sub5: bool = False,
+) -> int:
+    """Choose a 'nice' integer step so about target_ticks cover the range."""
+    if not (np.isfinite(vmin) and np.isfinite(vmax)):
+        return 1
+    range_int = int(abs(math.ceil(vmax) - math.floor(vmin)))
+    if range_int <= 0:
+        return 1
+    approx = max(1.0, range_int / max(1, target_ticks))
+    pow10 = 10 ** int(math.floor(math.log10(approx)))
+    multipliers = (1, 2, 2.5, 3, 4, 5) if allow_sub5 else (1, 2, 5)
+    for m in multipliers:
+        step = int(max(1, math.ceil(m * pow10)))
+        if range_int / step <= target_ticks:
+            return step
+    return int(max(1, 10 * pow10))
+
+
+def _apply_integer_axis(
+    ax,
+    *,
+    axis: str,
+    data_min: float,
+    data_max: float,
+    step: int,
+    clamp_min=None,
+    left_pad_steps: int = 0,
+    right_pad_steps: int = 1,
+) -> None:
+    """Apply integer ticks and limits to the chosen axis with one extra step beyond data."""
+    step = int(max(1, step))
+    base_start = int(math.floor(data_min / step) * step)
+    base_end_tick = int(math.ceil(data_max / step) * step)
+    tick_start = base_start - left_pad_steps * step
+    tick_end = base_end_tick + right_pad_steps * step
+    start = tick_start
+    if clamp_min is not None and start < clamp_min:
+        start = clamp_min
+    end = int(data_max) + right_pad_steps * step
+    if end <= start:
+        end = start + step
+    all_ticks = list(range(tick_start, tick_end + 1, step))
+    ticks = [t for t in all_ticks if start <= t <= end]
+    if axis == 'x':
+        ax.set_xlim(start, end)
+        ax.set_xticks(ticks)
+        ax.xaxis.set_major_formatter(mticker.FormatStrFormatter('%d'))
+    elif axis == 'y':
+        ax.set_ylim(start, end)
+        ax.set_yticks(ticks)
+        ax.yaxis.set_major_formatter(mticker.FormatStrFormatter('%.0f'))
 
 # ── Locomotion bout detection constants ──────────────────────────────────────
 BOUT_THRESHOLD_CM_S  = 2.0   # cm/s — minimum speed to count as moving
@@ -306,6 +768,14 @@ def test_matching_logic(trial_log_path):
 EPOCH_WINDOW_S       = 5            # half-window size (seconds each side of event)
 EPOCH_N_SAMPLES      = 501          # canonical time-axis length (10 s / 0.02 s + 1)
 EPOCH_CANONICAL_TIME = np.linspace(-EPOCH_WINDOW_S, EPOCH_WINDOW_S, EPOCH_N_SAMPLES)
+# Lick-epoch time axis: 250 ms steps over the same ±5 s window (41 points).
+# Used with a 500 ms sliding window to give biologically meaningful lick-rate estimates.
+LICK_EPOCH_TIME      = np.arange(-EPOCH_WINDOW_S, EPOCH_WINDOW_S + 1e-9, 0.25)
+
+# ── Manual y-axis limit for lick-rate epoch plots ────────────────────────────
+# Set to a tuple e.g. (0, 8) to fix the y-axis on all four lick epoch plots.
+# Leave as None to use automatic (data-driven) limits.
+_LICK_EPOCH_YLIM: tuple | None = (0, 8)
 
 
 def _extract_reward_zone_entry_times(trial_log_df):
@@ -421,9 +891,13 @@ def _extract_punish_zone_entry_times(trial_log_df):
         return []
 
     zone_entry_times = []
+    # Determine which timestamp column to use for this trial log
+    _time_col = ('texture_change_time'
+                 if 'texture_change_time' in trial_log_df.columns
+                 else 'stay_texture_change_time')
     for _, log_row in trial_log_df.iterrows():
         raw_hist = log_row.get('texture_history', '')
-        raw_time = log_row.get('texture_change_time', '')
+        raw_time = log_row.get(_time_col, '')
         if pd.isna(raw_hist) or raw_hist == '':
             continue
         # safe_literal_eval returns the string itself when it cannot parse a
@@ -492,28 +966,547 @@ def _build_epoch_matrix(time_array, data_array, event_times,
     return np.array(rows, dtype=float)
 
 
+def _build_lick_epoch_matrix(lick_event_times, event_times,
+                              window_s=EPOCH_WINDOW_S,
+                              canonical_time=LICK_EPOCH_TIME,
+                              bin_s=0.5):
+    """Build an epoch matrix of raw lick counts aligned to zone entry times.
+
+    For each zone entry in *event_times* and each point on the canonical time
+    axis, counts the lick timestamps that fall within a sliding window of
+    *bin_s* seconds centred on that time point.  Returns raw counts (integers
+    as float64) — NOT divided by bin width — so the y-axis is in licks per
+    bin (licks per 500 ms window by default).
+
+    Parameters
+    ----------
+    lick_event_times : np.ndarray (1-D) — absolute timestamps of detected lick events.
+    event_times      : sequence of float — zone-entry timestamps (absolute seconds).
+    window_s         : float — half-window size in seconds (epoch span).
+    canonical_time   : np.ndarray (1-D) — target time axis (relative to each event).
+    bin_s            : float — sliding window width in seconds (default 0.5 s).
+
+    Returns
+    -------
+    np.ndarray of shape (n_events, len(canonical_time)), dtype float64, in licks/bin.
+    Returns None if lick_event_times or event_times is empty.
+    """
+    if len(lick_event_times) == 0 or len(event_times) == 0:
+        return None
+    half = bin_s / 2.0
+    rows = []
+    for t0 in event_times:
+        t_abs = canonical_time + t0          # absolute time axis for this epoch
+        rate = np.array(
+            [np.sum((lick_event_times >= (ta - half)) & (lick_event_times < (ta + half)))
+             for ta in t_abs],
+            dtype=float,
+        )                                    # raw lick count per bin (no division by bin width)
+        rows.append(rate)
+    return np.array(rows, dtype=float)
+
+
+def _filter_event_times_by_gaps(event_times, gap_info, window_s=EPOCH_WINDOW_S):
+    """Return only those event times whose ±window_s epoch does not overlap a gap.
+
+    Used to exclude trials from capacitive/lick epoch plots and latency
+    calculations when the capacitive file has been trimmed and a data gap
+    falls inside the analysis window.
+
+    Parameters
+    ----------
+    event_times : sequence of float — event timestamps in seconds.
+    gap_info    : dict returned by detect_capacitive_gaps.
+    window_s    : float — half-window size in seconds (default = EPOCH_WINDOW_S).
+
+    Returns
+    -------
+    list of float — event times whose epoch is fully within a continuous data segment.
+    """
+    if not gap_info['has_gaps'] or len(event_times) == 0:
+        return list(event_times)
+    gaps = gap_info['gaps']  # list of (t_start, t_end, duration)
+    return [
+        t0 for t0 in event_times
+        if not any(g[0] < t0 + window_s and g[1] > t0 - window_s for g in gaps)
+    ]
+
+
+# ── Shuffle Z-score helpers ──────────────────────────────────────────────────
+
+def _compute_post_entry_slowing_zscores(
+    speed_epoch_session_means,
+    speed_epoch_session_indices,
+    n_sessions: int,
+    n_shuffles: int = 200,
+    post_window: tuple = (0.5, 2.5),
+    seed: int = 42,
+) -> 'np.ndarray':
+    """Compute per-session post-entry slowing Z-score from session-mean speed epoch traces.
+
+    For each session's mean epoch trace (±EPOCH_WINDOW_S around reward zone entry),
+    the real post-entry window mean is compared to a null distribution built by
+    circularly shifting the trace by random offsets.  Circular shift preserves the
+    overall speed distribution and temporal autocorrelation of the epoch while
+    breaking the alignment to zone entry.
+
+    Parameters
+    ----------
+    speed_epoch_session_means : np.ndarray, shape (n_with_data, n_timebins)
+    speed_epoch_session_indices : np.ndarray, shape (n_with_data,) — 0-based session indices
+    n_sessions : total number of sessions in results_df for this mouse
+    n_shuffles : number of circular-shift permutations per session
+    post_window : (t_start, t_end) in seconds — window to measure post-entry speed
+    seed : random seed for reproducibility
+
+    Returns
+    -------
+    z_arr : np.ndarray, shape (n_sessions,)
+        Negative Z → post-entry speed is LOWER than the shuffle null (slowing inside zone).
+        Positive Z → post-entry speed is HIGHER than the shuffle null (faster than chance).
+        NaN for sessions without speed epoch data.
+    """
+    z_arr = np.full(n_sessions, np.nan)
+    if speed_epoch_session_means is None or len(speed_epoch_session_means) == 0:
+        return z_arr
+
+    post_mask = (
+        (EPOCH_CANONICAL_TIME >= post_window[0]) &
+        (EPOCH_CANONICAL_TIME <= post_window[1])
+    )
+    if not np.any(post_mask):
+        return z_arr
+
+    rng = np.random.default_rng(seed)
+    for i in range(len(speed_epoch_session_means)):
+        trace = speed_epoch_session_means[i]
+        valid = trace[~np.isnan(trace)]
+        if len(valid) < 2:
+            continue
+        real_post = np.nanmean(trace[post_mask])
+        if np.isnan(real_post):
+            continue
+        n_timebins = len(trace)
+        shifts = rng.integers(1, n_timebins, size=n_shuffles)
+        shuf_posts = np.array([
+            np.nanmean(np.roll(trace, int(s))[post_mask])
+            for s in shifts
+        ])
+        shuf_mean = float(np.nanmean(shuf_posts))
+        shuf_std  = float(np.nanstd(shuf_posts, ddof=1))
+        if shuf_std > 0:
+            # Standard Z-score: negative = real < null = slower than chance (slowing)
+            z = (real_post - shuf_mean) / shuf_std
+        else:
+            z = 0.0
+        sess_idx = (
+            int(speed_epoch_session_indices[i])
+            if speed_epoch_session_indices is not None
+            else i
+        )
+        if sess_idx < n_sessions:
+            z_arr[sess_idx] = z
+    return z_arr
+
+
+def _compute_true_zone_zscores(
+    treadmill_paths,
+    zone_periods_per_session,
+    session_indices_or_none,
+    n_sessions: int,
+    n_shuffles: int = 200,
+    seed: int = 42,
+) -> 'np.ndarray':
+    """Compute per-session slowing Z-score using true zone occupancy periods.
+
+    For each session the mean uniformly-resampled treadmill speed (cm/s) during
+    ALL actual zone windows is compared against a circular-shift null.
+    For reward zones the window end is clipped to the reward delivery time
+    (if one occurred) so that post-reward stopping/drinking is excluded.
+
+    Parameters
+    ----------
+    treadmill_paths : list of (str | None), length == len(zone_periods_per_session)
+        Raw treadmill CSV path for each session; None / non-file entries are skipped.
+    zone_periods_per_session : list of list-of-(entry, exit) tuples
+        Reward or punishment zone occupancy windows (seconds) for each session.
+    session_indices_or_none : None | list of int
+        None  → list position is the session index (one entry per session, same
+                order as results_df).
+        list  → explicit 0-based session index for each entry (legacy mapping).
+    n_sessions : int  total sessions for this mouse
+    n_shuffles, seed : shuffle parameters
+
+    Returns
+    -------
+    z_arr : np.ndarray, shape (n_sessions,)
+        Negative Z → speed inside zone is LOWER than shuffle null (slowing).
+        Positive Z → speed inside zone is HIGHER than shuffle null (faster than chance).
+        NaN for sessions without treadmill data or zone periods.
+    """
+    z_arr = np.full(n_sessions, np.nan)
+    if not treadmill_paths or not zone_periods_per_session:
+        return z_arr
+
+    rng = np.random.default_rng(seed)
+    for i, (tm_path, zone_periods) in enumerate(
+            zip(treadmill_paths, zone_periods_per_session)):
+        if not zone_periods:
+            continue
+        if not isinstance(tm_path, str) or not os.path.isfile(tm_path):
+            continue
+        try:
+            _tm = pd.read_csv(tm_path)
+            t_arr, sp_arr = uniformly_sample_treadmill(_tm)
+        except Exception:
+            continue
+        if len(sp_arr) < 2:
+            continue
+        # Build sample-level mask covering all zone occupancy windows
+        zone_mask = np.zeros(len(sp_arr), dtype=bool)
+        for entry, exit_ in zone_periods:
+            zone_mask |= (t_arr >= entry) & (t_arr <= exit_)
+        if not np.any(zone_mask):
+            continue
+        real_mean = float(np.nanmean(sp_arr[zone_mask]))
+        if np.isnan(real_mean):
+            continue
+        n_bins = len(sp_arr)
+        shifts = rng.integers(1, n_bins, size=n_shuffles)
+        shuf_means = np.array([
+            float(np.nanmean(np.roll(sp_arr, int(s))[zone_mask]))
+            for s in shifts
+        ])
+        shuf_mean = float(np.nanmean(shuf_means))
+        shuf_std  = float(np.nanstd(shuf_means, ddof=1))
+        if shuf_std > 0:
+            # Standard Z-score: negative = real < null = slower than chance (slowing)
+            z = (real_mean - shuf_mean) / shuf_std
+        else:
+            z = 0.0
+        sess_idx = (
+            int(session_indices_or_none[i])
+            if session_indices_or_none is not None
+            else i
+        )
+        if sess_idx < n_sessions:
+            z_arr[sess_idx] = z
+    return z_arr
+
+
+def _compute_zone_zscore_window(
+    t_arr,
+    sp_arr,
+    zone_periods,
+    start_t: float,
+    end_t: float,
+    n_shuffles: int = 200,
+    rng=None,
+) -> float:
+    """Compute a shuffle Z-score for zone speed within a single level window.
+
+    Clips the uniformly-sampled treadmill arrays and zone periods to
+    [start_t, end_t), then runs the same circular-shift permutation as
+    _compute_true_zone_zscores on just that slice.
+
+    Parameters
+    ----------
+    t_arr, sp_arr : 1-D arrays (uniformly-sampled time / speed)
+    zone_periods  : list of (entry, exit) tuples (global-time seconds)
+    start_t, end_t: level window boundaries (seconds)
+    n_shuffles    : number of circular-shift shuffles
+    rng           : numpy random Generator (created internally if None)
+
+    Returns
+    -------
+    float Z-score, or np.nan if insufficient data
+    """
+    if rng is None:
+        rng = np.random.default_rng(42)
+    win_mask = (t_arr >= start_t) & (t_arr < end_t)
+    t_win  = t_arr[win_mask]
+    sp_win = sp_arr[win_mask]
+    if len(sp_win) < 4:
+        return float('nan')
+    zone_mask = np.zeros(len(sp_win), dtype=bool)
+    for entry, exit_ in zone_periods:
+        eff_entry = max(entry, start_t)
+        eff_exit  = min(exit_,  end_t)
+        if eff_exit > eff_entry:
+            zone_mask |= (t_win >= eff_entry) & (t_win <= eff_exit)
+    if not np.any(zone_mask) or not np.any(~zone_mask):
+        return float('nan')
+    real_mean = float(np.nanmean(sp_win[zone_mask]))
+    if np.isnan(real_mean):
+        return float('nan')
+    n_bins = len(sp_win)
+    shifts = rng.integers(1, n_bins, size=n_shuffles)
+    shuf_means = np.array([
+        float(np.nanmean(np.roll(sp_win, int(s))[zone_mask]))
+        for s in shifts
+    ])
+    shuf_mean = float(np.nanmean(shuf_means))
+    shuf_std  = float(np.nanstd(shuf_means, ddof=1))
+    if shuf_std > 0:
+        return float((real_mean - shuf_mean) / shuf_std)
+    return 0.0
+
+
+# ── RV-cohort helpers ─────────────────────────────────────────────────────────
+
+def _is_rv_cohort(mouse_name: str) -> bool:
+    """Return True if *mouse_name* belongs to the RV cohort.
+
+    RV mice are identified by the naming prefix 'RV' (case-insensitive),
+    e.g. RV1, RV2, RV10.  Their reward delivery time relative to zone entry
+    is variable (not the fixed 0.65 s used for other cohorts), so downstream
+    calculations must use the actual matched delivery time instead.
+    """
+    return str(mouse_name).upper().startswith('RV')
+
+
+def _match_rewards_to_zones(trial_log_df, max_window_s: float = 30.0):
+    """Match each reward delivery event to its preceding reward zone entry.
+
+    Used for cohorts (e.g. RV) where reward delivery delay is variable rather
+    than a fixed offset from zone entry.  For each ``reward_event`` (and
+    ``hits_event``) timestamp, the function finds the most recent
+    ``stay_texture_change_time`` that preceded it within *max_window_s* and
+    pairs them.
+
+    The zone-entry times are extracted with the same logic as
+    :func:`_extract_reward_zone_entry_times` (re-entry filtering included), so
+    ``test_matching_logic`` remains fully valid as an independent diagnostic.
+
+    Parameters
+    ----------
+    trial_log_df : pd.DataFrame
+        Trial log loaded from a ``*_trial_log.csv`` file.
+    max_window_s : float
+        Maximum allowed zone-entry → reward-delivery interval (seconds).
+        Pairs with a delay outside this range are discarded.
+
+    Returns
+    -------
+    list of (zone_entry_time: float, reward_delivery_time: float)
+        Sorted by zone entry time.  Empty list if required columns are absent
+        or no matches are found.
+    """
+    if 'reward_event' not in trial_log_df.columns:
+        return []
+
+    zone_times = np.array(_extract_reward_zone_entry_times(trial_log_df))
+    if len(zone_times) == 0:
+        return []
+
+    reward_times = pd.to_numeric(
+        trial_log_df['reward_event'], errors='coerce').dropna().values
+    hits_times = (pd.to_numeric(trial_log_df['hits_event'], errors='coerce').dropna().values
+                  if 'hits_event' in trial_log_df.columns else np.array([]))
+    all_delivery_times = np.sort(np.concatenate([reward_times, hits_times]))
+
+    if _DIAGNOSTIC_MODE:
+        print(f"    [MATCH] _match_rewards_to_zones: {len(zone_times)} zone entries, "
+              f"{len(all_delivery_times)} reward delivery events")
+
+    matched = []
+    unmatched = []
+    for r_t in all_delivery_times:
+        # All zone entries that precede this reward within the allowed window
+        candidates = zone_times[(zone_times < r_t) & (r_t - zone_times <= max_window_s)]
+        if len(candidates) == 0:
+            if _DIAGNOSTIC_MODE:
+                unmatched.append(r_t)
+            continue
+        # Pair with the most recent preceding zone entry
+        z_t = float(candidates[-1])
+        matched.append((z_t, float(r_t)))
+        if _DIAGNOSTIC_MODE:
+            print(f"      reward@{r_t:.3f}s  ←  zone@{z_t:.3f}s  (delay {r_t - z_t:.3f}s)")
+
+    if _DIAGNOSTIC_MODE and unmatched:
+        print(f"      [MATCH] {len(unmatched)} reward(s) had NO preceding zone within {max_window_s}s:")
+        for _u in unmatched:
+            print(f"        reward@{_u:.3f}s — skipped")
+    if _DIAGNOSTIC_MODE:
+        print(f"    [MATCH] → {len(matched)} matched pairs")
+
+    return sorted(matched, key=lambda x: x[0])
+
+
+# ── Mann-Whitney U report writer ──────────────────────────────────────────────
+
+def _write_mwu_report(
+    output_dir,
+    filename_stem: str,
+    measure: str,
+    comparisons: list,
+    n_bootstrap: int = 2000,
+    seed: int = 42,
+) -> None:
+    """Write a formatted Mann-Whitney U test report (.txt) to *output_dir*.
+
+    Parameters
+    ----------
+    output_dir : str | None
+        Directory in which to write the report.  Silently skipped if None.
+    filename_stem : str
+        Base filename (no extension, no timestamp).
+    measure : str
+        Human-readable label for the measure being compared.
+    comparisons : list of (str, str, array-like, array-like)
+        One entry per comparison: (label_a, label_b, values_a, values_b).
+    n_bootstrap : int
+        Bootstrap resamples for the 95 % CI on the Hodges-Lehmann estimator.
+    seed : int
+        RNG seed for reproducible bootstrap CI.
+    """
+    if output_dir is None:
+        return
+    try:
+        from scipy.stats import mannwhitneyu as _mwu_fn
+        os.makedirs(output_dir, exist_ok=True)
+
+        rows = []
+        for (la, lb, arr_a, arr_b) in comparisons:
+            a = np.asarray(arr_a, dtype=float)
+            b = np.asarray(arr_b, dtype=float)
+            a = a[~np.isnan(a)]
+            b = b[~np.isnan(b)]
+            if len(a) < 2 or len(b) < 2:
+                continue
+            u_stat, p_raw = _mwu_fn(a, b, alternative='two-sided')
+            r_rb = 1.0 - 2.0 * float(u_stat) / (len(a) * len(b))
+            diffs = (a[:, None] - b[None, :]).ravel()
+            hl_est = float(np.median(diffs))
+            rng_bs = np.random.default_rng(seed)
+            hl_boots = []
+            for _ in range(n_bootstrap):
+                ab = rng_bs.choice(a, size=len(a), replace=True)
+                bb = rng_bs.choice(b, size=len(b), replace=True)
+                hl_boots.append(float(np.median((ab[:, None] - bb[None, :]).ravel())))
+            ci_lo = float(np.percentile(hl_boots, 2.5))
+            ci_hi = float(np.percentile(hl_boots, 97.5))
+            rows.append({
+                'la': la, 'lb': lb,
+                'na': len(a), 'nb': len(b),
+                'u': float(u_stat), 'p_raw': float(p_raw),
+                'r_rb': r_rb, 'hl_est': hl_est,
+                'ci_lo': ci_lo, 'ci_hi': ci_hi,
+            })
+
+        if not rows:
+            return
+
+        k = len(rows)
+        # Holm-Bonferroni correction
+        correction_label = ('Holm-Bonferroni' if k > 1
+                            else 'None (single pairwise comparison)')
+        sorted_idx = sorted(range(k), key=lambda i: rows[i]['p_raw'])
+        p_adjs = [None] * k
+        prev_adj = 0.0
+        for rank, idx in enumerate(sorted_idx):
+            adj = min(rows[idx]['p_raw'] * (k - rank), 1.0)
+            adj = max(adj, prev_adj)
+            p_adjs[idx] = adj
+            prev_adj = adj
+        for i, row in enumerate(rows):
+            row['p_adj'] = p_adjs[i]
+
+        ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        ts_file = datetime.now().strftime('%Y%m%d_%H%M%S')
+        outpath = os.path.join(output_dir, f'{filename_stem}_mwu_{ts_file}.txt')
+        SEP  = '=' * 90
+        SEP2 = '-' * 90
+        hdr = (f'{"Comparison":<44} {"nA":>4} {"nB":>4}  {"U":>10}  '
+               f'{"p(raw)":>9}  {"p(adj)":>9}  {"r_rb":>7}  {"HL_est":>9}  95% CI')
+        lines = [
+            SEP,
+            f'MANN-WHITNEY U TEST RESULTS  --  {measure}',
+            SEP,
+            f'Generated  : {ts}',
+            f'Measure    : {measure}',
+            f'Correction : {correction_label}',
+            '',
+            'Field definitions:',
+            '  U        : Mann-Whitney U statistic',
+            '  p(raw)   : Two-sided p-value (uncorrected)',
+            f'  p(adj)   : Adjusted p-value ({correction_label})',
+            '  r_rb     : Rank-biserial correlation (effect size; 1 \u2212 2U/(nA\xd7nB))',
+            '             |r| < 0.3 = small, 0.3\u20130.5 = medium, > 0.5 = large',
+            '  HL_est   : Hodges-Lehmann location shift (median of all pairwise diffs A\u2212B)',
+            f'  95% CI   : Bootstrap CI (n={n_bootstrap:,} resamples) on Hodges-Lehmann estimator',
+            '',
+            hdr,
+            SEP2,
+        ]
+        for row in rows:
+            comp_label = f'{row["la"]} vs {row["lb"]}'
+            ci_str = f'[{row["ci_lo"]:.4f}, {row["ci_hi"]:.4f}]'
+            lines.append(
+                f'{comp_label:<44} {row["na"]:>4} {row["nb"]:>4}  '
+                f'{row["u"]:>10.2f}  {row["p_raw"]:>9.4f}  {row["p_adj"]:>9.4f}  '
+                f'{row["r_rb"]:>7.4f}  {row["hl_est"]:>9.4f}  {ci_str}'
+            )
+        lines += [
+            '',
+            'Significance: * p(adj)<0.05   ** p(adj)<0.01   *** p(adj)<0.001',
+            SEP,
+        ]
+        with open(outpath, 'w', encoding='utf-8') as fh:
+            fh.write('\n'.join(lines) + '\n')
+        print(f'  [MWU REPORT] {os.path.basename(outpath)}')
+    except Exception as _mwu_rep_err:
+        print(f'  [WARN] _write_mwu_report failed for "{filename_stem}": {_mwu_rep_err}')
+
+
 # ── Plot selection ────────────────────────────────────────────────────────────
 _ALL_PLOT_KEYS = {
     'speed', 'sensitivity', 'lick_count', 'reward_count',
     'false_alarms', 'correct_rejections', 'specificity', 'dprime',
-    'avg_reward', 'sex_reward',
+    'avg_reward', 'sex_reward', 'avg_sex_speed',
     'distance', 'sex_distance', 'condition_distance',
     'condition_distance_bar', 'total_distance_bar',
+    'immobility_prop', 'level_immobility_prop', 'level_rew_zone_immobility_prop', 'level_rew_zone_immobility_prop_cond',
     'condition_reward', 'condition_speed', 'condition_lick', 'condition_bar', 'condition_speed_bar',
+    'condition_sensitivity', 'condition_sensitivity_bar',
     'levels', 'level_speed', 'level_speed_condition',
     'avg_lick_rate', 'sex_lick_rate', 'condition_lick_rate', 'condition_lick_bar',
     'level_lick', 'level_lick_condition',
+    'level_sensitivity',
     'level_dist', 'level_dist_condition', 'level_dist_condition_excl_last',
     'bout_count', 'avg_bout_count', 'condition_bout_count', 'condition_bout_count_bar',
+    'rewards_per_bout', 'condition_rewards_per_bout', 'condition_rewards_per_bout_bar',
+    'weekday_reward_bar', 'weekday_reward_bar_condition',
+    'first_lick_latency', 'condition_first_lick_latency', 'condition_first_lick_latency_bar',
     'level_bout', 'level_bout_condition',
     'bout_avg_speed', 'condition_bout_avg_speed', 'condition_bout_avg_speed_bar',
     'bout_avg_dist',  'condition_bout_avg_dist',  'condition_bout_avg_dist_bar',
     'level_bout_avg_speed', 'level_bout_avg_speed_condition',
     'level_bout_avg_dist',  'level_bout_avg_dist_condition',
+    'last_level_bar',
+    'level_survivor',
+    'time_to_level2',
+    'level_progression_indiv',
+    'level_progression_condition',
+    'level_progression_bar',
+    'lick_after_reward_prop', 'lick_after_reward_prop_bar', 'lick_after_reward_prop_5s_bar',
+    'epoch_delivery_speed_sess', 'epoch_delivery_cap_sess', 'epoch_delivery_lick_sess',
+    'epoch_delivery_cap_diff_entry',
+    'epoch_delivery_cap_diff_065s',
+    'epoch_delivery_lick_diff_065s',
+    'condition_shuffle_zscore', 'condition_shuffle_zscore_bar',
+    'level_shuffle_zscore',
+    'condition_punish_shuffle_zscore', 'condition_punish_shuffle_zscore_bar',
+    'level_punish_shuffle_zscore', 'level_punish_shuffle_zscore_line',
+    'level_punish_shuffle_zscore_cond',
+    'level_shuffle_zscore_line', 'level_shuffle_zscore_cond',
+    'epoch_reward_speed_sess_by_level', 'epoch_delivery_speed_sess_by_level',
     'epoch_reward_speed', 'epoch_reward_cap',
     'epoch_reward_speed_sess', 'epoch_reward_cap_sess',
     'epoch_reward_speed_early_late', 'epoch_reward_cap_early_late',
     'epoch_reward_speed_early_late_ev', 'epoch_reward_cap_early_late_ev',
+    'epoch_reward_speed_early_late_ev_clean', 'epoch_reward_cap_early_late_ev_clean',
     'epoch_reward_speed_sess_clean', 'epoch_reward_cap_sess_clean',
     'epoch_reward_speed_early_late_clean', 'epoch_reward_cap_early_late_clean',
     'epoch_punish_speed', 'epoch_punish_cap',
@@ -522,6 +1515,46 @@ _ALL_PLOT_KEYS = {
     'sex_speed', 'sex_distance_indiv', 'sex_reward_indiv',
     'epoch_reward_speed_sess_sex', 'epoch_reward_cap_sess_sex',
     'epoch_punish_speed_sess_sex', 'epoch_punish_cap_sess_sex',
+    'epoch_reward_speed_pre_post',
+    'epoch_reward_speed_diff',
+    'epoch_reward_cap_pre_post',
+    'epoch_reward_cap_diff',
+    'epoch_reward_speed_pre_post_entry',
+    'epoch_reward_speed_diff_entry',
+    'epoch_reward_speed_pre_post_entry_1s',
+    'epoch_reward_speed_diff_entry_1s',
+    'epoch_reward_speed_diff_entry_2s',
+    'epoch_reward_lick_count_sess',
+    'epoch_reward_lick_count_sess_clean',
+    'epoch_reward_lick_diff_entry_065s',
+    'epoch_punish_lick_count_sess',
+    'epoch_punish_lick_count_sess_clean',
+    'epoch_punish_speed_pre_post',
+    'epoch_punish_speed_diff',
+    'epoch_punish_speed_pre_post_entry',
+    'epoch_punish_speed_diff_entry',
+    'epoch_punish_speed_diff_entry_2s',
+    'epoch_punish_cap_pre_post',
+    'epoch_punish_cap_diff',
+    'epoch_punish_cap_pre_post_entry',
+    'epoch_punish_cap_diff_entry',
+    'lick_reward_ratio',
+    'condition_lick_reward_ratio',
+    'condition_lick_reward_ratio_bar',
+    'condition_punish_zone_pct_bar',
+    'expl_lick_reward_ratio_distfit',
+    'expl_speed_histogram',
+    'expl_speed_distfit',
+    'expl_speed_boxplot',
+    'expl_speed_rm_anova_resid',
+    'expl_cap_histogram',
+    'expl_cap_boxplot',
+    'expl_cap_rm_anova_resid',
+    'expl_cap_distfit',
+    'expl_lick_distfit',
+    'expl_lick_boxplot',
+    'expl_lick_rm_anova_resid',
+    'expl_lick_rate_distfit',
 }
 
 _PLOT_LABELS = [
@@ -529,17 +1562,57 @@ _PLOT_LABELS = [
     ('sensitivity',         'Individual: Sensitivity over time'),
     ('lick_count',          'Individual: Lick count over time'),
     ('reward_count',        'Individual: Reward count over time'),
+    ('lick_reward_ratio',       'Individual: Lick count / Reward count ratio over time'),
+    ('condition_lick_reward_ratio', 'Condition: Lick count / Reward count ratio over time by starting condition'),
+    ('condition_lick_reward_ratio_bar', 'Condition: Lick count / Reward count ratio — collapsed bar chart (one avg per mouse)'),
+    ('condition_punish_zone_pct_bar',   'Condition: % punishment zones across all sessions — collapsed bar chart (one value per mouse)'),
+
     ('false_alarms',        'Individual: False alarms over time'),
     ('correct_rejections',  'Individual: Correct rejections over time'),
     ('specificity',         'Individual: Specificity over time'),
     ('dprime',              "Individual: d' over time"),
     ('avg_reward',          'Aggregate: Average reward rate across all mice'),
     ('sex_reward',          'Aggregate: Sex-specific average reward rate'),
+    ('avg_sex_speed',      'Aggregate: Sex-specific average speed'),
     ('distance',            'Individual: Total distance per session (m)'),
+    ('immobility_prop',     'Individual: Proportion of session time immobile (raw speed = 0 cm/s for ≥ 2 s)'),
+    ('level_immobility_prop', 'Level: Immobility proportion by level — individual mice (requires transitions CSV)'),
+    ('level_rew_zone_immobility_prop', 'Level: Proportion of reward zone time immobile by level — individual mice (speed ≤ 0 for ≥ 250 ms; requires transitions CSV)'),
+    ('level_rew_zone_immobility_prop_cond', 'Level: Proportion of reward zone time immobile by level — condition mean \u00b1 SEM (speed ≤ 0 for ≥ 250 ms; requires transitions CSV)'),
     ('bout_count',               'Individual: Locomotion bout count per session'),
     ('avg_bout_count',           'Aggregate: Average bout count across all mice'),
     ('condition_bout_count',     'Condition: Bout count over time by condition'),
     ('condition_bout_count_bar', 'Condition: Average bout count — collapsed bar chart'),
+    ('rewards_per_bout',          'Individual: Average rewards per locomotion bout per session'),
+    ('condition_rewards_per_bout', 'Condition: Average rewards per bout over time by starting condition'),
+    ('condition_rewards_per_bout_bar', 'Condition: Average rewards per locomotion bout — collapsed bar chart (one avg per mouse)'),
+    ('weekday_reward_bar',           'Weekday: Average reward count by training weekday — all mice pooled'),
+    ('weekday_reward_bar_condition', 'Weekday: Average reward count by training weekday — split by starting condition'),
+    ('first_lick_latency',               'Individual: Average first-lick latency after reward delivery per session (s)'),
+    ('condition_first_lick_latency',     'Condition: Average first-lick latency after reward delivery over time by starting condition'),
+    ('condition_first_lick_latency_bar', 'Condition: Average first-lick latency after reward delivery — collapsed bar chart (one avg per mouse)'),
+    ('lick_after_reward_prop',     'Condition: Proportion of reward deliveries with licks in 2 s post-delivery window — line plot over time by condition'),
+    ('lick_after_reward_prop_bar', 'Condition: Proportion of reward deliveries with licks in 2 s post-delivery window — collapsed bar chart (one avg per mouse)'),
+    ('lick_after_reward_prop_5s_bar', 'Condition: Proportion of reward deliveries with licks in 5 s post-delivery window — collapsed bar chart (one avg per mouse)'),
+    ('epoch_delivery_speed_sess', 'Epoch: Treadmill speed — session-averaged, aligned to reward DELIVERY time (per-mouse + condition)'),
+    ('epoch_delivery_cap_sess',   'Epoch: Capacitive value (z-score) — session-averaged, aligned to reward DELIVERY time (gap-excluded; per-mouse + condition)'),
+    ('epoch_delivery_lick_sess',  'Epoch: Lick count — session-averaged, aligned to reward DELIVERY time (gap-excluded; per-mouse + condition)'),
+    ('epoch_delivery_cap_diff_entry', 'Epoch: Capacitive (z-scored) — post-minus-pre reward delivery difference bar chart (1 s windows), by condition (Mann-Whitney U)'),
+    ('epoch_delivery_cap_diff_065s',  'Epoch: Capacitive (z-scored) — post-minus-pre reward delivery difference bar chart (±0.65 s windows), by condition (Mann-Whitney U)'),
+    ('epoch_delivery_lick_diff_065s',  'Epoch: Lick rate (licks/s) — post-minus-pre reward delivery difference bar chart (±0.65 s windows), by condition (Mann-Whitney U)'),
+    ('condition_shuffle_zscore',     'Shuffle: Zone speed Z-score (reward zone) — line plot over sessions by condition (circular-shift permutation; −ve = slower than chance inside zone)'),
+    ('condition_shuffle_zscore_bar', 'Shuffle: Zone speed Z-score (reward zone) — collapsed bar chart, one avg per mouse by condition (Mann-Whitney U)'),
+    ('level_shuffle_zscore',         'Shuffle: Zone speed Z-score (reward zone) by level — grouped bar chart by condition (requires transitions CSV)'),
+    ('condition_punish_shuffle_zscore',     'Shuffle: Zone speed Z-score (punishment zone) — line plot over sessions by condition (circular-shift permutation; −ve = slower than chance inside zone)'),
+    ('condition_punish_shuffle_zscore_bar', 'Shuffle: Zone speed Z-score (punishment zone) — collapsed bar chart, one avg per mouse by condition (Mann-Whitney U)'),
+    ('level_punish_shuffle_zscore',         'Shuffle: Zone speed Z-score (punishment zone) by level — grouped bar chart by condition (requires transitions CSV)'),
+    ('level_shuffle_zscore_line',           'Shuffle: Zone speed Z-score (reward zone) by level — individual mouse line plot, colored by condition (requires transitions CSV)'),
+    ('level_shuffle_zscore_cond',           'Shuffle: Zone speed Z-score (reward zone) by level — condition mean ± SEM line plot (requires transitions CSV)'),
+    ('level_punish_shuffle_zscore_line',    'Shuffle: Zone speed Z-score (punishment zone) by level — individual mouse line plot, colored by condition (requires transitions CSV)'),
+    ('level_punish_shuffle_zscore_cond',    'Shuffle: Zone speed Z-score (punishment zone) by level — condition mean ± SEM line plot (requires transitions CSV)'),
+
+    ('epoch_reward_speed_sess_by_level',    'Epoch: Treadmill speed — level-averaged, aligned to reward zone entry, one panel per level (by condition, only mice at each level)'),
+    ('epoch_delivery_speed_sess_by_level',  'Epoch: Treadmill speed — level-averaged, aligned to reward DELIVERY, one panel per level (by condition, only mice at each level)'),
     ('sex_distance',        'Aggregate: Sex-specific average distance per session (m)'),
     ('condition_distance',  'Condition: Distance per session by starting condition (m)'),
     ('condition_distance_bar', 'Condition: Average distance per session — collapsed bar chart (m)'),
@@ -552,12 +1625,15 @@ _PLOT_LABELS = [
     ('condition_lick_rate', 'Condition: Lick rate over time (line)'),
     ('condition_bar',       'Condition: Reward rate — collapsed bar chart'),
     ('condition_speed_bar', 'Condition: Average speed — collapsed bar chart'),
+    ('condition_sensitivity',     'Condition: Sensitivity over time by starting condition (mean ± SEM)'),
+    ('condition_sensitivity_bar', 'Condition: Average sensitivity — collapsed bar chart (one avg per mouse; Mann-Whitney U test)'),
     ('condition_lick_bar',  'Condition: Lick rate — collapsed bar chart'),
     ('levels',              'Level: Reward rate by level (requires transitions CSV)'),
     ('level_speed',           'Level: Average speed by level — collapsed (requires transitions CSV)'),
     ('level_speed_condition', 'Level: Average speed by level — by condition (requires transitions CSV)'),
     ('level_lick',            'Level: Average lick rate by level — collapsed (requires transitions CSV)'),
     ('level_lick_condition',  'Level: Average lick rate by level — by condition (requires transitions CSV)'),
+    ('level_sensitivity',     'Level: Sensitivity by level — individual mice (requires transitions CSV)'),
     ('level_dist',            'Level: Distance traveled by level — collapsed (requires transitions CSV)'),
     ('level_dist_condition',  'Level: Distance traveled by level — by condition (requires transitions CSV)'),
     ('level_dist_condition_excl_last', 'Level: Distance traveled by level — by condition, last level excluded (requires transitions CSV)'),
@@ -567,6 +1643,12 @@ _PLOT_LABELS = [
     ('level_bout_avg_speed_condition', 'Level: Avg speed per bout by level — by condition (requires transitions CSV)'),
     ('level_bout_avg_dist',            'Level: Avg distance per bout by level — collapsed (requires transitions CSV)'),
     ('level_bout_avg_dist_condition',  'Level: Avg distance per bout by level — by condition (requires transitions CSV)'),
+    ('last_level_bar',                 'Level: Final (last day) level reached per mouse — collapsed bar chart by condition (requires transitions CSV)'),
+    ('level_survivor',                 'Level: Survivor plot — proportion of mice that experienced each level, by condition (requires transitions CSV)'),
+    ('time_to_level2',                 'Level: Cumulative time (min) until first level 1→2 transition — bar chart by condition (requires transitions CSV)'),
+    ('level_progression_indiv',      'Level: Ending level per session — individual mice (requires transitions CSV)'),
+    ('level_progression_condition',  'Level: Ending level per session — condition mean ± SEM line plot (requires transitions CSV)'),
+    ('level_progression_bar',        'Level: Rate of level change (slope of ending level vs session) — collapsed bar chart by condition (Mann-Whitney U; requires transitions CSV)'),  
     ('bout_avg_speed',               'Individual: Average speed per locomotion bout'),
     ('condition_bout_avg_speed',     'Condition: Average speed per bout over time'),
     ('condition_bout_avg_speed_bar', 'Condition: Average speed per bout — collapsed bar chart'),
@@ -581,6 +1663,8 @@ _PLOT_LABELS = [
     ('epoch_reward_cap_early_late',      'Epoch: Capacitive value — early vs late sessions, session-averaged, aligned to reward zone entry (per-mouse + condition)'),
     ('epoch_reward_speed_early_late_ev', 'Epoch: Treadmill speed — early vs late sessions, event-averaged, aligned to reward zone entry (per-mouse + condition)'),
     ('epoch_reward_cap_early_late_ev',   'Epoch: Capacitive value — early vs late sessions, event-averaged, aligned to reward zone entry (per-mouse + condition)'),
+    ('epoch_reward_speed_early_late_ev_clean', 'Epoch: Treadmill speed — early vs late sessions, event-averaged, by condition only (no individual traces)'),
+    ('epoch_reward_cap_early_late_ev_clean',   'Epoch: Capacitive value — early vs late sessions, event-averaged, by condition only (no individual traces)'),
     ('epoch_reward_speed_sess_clean',        'Epoch: Treadmill speed — session-averaged, by condition only (no individual traces)'),
     ('epoch_reward_cap_sess_clean',          'Epoch: Capacitive value — session-averaged, by condition only (no individual traces)'),
     ('epoch_reward_speed_early_late_clean',  'Epoch: Treadmill speed — early vs late sessions, session-averaged, by condition only (no individual traces)'),
@@ -598,13 +1682,52 @@ _PLOT_LABELS = [
     ('epoch_reward_cap_sess_sex',   'Epoch: Capacitive value — session-averaged, aligned to reward zone entry (by sex)'),
     ('epoch_punish_speed_sess_sex', 'Epoch: Treadmill speed — punishment zone, session-averaged, by sex'),
     ('epoch_punish_cap_sess_sex',   'Epoch: Capacitive value — punishment zone, session-averaged, by sex'),
+    ('epoch_reward_speed_pre_post',  'Epoch: Speed — pre- vs post-reward delivery bar chart, by condition (0–0.65 s vs 0.65–1.3 s)'),
+    ('epoch_reward_speed_diff',      'Epoch: Speed — post-minus-pre-reward difference bar chart, by condition (positive = faster after reward)'),
+    ('epoch_reward_cap_pre_post',    'Epoch: Capacitive (z-scored) — pre- vs post-reward delivery bar chart, by condition (0–0.65 s vs 0.65–1.3 s)'),
+    ('epoch_reward_cap_diff',        'Epoch: Capacitive (z-scored) — post-minus-pre-reward difference bar chart, by condition (Mann-Whitney U)'),
+    ('epoch_reward_speed_pre_post_entry', 'Epoch: Reward zone speed — 0.65 s pre- vs 0.65 s post-zone entry bar chart, by condition'),
+    ('epoch_reward_speed_diff_entry',     'Epoch: Reward zone speed — post-minus-pre zone entry difference bar chart (0.65 s windows), by condition'),
+    ('epoch_reward_speed_pre_post_entry_1s', 'Epoch: Reward zone speed — 1 s pre- vs 1 s post-zone entry bar chart, by condition'),
+    ('epoch_reward_speed_diff_entry_1s',     'Epoch: Reward zone speed — post-minus-pre zone entry difference bar chart (1 s windows), by condition'),
+    ('epoch_reward_speed_diff_entry_2s',     'Epoch: Reward zone speed — post-minus-pre zone entry difference bar chart (2 s windows), by condition'),
+    ('epoch_reward_lick_count_sess',       'Epoch: Lick rate — session-averaged, aligned to reward zone entry (per-mouse + condition)'),
+    ('epoch_reward_lick_count_sess_clean',  'Epoch: Lick rate — session-averaged, aligned to reward zone entry, condition average only (no individual traces)'),
+    ('epoch_reward_lick_diff_entry_065s',   'Epoch: Lick rate — post-minus-pre zone entry difference bar chart (±0.65 s windows), by condition (Mann-Whitney U)'),
+    ('epoch_punish_lick_count_sess',      'Epoch: Lick rate — session-averaged, aligned to punishment zone entry (per-mouse + condition)'),
+    ('epoch_punish_lick_count_sess_clean', 'Epoch: Lick rate — session-averaged, aligned to punishment zone entry, condition average only (no individual traces)'),
+    ('epoch_punish_speed_pre_post',  'Epoch: Punishment zone speed — pre vs post 0.65 s cutoff bar chart, by condition (0–0.65 s vs 0.65–1.3 s)'),
+    ('epoch_punish_speed_diff',      'Epoch: Punishment zone speed — post-minus-pre 0.65 s cutoff difference bar chart, by condition'),
+    ('epoch_punish_speed_pre_post_entry', 'Epoch: Punishment zone speed — 1 s pre- vs 1 s post-zone entry bar chart, by condition'),
+    ('epoch_punish_speed_diff_entry',     'Epoch: Punishment zone speed — post-minus-pre zone entry difference bar chart (1 s windows), by condition'),
+    ('epoch_punish_speed_diff_entry_2s',  'Epoch: Punishment zone speed — post-minus-pre zone entry difference bar chart (2 s windows), by condition'),
+    ('epoch_punish_cap_pre_post',    'Epoch: Punishment zone capacitive (z-scored) — pre vs post 0.65 s cutoff bar chart, by condition (0–0.65 s vs 0.65–1.3 s)'),
+    ('epoch_punish_cap_diff',        'Epoch: Punishment zone capacitive (z-scored) — post-minus-pre 0.65 s cutoff difference bar chart, by condition (Mann-Whitney U)'),
+    ('epoch_punish_cap_pre_post_entry', 'Epoch: Punishment zone capacitive (z-scored) — 1 s pre- vs 1 s post-zone entry bar chart, by condition'),
+    ('epoch_punish_cap_diff_entry',     'Epoch: Punishment zone capacitive (z-scored) — post-minus-pre zone entry difference bar chart (1 s windows), by condition (Mann-Whitney U)'),
+]
+
+_EXPL_PLOT_LABELS = [
+    ('expl_lick_reward_ratio_distfit',  'Exploratory: Per-mouse mean lick/reward ratio — KDE + Shapiro-Wilk normality test + Q-Q plot'),
+    ('expl_speed_histogram',       'Exploratory: Speed distribution — histogram (all session speeds + per-mouse means, Shapiro-Wilk)'),
+    ('expl_speed_distfit',         'Exploratory: Average speed distribution fit — Normal, Log-normal, Gamma (histogram + Q-Q + AIC comparison)'),
+    ('expl_speed_boxplot',         'Exploratory: Speed distribution — box and whisker (per-mouse + overall)'),
+    ('expl_speed_rm_anova_resid',  'Exploratory: Repeated-measures ANOVA residuals — Q-Q plot, histogram, residuals vs fitted (condition × session)'),
+    ('expl_cap_histogram',         'Exploratory: Z-scored mean capacitive sensor value distribution — histogram (all session values + per-mouse means, Shapiro-Wilk)'),
+    ('expl_cap_boxplot',           'Exploratory: Z-scored mean capacitive sensor value distribution — box and whisker (per-mouse + overall)'),
+    ('expl_cap_rm_anova_resid',    'Exploratory: Capacitive RM ANOVA residuals — Q-Q plot, histogram, residuals vs fitted (condition × session)'),
+    ('expl_cap_distfit',           'Exploratory: Capacitive sensor value distribution fit — Normal, Log-normal, Gamma (histogram + Q-Q + AIC comparison)'),
+    ('expl_lick_distfit',          'Exploratory: Lick count Poisson vs Negative Binomial distribution fit — rootogram, Q-Q, mean–variance, AIC/χ² comparison'),
+    ('expl_lick_boxplot',          'Exploratory: Raw lick count distribution — box and whisker (per-mouse + overall)'),
+    ('expl_lick_rm_anova_resid',   'Exploratory: Raw lick count RM ANOVA residuals — Q-Q plot, histogram, residuals vs fitted (DV = log(1+count), condition × session)'),
+    ('expl_lick_rate_distfit',     'Exploratory: Average lick rate distribution fit — Normal, Log-normal, Gamma (histogram + Q-Q + AIC comparison)'),
 ]
 
 
-def _ask_plot_selection(root):
+def _ask_plot_selection(root, labels=None, title='Select Plots to Generate'):
     """Show a scrollable checkbox dialog and return the frozenset of selected plot keys."""
     dialog = tk.Toplevel(root)
-    dialog.title('Select Plots to Generate')
+    dialog.title(title)
     dialog.resizable(True, True)
     dialog.grab_set()
 
@@ -652,8 +1775,10 @@ def _ask_plot_selection(root):
     inner.bind('<Button-5>',    _on_mousewheel)
 
     # ── Checkboxes ────────────────────────────────────────────────────────────
+    if labels is None:
+        labels = _PLOT_LABELS
     vars_ = {}
-    for key, label in _PLOT_LABELS:
+    for key, label in labels:
         var = tk.BooleanVar(value=True)
         vars_[key] = var
         cb = tk.Checkbutton(inner, text=label, variable=var, anchor='w')
@@ -691,7 +1816,7 @@ def _ask_plot_selection(root):
     return frozenset(key for key, var in vars_.items() if var.get())
 
 
-def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, selected_plots=None):
+def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, animal_markers=None, selected_plots=None, output_dir=None):
     """Analyze rewards/min for each level across all mice, split by starting condition.
 
     Uses a transitions CSV (produced by level_sorter.py) to slice each session's
@@ -718,17 +1843,21 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
     animal_level_accum: dict[tuple, dict] = {}
     # animal_id -> last level seen (updated each session; final value = potentially incomplete level)
     animal_last_level: dict[str, str] = {}
+    # (animal_id, session_num) -> session length in seconds (for time-to-level2 calculation)
+    animal_session_lengths: dict[tuple, float] = {}
+    # (animal_id, session_num) -> numeric ending level for level progression plots
+    animal_session_ending_level: dict[tuple, int] = {}
 
     # Load transitions CSV -------------------------------------------------------
     if not transitions_csv_path:
         print("  [WARN] No transitions CSV provided — level plot will be empty.")
-        return plt.figure(figsize=(15, 8)), None, None, None, None, None, None, None, None, None, None, None, None, None, None
+        return plt.figure(figsize=(15, 8)), None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None
     try:
         transitions_df = pd.read_csv(transitions_csv_path)
         transitions_df['date'] = pd.to_datetime(transitions_df['date'])
     except Exception as e:
         print(f"  [ERROR] Cannot read transitions CSV: {e}")
-        return plt.figure(figsize=(15, 8)), None, None, None, None, None, None, None, None, None, None, None, None, None, None
+        return plt.figure(figsize=(15, 8)), None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None
 
     # Build lookup (animal_id, date_normalised) -> {trial_log, capacitive} ------
     session_lookup = {}
@@ -771,50 +1900,98 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
             if 'reward_event' not in tl.columns or 'texture_change_time' not in tl.columns:
                 continue
 
-            # Session end time and lick event detection from capacitive data -----
-            lick_event_times = np.array([])
-            session_end_time = None
-            if isinstance(capacitive_path, str) and not pd.isna(capacitive_path):
-                try:
-                    cap = pd.read_csv(capacitive_path)
-                    if 'elapsed_time' in cap.columns:
-                        session_end_time = float(cap['elapsed_time'].max())
-                    if 'capacitive_value' in cap.columns:
-                        cap_df = cap.copy()
-                        cap_df['Time_sec'] = cap_df['elapsed_time']
-                        kde_val = get_cached_kde(capacitive_path)
-                        if kde_val is None:
-                            kde_val = lda.compute_KDE(cap_df, 'capacitive_value')
-                            cache_kde_value(capacitive_path, kde_val)
-                        cap_df = lda.compute_KDE_normalizations(cap_df, 'capacitive_value', kde_val)
-                        events_df, _ = lda.detect_events_above_threshold(
-                            cap_df, 'capacitive_value', threshold=None)
-                        mask_evt = events_df['capacitive_value_event'] == 1
-                        lick_event_times = events_df.loc[mask_evt, 'Time_sec'].values.astype(float)
-                except Exception:
-                    pass
-            if session_end_time is None:
-                tc_vals = tl['texture_change_time'].dropna()
-                session_end_time = float(tc_vals.max()) if len(tc_vals) else None
+            # ── Levels session cache (treadmill + lick) ───────────────────────
+            _lvl_ckey = _lvl_sess_cache_key(treadmill_path, capacitive_path)
+            _lvl_chit = _load_lvl_sess_cache(_lvl_ckey)
+            if _lvl_chit is not None:
+                treadmill_df     = _lvl_chit['treadmill_df']
+                lick_event_times = _lvl_chit['lick_event_times']
+                session_end_time = _lvl_chit['session_end_time']
+                gap_intervals    = _lvl_chit.get('gaps', [])
+                if _lvl_chit.get('has_gaps'):
+                    print(f"  [GAP] {animal_id} session {session_num}: "
+                          f"{_lvl_chit['n_gaps']} gap(s) detected in capacitive file "
+                          f"(cached, total trimmed: {_lvl_chit['total_gap_s']:.2f}s)")
+                if session_end_time is None:
+                    tc_vals = tl['texture_change_time'].dropna()
+                    session_end_time = float(tc_vals.max()) if len(tc_vals) else None
+            else:
+                # Session end time and lick event detection from capacitive data
+                lick_event_times = np.array([])
+                session_end_time = None
+                _gap_info_lvl    = {'has_gaps': False, 'n_gaps': 0, 'total_gap_s': 0.0, 'gaps': []}
+                gap_intervals    = []
+                if isinstance(capacitive_path, str) and not pd.isna(capacitive_path):
+                    try:
+                        cap = pd.read_csv(capacitive_path)
+                        if 'elapsed_time' in cap.columns:
+                            session_end_time = float(cap['elapsed_time'].max())
+                        if 'capacitive_value' in cap.columns:
+                            cap_df = cap.copy()
+                            cap_df['Time_sec'] = cap_df['elapsed_time']
 
-            # Load treadmill speed data for this session -----------------------
-            treadmill_df = None
-            if isinstance(treadmill_path, str) and not pd.isna(treadmill_path):
-                try:
-                    tm = pd.read_csv(treadmill_path)
-                    if 'global_time' in tm.columns and 'speed' in tm.columns:
-                        load_cols = ['global_time', 'speed']
-                        if 'distance' in tm.columns:
-                            load_cols.append('distance')
-                        treadmill_df = tm[load_cols].dropna(subset=['global_time', 'speed'])
-                        # Apply Butterworth low-pass (0.25 Hz, order 3) to full session speed
-                        if len(treadmill_df) >= 15:
-                            _fs_lvl = 1.0 / treadmill_df['global_time'].diff().median()
-                            _b_lvl, _a_lvl = butter(3, 0.25 / (_fs_lvl / 2.0), btype='low')
-                            treadmill_df = treadmill_df.copy()
-                            treadmill_df['speed'] = filtfilt(_b_lvl, _a_lvl, treadmill_df['speed'].values)
-                except Exception:
-                    pass
+                            # ── Gap detection ─────────────────────────────
+                            _gap_info_lvl = detect_capacitive_gaps(cap_df)
+                            if _gap_info_lvl['has_gaps']:
+                                print(f"  [GAP] {animal_id} session {session_num}: "
+                                      f"{_gap_info_lvl['n_gaps']} gap(s) detected in capacitive file "
+                                      f"(total trimmed: {_gap_info_lvl['total_gap_s']:.2f}s) — "
+                                      + ", ".join(f"{g[0]:.2f}s\u2013{g[1]:.2f}s"
+                                                  for g in _gap_info_lvl['gaps']))
+
+                            kde_val = get_cached_kde(capacitive_path)
+                            if kde_val is None:
+                                kde_val = lda.compute_KDE(cap_df, 'capacitive_value')
+                                cache_kde_value(capacitive_path, kde_val)
+                            cap_df = lda.compute_KDE_normalizations(cap_df, 'capacitive_value', kde_val)
+                            events_df, _ = lda.detect_events_above_threshold(
+                                cap_df, 'capacitive_value', threshold=None)
+                            mask_evt = events_df['capacitive_value_event'] == 1
+                            lick_event_times = events_df.loc[mask_evt, 'Time_sec'].values.astype(float)
+                    except Exception:
+                        pass
+                if session_end_time is None:
+                    tc_vals = tl['texture_change_time'].dropna()
+                    session_end_time = float(tc_vals.max()) if len(tc_vals) else None
+
+                # Load treadmill speed data for this session -------------------
+                treadmill_df = None
+                if isinstance(treadmill_path, str) and not pd.isna(treadmill_path):
+                    try:
+                        tm = pd.read_csv(treadmill_path)
+                        if 'global_time' in tm.columns and 'speed' in tm.columns:
+                            load_cols = ['global_time', 'speed']
+                            if 'distance' in tm.columns:
+                                load_cols.append('distance')
+                            treadmill_df = tm[load_cols].dropna(subset=['global_time', 'speed'])
+                            # Apply Butterworth low-pass (0.25 Hz, order 3) to full session speed
+                            if len(treadmill_df) >= 15:
+                                _gt_diffs_lvl = treadmill_df['global_time'].diff().dropna()
+                                _gt_diffs_lvl_pos = _gt_diffs_lvl[_gt_diffs_lvl > 0]
+                                if len(_gt_diffs_lvl_pos) > 0:
+                                    _fs_lvl = 1.0 / _gt_diffs_lvl_pos.median()
+                                else:
+                                    _fs_lvl = 50.0
+                                _nyq_lvl = _fs_lvl / 2.0
+                                _cutoff_lvl = min(0.25 / _nyq_lvl, 0.999)
+                                _b_lvl, _a_lvl = butter(3, _cutoff_lvl, btype='low')
+                                treadmill_df = treadmill_df.copy()
+                                treadmill_df['speed_raw'] = treadmill_df['speed'].copy()
+                                treadmill_df['speed'] = filtfilt(_b_lvl, _a_lvl, treadmill_df['speed'].values)
+                    except Exception:
+                        pass
+
+                # Save to cache ------------------------------------------------
+                _save_lvl_sess_cache(_lvl_ckey, {
+                    'treadmill_df':     treadmill_df,
+                    'lick_event_times': lick_event_times,
+                    'session_end_time': session_end_time,
+                    'has_gaps':         _gap_info_lvl['has_gaps'],
+                    'n_gaps':           _gap_info_lvl['n_gaps'],
+                    'total_gap_s':      _gap_info_lvl['total_gap_s'],
+                    'gaps':             _gap_info_lvl['gaps'],
+                })
+                gap_intervals = _gap_info_lvl['gaps']
 
             levels   = session_group['level'].tolist()
             trans_ts = session_group['transition_ts'].tolist()
@@ -838,6 +2015,42 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
             hits_events   = (tl['hits_event'].dropna().to_numpy(dtype=float)
                              if 'hits_event' in tl.columns else np.array([]))
 
+            # Precompute valid reward-zone entry times for sensitivity calculation
+            if 'stay_texture_change_time' in tl.columns:
+                _stay_times_full = pd.to_numeric(tl['stay_texture_change_time'], errors='coerce').dropna().values
+                _re_entry_set: set = set()
+                if 'zone_re_entry_time' in tl.columns:
+                    import ast as _ast_lv
+                    for _val in tl['zone_re_entry_time']:
+                        if pd.notna(_val) and _val != '':
+                            try:
+                                if isinstance(_val, str) and _val.strip():
+                                    try:
+                                        _re_list = _ast_lv.literal_eval(_val)
+                                        if isinstance(_re_list, (list, tuple)):
+                                            for _t in _re_list:
+                                                if pd.notna(_t):
+                                                    _re_entry_set.add(float(_t))
+                                        else:
+                                            _re_entry_set.add(float(_re_list))
+                                    except Exception:
+                                        pass
+                                elif not isinstance(_val, str):
+                                    _re_entry_set.add(float(_val))
+                            except (ValueError, TypeError):
+                                pass
+                _valid_zone_times_full = np.array([
+                    t for t in _stay_times_full
+                    if not any(abs(t - re) <= 0.05 for re in _re_entry_set)
+                ])
+            elif 'texture_history' in tl.columns:
+                _rw_rows = tl[tl['texture_history'] == 'assets/reward_mean100.jpg']
+                _valid_zone_times_full = pd.to_numeric(
+                    _rw_rows.get('texture_change_time', pd.Series()), errors='coerce'
+                ).dropna().values
+            else:
+                _valid_zone_times_full = np.array([])
+
             for i, level in enumerate(levels):
                 start_t = start_times[i]
                 end_t   = end_times[i]
@@ -846,6 +2059,15 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
                 duration_min = (end_t - start_t) / 60.0
                 if duration_min <= 0:
                     continue
+                # Valid cap recording time within this level window (excludes gap periods).
+                # Lick detection is only possible during non-gap intervals, so the lick-rate
+                # denominator should reflect the actual cap recording time, not the full wall time.
+                _gap_in_win = sum(
+                    min(g[1], end_t) - max(g[0], start_t)
+                    for g in gap_intervals
+                    if g[1] > start_t and g[0] < end_t
+                )
+                valid_duration_min = max(0.0, (end_t - start_t) - _gap_in_win) / 60.0
                 count = int(np.sum((reward_events >= start_t) & (reward_events < end_t)))
                 count += int(np.sum((hits_events   >= start_t) & (hits_events   < end_t)))
 
@@ -853,14 +2075,18 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
                 key = (animal_id, level)
                 if key not in animal_level_accum:
                     animal_level_accum[key] = {'rewards': 0, 'duration_min': 0.0,
+                                               'valid_duration_min': 0.0,
                                                'condition': condition,
                                                'speed_sum': 0.0, 'speed_count': 0,
                                                'lick_count': 0, 'dist_sum': 0.0,
                                                'bout_count_lvl': 0,
                                                'bout_spd_sum': 0.0, 'bout_spd_cnt': 0,
-                                               'bout_dist_sum': 0.0, 'bout_dist_cnt': 0}
-                animal_level_accum[key]['rewards']      += count
-                animal_level_accum[key]['duration_min'] += duration_min
+                                               'bout_dist_sum': 0.0, 'bout_dist_cnt': 0,
+                                               'level_hits': 0, 'level_opportunities': 0,
+                                               'immo_total_s': 0.0, 'immo_dur_s': 0.0}
+                animal_level_accum[key]['rewards']           += count
+                animal_level_accum[key]['duration_min']      += duration_min
+                animal_level_accum[key]['valid_duration_min'] += valid_duration_min
                 if treadmill_df is not None and len(treadmill_df) > 0:
                     mask = (treadmill_df['global_time'] >= start_t) & (treadmill_df['global_time'] < end_t)
                     lvl_speeds = treadmill_df.loc[mask, 'speed'].values / 10.0
@@ -885,6 +2111,25 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
                                 if len(_dv) >= 2:
                                     animal_level_accum[key]['bout_dist_sum'] += float(_dv[-1] - _dv[0])
                                     animal_level_accum[key]['bout_dist_cnt'] += 1
+                    # Immobility within this level window (raw speed ≤ 0 cm/s for ≥ 2 s)
+                    if len(lvl_times) >= 2:
+                        _immo_dur_lvl   = float(lvl_times[-1] - lvl_times[0])
+                        # Use unfiltered encoder speed (same as session-level immobility_prop)
+                        _lvl_speeds_raw = (treadmill_df.loc[mask, 'speed_raw'].values / 10.0
+                                           if 'speed_raw' in treadmill_df.columns else lvl_speeds)
+                        _immo_mask_lvl  = _lvl_speeds_raw <= 0.0
+                        _immo_total_lvl = 0.0
+                        if _immo_dur_lvl > 0 and np.any(_immo_mask_lvl):
+                            _pad_il = np.concatenate([[False], _immo_mask_lvl, [False]])
+                            _dm_il  = np.diff(_pad_il.astype(np.int8))
+                            for _is_il, _ie_il in zip(
+                                    np.where(_dm_il == 1)[0], np.where(_dm_il == -1)[0]):
+                                _t0_il = lvl_times[_is_il]
+                                _t1_il = lvl_times[min(_ie_il, len(lvl_times) - 1)]
+                                if (_t1_il - _t0_il) >= 2.0:
+                                    _immo_total_lvl += _t1_il - _t0_il
+                        animal_level_accum[key]['immo_total_s'] += _immo_total_lvl
+                        animal_level_accum[key]['immo_dur_s']   += _immo_dur_lvl
                 if len(lick_event_times) > 0:
                     lick_mask = (lick_event_times >= start_t) & (lick_event_times < end_t)
                     animal_level_accum[key]['lick_count'] += int(np.sum(lick_mask))
@@ -897,9 +2142,68 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
                     if len(dist_window) >= 2:
                         animal_level_accum[key]['dist_sum'] += float(
                             dist_window.iloc[-1] - dist_window.iloc[0])
+                # Sensitivity: anchor BOTH opportunity and hit to zone entry time.
+                # This prevents temporal mismatch at level boundaries: if a zone entry
+                # happens just before a level transition, its reward delivery (which
+                # may happen seconds later) would otherwise be counted in the next level.
+                # Pre-sort all reward events for this session once before the level loop.
+                _all_rew_sorted = np.sort(
+                    np.concatenate([reward_events, hits_events])
+                    if len(hits_events) > 0 else reward_events
+                )
+                # Sorted zone times for finding the next-entry upper bound
+                _zone_sorted = np.sort(_valid_zone_times_full) if len(_valid_zone_times_full) > 0 else np.array([])
+
+                _opp_in_lvl  = 0
+                _hits_in_lvl = 0
+                for _zi, _zt in enumerate(_zone_sorted):
+                    if not (start_t <= _zt < end_t):
+                        continue
+                    _opp_in_lvl += 1
+                    # Upper bound: next zone entry or 30 s after this one (whichever is smaller)
+                    _next_zt = _zone_sorted[_zi + 1] if _zi + 1 < len(_zone_sorted) else _zt + 30.0
+                    _rew_window_end = min(_next_zt, _zt + 30.0)
+                    # A reward between zone entry and the upper bound counts as a hit for THIS level
+                    if len(_all_rew_sorted) > 0 and np.any(
+                        (_all_rew_sorted >= _zt) & (_all_rew_sorted < _rew_window_end)
+                    ):
+                        _hits_in_lvl += 1
+
+                # Diagnostic: print any session/level with hits > opportunities
+                if _opp_in_lvl > 0 and _hits_in_lvl > _opp_in_lvl:
+                    print(
+                        f"  [SENS WARN] {animal_id} session {session_num} {level}: "
+                        f"hits={_hits_in_lvl} > opp={_opp_in_lvl} — sensitivity would be "
+                        f"{_hits_in_lvl / _opp_in_lvl:.3f}  window=[{start_t:.1f}, {end_t:.1f})\n"
+                        f"    valid_zone_times in window: {_zone_sorted[(_zone_sorted >= start_t) & (_zone_sorted < end_t)]}\n"
+                        f"    reward_events in window: {reward_events[(reward_events >= start_t) & (reward_events < end_t)]}\n"
+                        f"    hits_events in window: {hits_events[(hits_events >= start_t) & (hits_events < end_t)] if len(hits_events) > 0 else []}"
+                    )
+                if _DIAGNOSTIC_MODE:
+                    print(
+                        f"  [SENS DBG] {animal_id} session {session_num} {level}: "
+                        f"window=[{start_t:.1f}, {end_t:.1f})  "
+                        f"opp={_opp_in_lvl}  hits={_hits_in_lvl}  "
+                        f"sens={(_hits_in_lvl / _opp_in_lvl):.3f}" if _opp_in_lvl > 0
+                        else f"  [SENS DBG] {animal_id} session {session_num} {level}: opp=0"
+                    )
+
+                animal_level_accum[key]['level_opportunities'] += _opp_in_lvl
+                animal_level_accum[key]['level_hits']          += _hits_in_lvl
             # Record the last level of this session; final session's value = the incomplete level
             if levels:
                 animal_last_level[animal_id] = levels[-1]
+                # Track per-session ending level for level progression plots
+                _prog_lv_str = levels[-1]
+                if isinstance(_prog_lv_str, str) and _prog_lv_str.startswith('level_'):
+                    try:
+                        animal_session_ending_level[(animal_id, int(session_num))] = \
+                            int(_prog_lv_str.split('_')[1].split('.')[0])
+                    except (ValueError, IndexError):
+                        pass
+            # Record session length for time-to-level2 cumulative sum
+            if session_end_time is not None:
+                animal_session_lengths[(animal_id, session_num)] = float(session_end_time)
 
     # Collapse accumulators: one rpm, mean speed, and mean lick rate per (animal, level)
     # condition_level_data[condition][level] = [rpm_animal1, rpm_animal2, ...]
@@ -916,6 +2220,8 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
     collapsed_level_bout_avg_spd: dict[str, list[float]] = {}
     condition_level_bout_avg_dist_lvl: dict[str, dict[str, list[float]]] = {}
     collapsed_level_bout_avg_dist_lvl: dict[str, list[float]] = {}
+    condition_level_immo: dict[str, dict[str, list[float]]] = {}
+    collapsed_level_immo: dict[str, list[float]] = {}
     for (animal_id, level), accum in animal_level_accum.items():
         condition = accum['condition']
         if accum['duration_min'] > 0:
@@ -937,14 +2243,20 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
             avg_dist_bout_m = accum['bout_dist_sum'] / accum['bout_dist_cnt'] / 1000.0  # mm → m
             condition_level_bout_avg_dist_lvl.setdefault(condition, {}).setdefault(level, []).append(avg_dist_bout_m)
             collapsed_level_bout_avg_dist_lvl.setdefault(level, []).append(avg_dist_bout_m)
-        if accum['lick_count'] > 0 and accum['duration_min'] > 0:
-            lpm = accum['lick_count'] / accum['duration_min']
+        _lick_denom = accum.get('valid_duration_min') or accum['duration_min']
+        if accum['lick_count'] > 0 and _lick_denom > 0:
+            lpm = accum['lick_count'] / _lick_denom
             condition_level_lick.setdefault(condition, {}).setdefault(level, []).append(lpm)
             collapsed_level_lick.setdefault(level, []).append(lpm)
         if accum.get('dist_sum', 0.0) > 0:
             dist_m = accum['dist_sum'] / 1000.0  # mm → m
             condition_level_dist.setdefault(condition, {}).setdefault(level, []).append(dist_m)
             collapsed_level_dist.setdefault(level, []).append(dist_m)
+        _immo_dur = accum.get('immo_dur_s', 0.0)
+        if _immo_dur > 0:
+            _immo_prop = accum.get('immo_total_s', 0.0) / _immo_dur
+            condition_level_immo.setdefault(condition, {}).setdefault(level, []).append(_immo_prop)
+            collapsed_level_immo.setdefault(level, []).append(_immo_prop)
 
     # Per-condition distance excluding each mouse's last (potentially incomplete) level
     condition_level_dist_excl_last: dict[str, dict[str, list[float]]] = {}
@@ -973,71 +2285,71 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
     n_conditions = len(conditions_sorted)
     n_levels     = len(all_levels)
 
-    # Assign one color per condition using the existing generate_colors helper
-    cond_colors = generate_colors(max(n_conditions, 1))
-    cond_color_map = {c: cond_colors[i] for i, c in enumerate(conditions_sorted)}
-
-    # Grouped bar chart ----------------------------------------------------------
-    level_reward_fig, ax = plt.subplots(figsize=(max(15, n_levels * 0.8), 8))
-
-    bar_width   = 0.8 / max(n_conditions, 1)
-    x_positions = np.arange(n_levels)
-
-    for cond_idx, condition in enumerate(conditions_sorted):
-        cond_data = condition_level_data[condition]
-        means = []
-        sems  = []
-        ns    = []
-        for level in all_levels:
-            vals = cond_data.get(level, [])
-            if vals:
-                means.append(float(np.mean(vals)))
-                sems.append(float(np.std(vals) / np.sqrt(len(vals))))
-                ns.append(len(vals))
-            else:
-                means.append(np.nan)
-                sems.append(np.nan)
-                ns.append(0)
-
-        offset = (cond_idx - (n_conditions - 1) / 2) * bar_width
-        bars = ax.bar(
-            x_positions + offset, means,
-            width=bar_width, yerr=sems,
-            capsize=4,
-            color=cond_color_map[condition],
-            label=condition,
-            error_kw={'elinewidth': 1.2},
-        )
-
-        # n= annotations above each bar
-        for xi, (m, n_val) in enumerate(zip(means, ns)):
-            if n_val > 0 and not np.isnan(m):
-                ax.text(
-                    x_positions[xi] + offset,
-                    m + (sems[xi] if not np.isnan(sems[xi]) else 0),
-                    f'n={n_val}',
-                    ha='center', va='bottom',
-                    fontsize=7,
-                    color=cond_color_map[condition],
-                )
-
-    ax.set_xticks(x_positions)
-    ax.set_xticklabels(
-        [lv.replace('level_', 'L').replace('.json', '') for lv in all_levels],
-        rotation=45, ha='right',
-    )
-    ax.set_title('Average Rewards Per Minute by Level — by Starting Condition')
-    ax.set_xlabel('Level')
-    ax.set_ylabel('Rewards per Minute (Mean ± SEM)')
-    ax.set_ylim(bottom=0)
-    ax.tick_params(axis='both', direction='in')
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
-    ax.legend(title='Starting Condition')
-    level_reward_fig.tight_layout()
+    cond_color_map = {c: _condition_to_color(c) for c in conditions_sorted}
 
     if selected_plots is None:
         selected_plots = set(_ALL_PLOT_KEYS)
+
+    # Grouped bar chart ----------------------------------------------------------
+    level_reward_fig = None
+    if 'levels' in selected_plots:
+        level_reward_fig, ax = plt.subplots(figsize=(max(15, n_levels * 0.8), 8))
+
+        bar_width   = 0.8 / max(n_conditions, 1)
+        x_positions = np.arange(n_levels)
+
+        for cond_idx, condition in enumerate(conditions_sorted):
+            cond_data = condition_level_data[condition]
+            means = []
+            sems  = []
+            ns    = []
+            for level in all_levels:
+                vals = cond_data.get(level, [])
+                if vals:
+                    means.append(float(np.mean(vals)))
+                    sems.append(float(np.std(vals, ddof=1) / np.sqrt(len(vals))))
+                    ns.append(len(vals))
+                else:
+                    means.append(np.nan)
+                    sems.append(np.nan)
+                    ns.append(0)
+
+            offset = (cond_idx - (n_conditions - 1) / 2) * bar_width
+            bars = ax.bar(
+                x_positions + offset, means,
+                width=bar_width, yerr=sems,
+                capsize=4,
+                color=cond_color_map[condition],
+                label=condition,
+                error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2,
+            )
+
+            # n= annotations above each bar
+            for xi, (m, n_val) in enumerate(zip(means, ns)):
+                if n_val > 0 and not np.isnan(m):
+                    ax.text(
+                        x_positions[xi] + offset,
+                        m + (sems[xi] if not np.isnan(sems[xi]) else 0),
+                        f'n={n_val}',
+                        ha='center', va='bottom',
+                        fontsize=7,
+                        color=cond_color_map[condition],
+                    )
+
+        ax.set_xticks(x_positions)
+        ax.set_xticklabels(
+            [lv.replace('level_', 'L').replace('.json', '') for lv in all_levels],
+            rotation=45, ha='right',
+        )
+        ax.set_title('Average Rewards Per Minute by Level — by Starting Condition')
+        ax.set_xlabel('Level')
+        ax.set_ylabel('Rewards per Minute (Mean ± SEM)')
+        ax.set_ylim(bottom=0)
+        ax.tick_params(axis='both', direction='in')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.legend(title='Starting Condition')
+        level_reward_fig.tight_layout()
 
     # ── Collapsed speed by level (all mice) ───────────────────────────────────
     level_speed_collapsed_fig = None
@@ -1050,10 +2362,10 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
         for lv in all_levels_spd:
             vals = collapsed_level_speed[lv]
             sc_means.append(float(np.mean(vals)))
-            sc_sems.append(float(np.std(vals) / np.sqrt(len(vals))))
+            sc_sems.append(float(np.std(vals, ddof=1) / np.sqrt(len(vals))))
             sc_ns.append(len(vals))
         ax_sc.bar(x_sc, sc_means, yerr=sc_sems, capsize=4, color='steelblue',
-                  error_kw={'elinewidth': 1.2})
+                  error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
         for xi, (m, n_val) in enumerate(zip(sc_means, sc_ns)):
             if n_val > 0 and not np.isnan(m):
                 ax_sc.text(xi, m + (sc_sems[xi] if not np.isnan(sc_sems[xi]) else 0),
@@ -1092,7 +2404,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
                 vals = cdata.get(lv, [])
                 if vals:
                     means_c.append(float(np.mean(vals)))
-                    sems_c.append(float(np.std(vals) / np.sqrt(len(vals))))
+                    sems_c.append(float(np.std(vals, ddof=1) / np.sqrt(len(vals))))
                     ns_c.append(len(vals))
                 else:
                     means_c.append(np.nan)
@@ -1104,7 +2416,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
                 width=bw_sc, yerr=sems_c, capsize=4,
                 color=cond_color_map.get(cond, 'gray'),
                 label=cond,
-                error_kw={'elinewidth': 1.2},
+                error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2,
             )
             for xi, (m, n_val) in enumerate(zip(means_c, ns_c)):
                 if n_val > 0 and not np.isnan(m):
@@ -1140,10 +2452,10 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
         for lv in all_levels_lk:
             vals = collapsed_level_lick[lv]
             lk_means.append(float(np.mean(vals)))
-            lk_sems.append(float(np.std(vals) / np.sqrt(len(vals))))
+            lk_sems.append(float(np.std(vals, ddof=1) / np.sqrt(len(vals))))
             lk_ns.append(len(vals))
         ax_lk.bar(x_lk, lk_means, yerr=lk_sems, capsize=4, color='steelblue',
-                  error_kw={'elinewidth': 1.2})
+                  error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
         for xi, (m, n_val) in enumerate(zip(lk_means, lk_ns)):
             if n_val > 0 and not np.isnan(m):
                 ax_lk.text(xi, m + (lk_sems[xi] if not np.isnan(lk_sems[xi]) else 0),
@@ -1182,7 +2494,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
                 vals = cdata.get(lv, [])
                 if vals:
                     means_lkc.append(float(np.mean(vals)))
-                    sems_lkc.append(float(np.std(vals) / np.sqrt(len(vals))))
+                    sems_lkc.append(float(np.std(vals, ddof=1) / np.sqrt(len(vals))))
                     ns_lkc.append(len(vals))
                 else:
                     means_lkc.append(np.nan)
@@ -1194,7 +2506,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
                 width=bw_lkc, yerr=sems_lkc, capsize=4,
                 color=cond_color_map.get(cond, 'gray'),
                 label=cond,
-                error_kw={'elinewidth': 1.2},
+                error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2,
             )
             for xi, (m, n_val) in enumerate(zip(means_lkc, ns_lkc)):
                 if n_val > 0 and not np.isnan(m):
@@ -1230,10 +2542,10 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
         for lv in all_levels_dc:
             vals = collapsed_level_dist[lv]
             dc_means.append(float(np.mean(vals)))
-            dc_sems.append(float(np.std(vals) / np.sqrt(len(vals))))
+            dc_sems.append(float(np.std(vals, ddof=1) / np.sqrt(len(vals))))
             dc_ns.append(len(vals))
         ax_dc.bar(x_dc, dc_means, yerr=dc_sems, capsize=4, color='steelblue',
-                  error_kw={'elinewidth': 1.2})
+                  error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
         for xi, (m, n_val) in enumerate(zip(dc_means, dc_ns)):
             if n_val > 0 and not np.isnan(m):
                 ax_dc.text(xi, m + (dc_sems[xi] if not np.isnan(dc_sems[xi]) else 0),
@@ -1272,7 +2584,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
                 vals = cdata.get(lv, [])
                 if vals:
                     means_dcc.append(float(np.mean(vals)))
-                    sems_dcc.append(float(np.std(vals) / np.sqrt(len(vals))))
+                    sems_dcc.append(float(np.std(vals, ddof=1) / np.sqrt(len(vals))))
                     ns_dcc.append(len(vals))
                 else:
                     means_dcc.append(np.nan)
@@ -1284,7 +2596,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
                 width=bw_dcc, yerr=sems_dcc, capsize=4,
                 color=cond_color_map.get(cond, 'gray'),
                 label=cond,
-                error_kw={'elinewidth': 1.2},
+                error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2,
             )
             for xi, (m, n_val) in enumerate(zip(means_dcc, ns_dcc)):
                 if n_val > 0 and not np.isnan(m):
@@ -1329,7 +2641,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
                 vals = cdata.get(lv, [])
                 if vals:
                     means_dcx.append(float(np.mean(vals)))
-                    sems_dcx.append(float(np.std(vals) / np.sqrt(len(vals))))
+                    sems_dcx.append(float(np.std(vals, ddof=1) / np.sqrt(len(vals))))
                     ns_dcx.append(len(vals))
                 else:
                     means_dcx.append(np.nan)
@@ -1341,7 +2653,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
                 width=bw_dcx, yerr=sems_dcx, capsize=4,
                 color=cond_color_map.get(cond, 'gray'),
                 label=cond,
-                error_kw={'elinewidth': 1.2},
+                error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2,
             )
             for xi, (m, n_val) in enumerate(zip(means_dcx, ns_dcx)):
                 if n_val > 0 and not np.isnan(m):
@@ -1377,10 +2689,10 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
         for lv in all_levels_bc:
             vals = collapsed_level_bout[lv]
             bc_means.append(float(np.mean(vals)))
-            bc_sems.append(float(np.std(vals) / np.sqrt(len(vals))) if len(vals) > 1 else 0.0)
+            bc_sems.append(float(np.std(vals, ddof=1) / np.sqrt(len(vals))) if len(vals) > 1 else 0.0)
             bc_ns.append(len(vals))
         ax_bc.bar(x_bc, bc_means, yerr=bc_sems, capsize=4, color='steelblue',
-                  error_kw={'elinewidth': 1.2})
+                  error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
         for xi, (m, n_val) in enumerate(zip(bc_means, bc_ns)):
             if n_val > 0 and not np.isnan(m):
                 ax_bc.text(xi, m + (bc_sems[xi] if not np.isnan(bc_sems[xi]) else 0),
@@ -1419,7 +2731,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
                 vals = cdata.get(lv, [])
                 if vals:
                     means_bcc.append(float(np.mean(vals)))
-                    sems_bcc.append(float(np.std(vals) / np.sqrt(len(vals))) if len(vals) > 1 else 0.0)
+                    sems_bcc.append(float(np.std(vals, ddof=1) / np.sqrt(len(vals))) if len(vals) > 1 else 0.0)
                     ns_bcc.append(len(vals))
                 else:
                     means_bcc.append(np.nan)
@@ -1431,7 +2743,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
                 width=bw_bcc, yerr=sems_bcc, capsize=4,
                 color=cond_color_map.get(cond, 'gray'),
                 label=cond,
-                error_kw={'elinewidth': 1.2},
+                error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2,
             )
             for xi, (m, n_val) in enumerate(zip(means_bcc, ns_bcc)):
                 if n_val > 0 and not np.isnan(m):
@@ -1467,10 +2779,10 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
         for lv in all_levels_bas:
             vals = collapsed_level_bout_avg_spd[lv]
             bas_means.append(float(np.mean(vals)))
-            bas_sems.append(float(np.std(vals) / np.sqrt(len(vals))) if len(vals) > 1 else 0.0)
+            bas_sems.append(float(np.std(vals, ddof=1) / np.sqrt(len(vals))) if len(vals) > 1 else 0.0)
             bas_ns.append(len(vals))
         ax_bas.bar(x_bas, bas_means, yerr=bas_sems, capsize=4, color='steelblue',
-                   error_kw={'elinewidth': 1.2})
+                   error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
         for xi, (m, n_val) in enumerate(zip(bas_means, bas_ns)):
             if n_val > 0 and not np.isnan(m):
                 ax_bas.text(xi, m + (bas_sems[xi] if not np.isnan(bas_sems[xi]) else 0),
@@ -1509,7 +2821,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
                 vals = cdata.get(lv, [])
                 if vals:
                     means_basc.append(float(np.mean(vals)))
-                    sems_basc.append(float(np.std(vals) / np.sqrt(len(vals))) if len(vals) > 1 else 0.0)
+                    sems_basc.append(float(np.std(vals, ddof=1) / np.sqrt(len(vals))) if len(vals) > 1 else 0.0)
                     ns_basc.append(len(vals))
                 else:
                     means_basc.append(np.nan)
@@ -1521,7 +2833,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
                 width=bw_basc, yerr=sems_basc, capsize=4,
                 color=cond_color_map.get(cond, 'gray'),
                 label=cond,
-                error_kw={'elinewidth': 1.2},
+                error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2,
             )
             for xi, (m, n_val) in enumerate(zip(means_basc, ns_basc)):
                 if n_val > 0 and not np.isnan(m):
@@ -1557,10 +2869,10 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
         for lv in all_levels_bad:
             vals = collapsed_level_bout_avg_dist_lvl[lv]
             bad_means.append(float(np.mean(vals)))
-            bad_sems.append(float(np.std(vals) / np.sqrt(len(vals))) if len(vals) > 1 else 0.0)
+            bad_sems.append(float(np.std(vals, ddof=1) / np.sqrt(len(vals))) if len(vals) > 1 else 0.0)
             bad_ns.append(len(vals))
         ax_bad.bar(x_bad, bad_means, yerr=bad_sems, capsize=4, color='steelblue',
-                   error_kw={'elinewidth': 1.2})
+                   error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
         for xi, (m, n_val) in enumerate(zip(bad_means, bad_ns)):
             if n_val > 0 and not np.isnan(m):
                 ax_bad.text(xi, m + (bad_sems[xi] if not np.isnan(bad_sems[xi]) else 0),
@@ -1599,7 +2911,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
                 vals = cdata.get(lv, [])
                 if vals:
                     means_badc.append(float(np.mean(vals)))
-                    sems_badc.append(float(np.std(vals) / np.sqrt(len(vals))) if len(vals) > 1 else 0.0)
+                    sems_badc.append(float(np.std(vals, ddof=1) / np.sqrt(len(vals))) if len(vals) > 1 else 0.0)
                     ns_badc.append(len(vals))
                 else:
                     means_badc.append(np.nan)
@@ -1611,7 +2923,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
                 width=bw_badc, yerr=sems_badc, capsize=4,
                 color=cond_color_map.get(cond, 'gray'),
                 label=cond,
-                error_kw={'elinewidth': 1.2},
+                error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2,
             )
             for xi, (m, n_val) in enumerate(zip(means_badc, ns_badc)):
                 if n_val > 0 and not np.isnan(m):
@@ -1636,6 +2948,583 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
         ax_badc.legend(title='Starting Condition')
         level_bout_avg_dist_condition_fig.tight_layout()
 
+    # ── Final level bar chart (one value per mouse, grouped by condition) ─────
+    last_level_bar_fig = None
+    if 'last_level_bar' in selected_plots and animal_last_level:
+        # Build a mapping from animal_id → condition using the accumulator
+        _animal_cond_map = {aid: accum['condition']
+                            for (aid, _), accum in animal_level_accum.items()}
+
+        # Convert last level string to a numeric level number (e.g. 'level_5' → 5)
+        def _level_to_num(lv_str):
+            if isinstance(lv_str, str) and lv_str.startswith('level_'):
+                try:
+                    return float(lv_str.split('_')[1].split('.')[0])
+                except (ValueError, IndexError):
+                    pass
+            return float('nan')
+
+        # Group per condition: list of (animal_id, numeric_level)
+        _last_lvl_by_cond: dict[str, list] = {}
+        for _aid, _last_lv in animal_last_level.items():
+            _cond = _animal_cond_map.get(_aid)
+            if _cond is None:
+                continue
+            _lv_num = _level_to_num(_last_lv)
+            if not np.isnan(_lv_num):
+                _last_lvl_by_cond.setdefault(_cond, []).append((_aid, _lv_num))
+
+        if _last_lvl_by_cond:
+            last_level_bar_fig, ax_llb = plt.subplots(figsize=(8, 6))
+            _conds_llb = sorted(_last_lvl_by_cond.keys())
+            _x_pos_llb = np.arange(len(_conds_llb))
+            _rng_llb = np.random.default_rng(seed=42)
+
+            for ci, cond in enumerate(_conds_llb):
+                entries = _last_lvl_by_cond[cond]
+                mouse_vals = [v for _, v in entries]
+                _mean_llb = float(np.mean(mouse_vals))
+                _sem_llb  = (float(np.std(mouse_vals, ddof=1) / np.sqrt(len(mouse_vals)))
+                             if len(mouse_vals) > 1 else 0.0)
+                color = cond_color_map.get(cond, 'steelblue')
+                ax_llb.bar(ci, _mean_llb, width=0.5, color=color, alpha=0.7,
+                           yerr=_sem_llb, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
+                jitter = (_rng_llb.random(len(mouse_vals)) - 0.5) * 0.22
+                ax_llb.scatter(ci + jitter, mouse_vals,
+                               color=color, edgecolors='black',
+                               linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
+
+            ax_llb.set_xticks(_x_pos_llb)
+            ax_llb.set_xticklabels(_conds_llb)
+            ax_llb.set_xlabel('Starting Condition')
+            ax_llb.set_ylabel('Final Level (Mean \u00b1 SEM)')
+            ax_llb.set_ylim(bottom=0)
+            ax_llb.tick_params(axis='both', direction='in')
+            ax_llb.spines['top'].set_visible(False)
+            ax_llb.spines['right'].set_visible(False)
+
+            # ── Mann-Whitney U test: pairwise significance brackets ──────────
+            from scipy.stats import mannwhitneyu as _mwu_llb
+            import itertools as _it_llb
+            _llb_results = []
+            for (_lc1, _lc2) in _it_llb.combinations(_conds_llb, 2):
+                _lv1 = np.array([v for _, v in _last_lvl_by_cond[_lc1]])
+                _lv2 = np.array([v for _, v in _last_lvl_by_cond[_lc2]])
+                if len(_lv1) >= 2 and len(_lv2) >= 2:
+                    _ll_stat, _ll_p = _mwu_llb(_lv1, _lv2, alternative='two-sided')
+                    _llb_results.append((_lc1, _lc2, float(_ll_stat), float(_ll_p)))
+
+            if _llb_results:
+                _llb_y_max = max(
+                    max(max(v for _, v in _last_lvl_by_cond[c]) for c in _conds_llb),
+                    float(ax_llb.get_ylim()[1]),
+                )
+                _llb_step = _llb_y_max * 0.12
+                for _bk_idx, (_lc1, _lc2, _ll_stat, _ll_p) in enumerate(_llb_results):
+                    _bx1 = _conds_llb.index(_lc1)
+                    _bx2 = _conds_llb.index(_lc2)
+                    _bk_y = _llb_y_max + _llb_step * (_bk_idx + 1)
+                    ax_llb.plot(
+                        [_bx1, _bx1, _bx2, _bx2],
+                        [_bk_y - _llb_step * 0.2, _bk_y,
+                         _bk_y, _bk_y - _llb_step * 0.2],
+                        color='black', linewidth=1.2,
+                    )
+                    _bsig = _fmt_p(_ll_p)
+                    ax_llb.text(
+                        (_bx1 + _bx2) / 2.0,
+                        _bk_y + _llb_step * 0.05,
+                        _bsig, ha='center', va='bottom', fontsize=9,
+                    )
+                ax_llb.set_ylim(
+                    bottom=0,
+                    top=_llb_y_max + _llb_step * (len(_llb_results) + 1.8),
+                )
+
+            ax_llb.set_title('Final Level Reached by Starting Condition\n(last training day; Mann-Whitney U test)')
+            last_level_bar_fig.tight_layout()
+            _write_mwu_report(
+                output_dir, 'last_level_bar',
+                'Final Level Reached per Mouse (by Condition)',
+                [(_lc1, _lc2,
+                  [v for _, v in _last_lvl_by_cond[_lc1]],
+                  [v for _, v in _last_lvl_by_cond[_lc2]])
+                 for (_lc1, _lc2, _, _) in _llb_results],
+            )
+
+    # ── Level survivor plot (proportion of mice that experienced each level) ──
+    level_survivor_fig = None
+    if 'level_survivor' in selected_plots and animal_level_accum:
+        # All levels seen across all animals (sorted)
+        all_lvls_surv = sorted(
+            {lv for (_, lv) in animal_level_accum},
+            key=sort_key,
+        )
+        # Per-condition: set of animal IDs and set of (animal_id, level) pairs
+        _surv_cond_mice: dict[str, set] = {}
+        _surv_cond_lvl_mice: dict[str, dict[str, set]] = {}
+        for (aid, lv), accum in animal_level_accum.items():
+            cond = accum['condition']
+            _surv_cond_mice.setdefault(cond, set()).add(aid)
+            _surv_cond_lvl_mice.setdefault(cond, {}).setdefault(lv, set()).add(aid)
+
+        if _surv_cond_mice:
+            level_survivor_fig, ax_surv = plt.subplots()
+            _surv_conds = sorted(_surv_cond_mice.keys())
+            _surv_color_map = {c: _condition_to_color(c) for c in _surv_conds}
+
+            def _lv_num_label(lv):
+                if isinstance(lv, str) and lv.startswith('level_'):
+                    try:
+                        return str(int(lv.split('_')[1].split('.')[0]))
+                    except (ValueError, IndexError):
+                        pass
+                return str(lv)
+
+            def _lv_to_num(lv):
+                try:
+                    return int(_lv_num_label(lv))
+                except (ValueError, TypeError):
+                    return 0
+
+            x_numeric = [_lv_to_num(lv) for lv in all_lvls_surv]
+
+            for cond in _surv_conds:
+                n_total = len(_surv_cond_mice[cond])
+                proportions = []
+                for lv in all_lvls_surv:
+                    n_with_lv = len(_surv_cond_lvl_mice[cond].get(lv, set()))
+                    proportions.append(n_with_lv / n_total if n_total > 0 else 0.0)
+                color = _surv_color_map.get(cond, 'steelblue')
+                ax_surv.step(x_numeric, proportions, where='post',
+                             color=color, linewidth=2, label=f'{cond} (n={n_total})')
+
+            ax_surv.set_xlabel('Level')
+            ax_surv.set_ylabel('Proportion of Mice')
+            ax_surv.set_ylim(bottom=0, top=1)
+            ax_surv.set_xlim(left=0, right=40)
+            ax_surv.set_xticks(range(0, 41, 5))
+            ax_surv.set_title('Level Attainment')
+            leg = ax_surv.legend(title='Starting Condition', loc='lower right',
+                                 frameon=False,
+                                 bbox_to_anchor=(39, 0.05),
+                                 bbox_transform=ax_surv.transData)
+            leg.set_in_layout(False)
+            ax_surv.tick_params(axis='both', direction='in')
+            ax_surv.spines['top'].set_visible(False)
+            ax_surv.spines['right'].set_visible(False)
+            level_survivor_fig.subplots_adjust(left=0.15, right=0.97, top=0.88, bottom=0.18)
+
+    # ── Time to first level 1 → level 2 transition (cumulative minutes) ──────
+    time_to_level2_fig = None
+    if 'time_to_level2' in selected_plots:
+        # For each animal find the first session where level_1 has a non-NaN transition_ts.
+        # Cumulative time = sum of all prior session lengths + the transition_ts within that session.
+        _is_l1 = lambda lv: (
+            isinstance(lv, str) and lv.startswith('level_') and
+            lv.split('_')[1].split('.')[0] == '1'
+        )
+        animal_time_to_l2: dict[str, float] = {}
+        animal_time_to_l2_cond: dict[str, str] = {}
+
+        for _aid, _ag in transitions_df.groupby('animal_id'):
+            _sessions = sorted(_ag['session_num'].unique())
+            _cum_s = 0.0
+            _found = False
+            for _sn in _sessions:
+                _sg = _ag[_ag['session_num'] == _sn]
+                # Check whether level_1 completes in this session
+                for _, _row in _sg.iterrows():
+                    if _is_l1(_row['level']) and pd.notna(_row['transition_ts']):
+                        _total_min = (_cum_s + float(_row['transition_ts'])) / 60.0
+                        animal_time_to_l2[_aid] = _total_min
+                        animal_time_to_l2_cond[_aid] = (
+                            (animal_conditions or {}).get(_aid, 'Unknown')
+                        )
+                        _found = True
+                        break
+                if _found:
+                    break
+                # Add this session's length to the cumulative total
+                _cum_s += animal_session_lengths.get((_aid, _sn), 0.0)
+
+        if animal_time_to_l2:
+            _t2_by_cond: dict[str, list] = {}
+            for _aid, _t in animal_time_to_l2.items():
+                _cond = animal_time_to_l2_cond.get(_aid, 'Unknown')
+                _t2_by_cond.setdefault(_cond, []).append(_t)
+
+            _t2_conds = sorted(_t2_by_cond.keys())
+            time_to_level2_fig, _ax_t2 = plt.subplots()
+            _t2_x = np.arange(len(_t2_conds))
+            _rng = np.random.default_rng(42)
+
+            for _ci, _cond in enumerate(_t2_conds):
+                _vals = np.array(_t2_by_cond[_cond])
+                _mean = float(np.mean(_vals))
+                _sem  = (float(np.std(_vals, ddof=1) / np.sqrt(len(_vals)))
+                         if len(_vals) > 1 else 0.0)
+                _color = cond_color_map.get(_cond, 'steelblue')
+                _ax_t2.bar(_t2_x[_ci], _mean, width=0.5, yerr=_sem, capsize=5,
+                           color=_color,
+                           error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
+                # Individual data points with jitter
+                _jit = _rng.uniform(-0.10, 0.10, len(_vals))
+                _ax_t2.scatter(np.full(len(_vals), _t2_x[_ci]) + _jit, _vals,
+                               color=_color, edgecolors='black', zorder=5,
+                               linewidths=0.5, alpha=0.6)
+                _ax_t2.text(_t2_x[_ci], _mean + _sem + max(_mean * 0.02, 0.5),
+                            f'n={len(_vals)}', ha='center', va='bottom')
+
+            # Mann-Whitney U bracket if exactly 2 conditions
+            if len(_t2_conds) == 2:
+                _v1 = np.array(_t2_by_cond[_t2_conds[0]])
+                _v2 = np.array(_t2_by_cond[_t2_conds[1]])
+                if len(_v1) >= 2 and len(_v2) >= 2:
+                    try:
+                        _, _pv = mannwhitneyu(_v1, _v2, alternative='two-sided')
+                        _all_vals = np.concatenate([_v1, _v2])
+                        _ymax_bk = float(np.max(_all_vals)) * 1.15
+                        _stars = _fmt_p(_pv)
+                        _tick = _ymax_bk * 0.03
+                        _ax_t2.plot([0, 0, 1, 1],
+                                    [_ymax_bk - _tick, _ymax_bk, _ymax_bk, _ymax_bk - _tick],
+                                    color='black', linewidth=1.2, zorder=6)
+                        _ax_t2.text(0.5, _ymax_bk * 1.01, _stars,
+                                    ha='center', va='bottom')
+                        _ax_t2.set_ylim(bottom=0, top=_ymax_bk * 1.15)
+                    except Exception:
+                        pass
+
+            _ax_t2.set_xticks(_t2_x)
+            _ax_t2.set_xticklabels(_t2_conds)
+            _ax_t2.set_xlabel('CA%')
+            _ax_t2.set_ylabel('Time to first level change (min)')
+            _ax_t2.set_title(
+                'Time to First Level Transition')
+            _ax_t2.set_ylim(bottom=0, top=300)
+            _ax_t2.tick_params(axis='both', direction='in')
+            _ax_t2.spines['top'].set_visible(False)
+            _ax_t2.spines['right'].set_visible(False)
+            time_to_level2_fig.tight_layout()
+            import itertools as _it_t2
+            _write_mwu_report(
+                output_dir, 'time_to_level2',
+                'Cumulative Time to First Level 1→2 Transition (min)',
+                [(_t2_conds[_ia], _t2_conds[_ib],
+                  list(_t2_by_cond[_t2_conds[_ia]]),
+                  list(_t2_by_cond[_t2_conds[_ib]]))
+                 for _ia, _ib in _it_t2.combinations(range(len(_t2_conds)), 2)],
+            )
+
+    # ── Level progression: ending level per session ────────────────────────────
+    level_progression_indiv_fig = None
+    level_progression_condition_fig = None
+    level_progression_bar_fig = None
+    _prog_by_animal: dict = {}  # animal_id -> [(session_rank, level_num)]
+    if animal_session_ending_level:
+        # Build per-animal ordered (session_rank, level_num) with condition lookup
+        _prog_animal_cond = {
+            aid: (animal_conditions or {}).get(aid, 'Unknown')
+            for aid in {a for (a, _) in animal_session_ending_level}
+        }
+        _prog_by_animal: dict[str, list] = {}  # animal_id -> [(rank, level_num)]
+        for aid in sorted(_prog_animal_cond):
+            sess_entries = sorted(
+                [(sn, lv) for (a, sn), lv in animal_session_ending_level.items() if a == aid],
+                key=lambda x: x[0],
+            )
+            _prog_by_animal[aid] = [(rank + 1, lv) for rank, (_, lv) in enumerate(sess_entries)]
+
+        # Individual plot: one line per mouse, y = ending level, x = session rank
+        if 'level_progression_indiv' in selected_plots:
+            level_progression_indiv_fig, ax_lpi = plt.subplots(
+                figsize=plt.rcParams['figure.figsize'])
+            for aid, pts in _prog_by_animal.items():
+                cond = _prog_animal_cond.get(aid, 'Unknown')
+                color = cond_color_map.get(cond, 'gray')
+                marker = (animal_markers or {}).get(aid, 'o')
+                xs = [p[0] for p in pts]
+                ys = [p[1] for p in pts]
+                ax_lpi.plot(xs, ys, f'-{marker}',
+                            color=color,
+                            linewidth=plt.rcParams['lines.linewidth'],
+                            markersize=plt.rcParams['lines.markersize'],
+                            alpha=0.8)
+            ax_lpi.set_xlabel('Session')
+            ax_lpi.set_ylabel('Ending Level')
+            ax_lpi.set_ylim(0, 14)
+            ax_lpi.set_yticks(range(0, 15, 2))
+            ax_lpi.set_xlim(0, 13)
+            ax_lpi.set_xticks(range(1, 14, 1))
+            ax_lpi.set_title('Level Progression — Individual Mice')
+            ax_lpi.tick_params(axis='both', direction='in')
+            ax_lpi.spines['top'].set_visible(False)
+            ax_lpi.spines['right'].set_visible(False)
+            _lpi_legend_handles = [
+                Line2D([0], [0], color=col,
+                       linewidth=plt.rcParams['lines.linewidth'], label=cond)
+                for cond, col in sorted(cond_color_map.items())
+            ]
+            _lpi_legend_handles.append(
+                Line2D([0], [0], color='gray', marker='s', linestyle='None',
+                       markersize=plt.rcParams['lines.markersize'], label='Male'))
+            _lpi_legend_handles.append(
+                Line2D([0], [0], color='gray', marker='o', linestyle='None',
+                       markersize=plt.rcParams['lines.markersize'], label='Female'))
+            ax_lpi.legend(handles=_lpi_legend_handles, frameon=False,
+                          fontsize=plt.rcParams['legend.fontsize'])
+            level_progression_indiv_fig.tight_layout()
+
+        # Condition-averaged plot: mean ± SEM per session rank, per condition
+        if 'level_progression_condition' in selected_plots:
+            _prog_cond_data: dict[str, dict[int, list]] = {}
+            for aid, pts in _prog_by_animal.items():
+                cond = _prog_animal_cond.get(aid, 'Unknown')
+                for rank, lv in pts:
+                    _prog_cond_data.setdefault(cond, {}).setdefault(rank, []).append(lv)
+            if _prog_cond_data:
+                level_progression_condition_fig, ax_lpc = plt.subplots(
+                    figsize=plt.rcParams['figure.figsize'])
+                _prog_conds_sorted = sorted(_prog_cond_data.keys())
+                for cond in _prog_conds_sorted:
+                    rank_data = _prog_cond_data[cond]
+                    ranks_sorted = sorted(rank_data.keys())
+                    _pc_means = [float(np.mean(rank_data[r])) for r in ranks_sorted]
+                    _pc_sems = [
+                        (float(np.std(rank_data[r], ddof=1) / np.sqrt(len(rank_data[r])))
+                         if len(rank_data[r]) > 1 else 0.0)
+                        for r in ranks_sorted
+                    ]
+                    color = cond_color_map.get(cond, 'gray')
+                    ax_lpc.plot(ranks_sorted, _pc_means, '-o',
+                                color=color, label=cond,
+                                linewidth=plt.rcParams['lines.linewidth'],
+                                markersize=plt.rcParams['lines.markersize'])
+                    ax_lpc.fill_between(
+                        ranks_sorted,
+                        [m - s for m, s in zip(_pc_means, _pc_sems)],
+                        [m + s for m, s in zip(_pc_means, _pc_sems)],
+                        color=color, alpha=0.15,
+                    )
+                ax_lpc.set_xlabel('Session')
+                ax_lpc.set_ylabel('Ending Level (Mean \u00b1 SEM)')
+                ax_lpc.set_title('Level Progression \u2014 Condition Mean \u00b1 SEM')
+                ax_lpc.set_xlim(0, 13)
+                ax_lpc.set_xticks(range(1, 14))
+                ax_lpc.set_ylim(0, 25)
+                ax_lpc.tick_params(axis='both', direction='in')
+                ax_lpc.spines['top'].set_visible(False)
+                ax_lpc.spines['right'].set_visible(False)
+                ax_lpc.legend(title='Starting Condition', frameon=False)
+                level_progression_condition_fig.tight_layout()
+
+        # Collapsed bar chart: per-mouse slope (rate of level change), grouped by condition
+        if 'level_progression_bar' in selected_plots:
+            _prog_slope_by_cond: dict[str, list] = {}
+            for aid, pts in _prog_by_animal.items():
+                if len(pts) < 2:
+                    continue
+                cond = _prog_animal_cond.get(aid, 'Unknown')
+                _sess_arr = np.array([s for s, _ in pts], dtype=float)
+                _lv_arr   = np.array([lv for _, lv in pts], dtype=float)
+                # linear regression slope (levels per session)
+                _sess_c = _sess_arr - _sess_arr.mean()
+                _denom  = float(np.dot(_sess_c, _sess_c))
+                _slope  = float(np.dot(_sess_c, _lv_arr) / _denom) if _denom != 0 else 0.0
+                _prog_slope_by_cond.setdefault(cond, []).append((aid, _slope))
+            if _prog_slope_by_cond:
+                level_progression_bar_fig, ax_lpb = plt.subplots(figsize=(8, 6))
+                _pb_conds = sorted(_prog_slope_by_cond.keys())
+                _pb_x = np.arange(len(_pb_conds))
+                _rng_pb = np.random.default_rng(seed=42)
+                for ci, cond in enumerate(_pb_conds):
+                    entries = _prog_slope_by_cond[cond]
+                    mouse_vals = np.array([v for _, v in entries])
+                    _pb_mean = float(np.mean(mouse_vals))
+                    _pb_sem = (float(np.std(mouse_vals, ddof=1) / np.sqrt(len(mouse_vals)))
+                               if len(mouse_vals) > 1 else 0.0)
+                    color = cond_color_map.get(cond, 'steelblue')
+                    ax_lpb.bar(ci, _pb_mean, width=0.5, color=color, alpha=0.7,
+                               yerr=_pb_sem, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
+                    jitter = (_rng_pb.random(len(mouse_vals)) - 0.5) * 0.22
+                    ax_lpb.scatter(ci + jitter, mouse_vals,
+                                   color=color, edgecolors='black',
+                                   linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
+                ax_lpb.axhline(0, color='black', linewidth=0.8, linestyle='--')
+                ax_lpb.set_xticks(_pb_x)
+                ax_lpb.set_xticklabels(_pb_conds)
+                ax_lpb.set_xlabel('Starting Condition')
+                ax_lpb.set_ylabel('Rate of Level Change (levels / session, Mean \u00b1 SEM)')
+                ax_lpb.tick_params(axis='both', direction='in')
+                ax_lpb.spines['top'].set_visible(False)
+                ax_lpb.spines['right'].set_visible(False)
+                # Mann-Whitney U pairwise significance brackets
+                import itertools as _it_lpb
+                from scipy.stats import mannwhitneyu as _mwu_lpb
+                _lpb_results = []
+                for (_lpc1, _lpc2) in _it_lpb.combinations(_pb_conds, 2):
+                    _lv1_pb = np.array([v for _, v in _prog_slope_by_cond[_lpc1]])
+                    _lv2_pb = np.array([v for _, v in _prog_slope_by_cond[_lpc2]])
+                    if len(_lv1_pb) >= 2 and len(_lv2_pb) >= 2:
+                        _lpb_stat, _lpb_p = _mwu_lpb(_lv1_pb, _lv2_pb, alternative='two-sided')
+                        _lpb_results.append((_lpc1, _lpc2, float(_lpb_stat), float(_lpb_p)))
+                if _lpb_results:
+                    _all_slopes = [v for c in _pb_conds for _, v in _prog_slope_by_cond[c]]
+                    _lpb_y_max = max(max(_all_slopes), float(ax_lpb.get_ylim()[1]))
+                    _lpb_y_min = min(min(_all_slopes), float(ax_lpb.get_ylim()[0]))
+                    _lpb_range = max(abs(_lpb_y_max), abs(_lpb_y_min))
+                    _lpb_step  = _lpb_range * 0.12 if _lpb_range > 0 else 0.1
+                    for _bk_idx, (_lpc1, _lpc2, _lpb_stat, _lpb_p) in enumerate(_lpb_results):
+                        _bx1 = _pb_conds.index(_lpc1)
+                        _bx2 = _pb_conds.index(_lpc2)
+                        _bk_y = _lpb_y_max + _lpb_step * (_bk_idx + 1)
+                        ax_lpb.plot(
+                            [_bx1, _bx1, _bx2, _bx2],
+                            [_bk_y - _lpb_step * 0.2, _bk_y,
+                             _bk_y, _bk_y - _lpb_step * 0.2],
+                            color='black', linewidth=1.2,
+                        )
+                        _bsig_lp = _fmt_p(_lpb_p)
+                        ax_lpb.text(
+                            (_bx1 + _bx2) / 2.0,
+                            _bk_y + _lpb_step * 0.05,
+                            _bsig_lp, ha='center', va='bottom', fontsize=9,
+                        )
+                    ax_lpb.set_ylim(
+                        bottom=_lpb_y_min - _lpb_step * 1.2,
+                        top=_lpb_y_max + _lpb_step * (len(_lpb_results) + 1.8),
+                    )
+                ax_lpb.set_title(
+                    'Rate of Level Change by Starting Condition\n'
+                    '(slope of ending level vs session; Mann-Whitney U test)'
+                )
+                level_progression_bar_fig.tight_layout()
+                _write_mwu_report(
+                    output_dir, 'level_progression_bar',
+                    'Rate of Level Change (levels/session, slope)',
+                    [(_lpc1, _lpc2,
+                      [v for _, v in _prog_slope_by_cond[_lpc1]],
+                      [v for _, v in _prog_slope_by_cond[_lpc2]])
+                     for (_lpc1, _lpc2, _, _) in _lpb_results],
+                )
+
+    # ── Sensitivity by level — individual mice ────────────────────────────────
+    level_sensitivity_fig = None
+    if 'level_sensitivity' in selected_plots:
+        animal_level_sensitivity: dict[tuple, float] = {}
+        for (animal_id, level), accum in animal_level_accum.items():
+            opp  = accum.get('level_opportunities', 0)
+            hits = accum.get('level_hits', 0)
+            if opp > 0:
+                raw_sens = float(hits) / float(opp)
+                if raw_sens > 1.0:
+                    print(
+                        f"  [SENS WARN] {animal_id} {level}: accumulated hits={hits} > opp={opp} "
+                        f"(sensitivity={raw_sens:.3f}) — clamping to 1.0"
+                    )
+                animal_level_sensitivity[(animal_id, level)] = min(raw_sens, 1.0)
+            else:
+                animal_level_sensitivity[(animal_id, level)] = float('nan')
+        if animal_level_sensitivity:
+            all_lvls_sen = sorted({lv for (_, lv) in animal_level_sensitivity}, key=sort_key)
+            all_animals_sen = sorted({an for (an, _) in animal_level_sensitivity})
+            level_sensitivity_fig = plt.figure(figsize=plt.rcParams['figure.figsize'], constrained_layout=True)
+            for animal_id in all_animals_sen:
+                condition = (animal_conditions or {}).get(animal_id, 'Unknown')
+                color = cond_color_map.get(condition, 'gray')
+                marker = (animal_markers or {}).get(animal_id, 'o')
+                x_vals, y_vals = [], []
+                for lv_idx, lv in enumerate(all_lvls_sen):
+                    val = animal_level_sensitivity.get((animal_id, lv))
+                    if val is not None and not np.isnan(val):
+                        x_vals.append(lv_idx + 1)
+                        y_vals.append(val)
+                if x_vals:
+                    plt.plot(x_vals, y_vals, f'-{marker}',
+                             color=color,
+                             linewidth=plt.rcParams['lines.linewidth'],
+                             markersize=plt.rcParams['lines.markersize'])
+            ax_lsen = plt.gca()
+            ax_lsen.set_xlim(0, 14)  # adjust manually as needed
+            ax_lsen.set_xticks(range(0, 15, 2))
+            ax_lsen.set_title('Sensitivity by Level')
+            ax_lsen.set_xlabel('Level')
+            ax_lsen.set_ylabel('Sensitivity')
+            ax_lsen.set_ylim(0, 1.1)
+            ax_lsen.tick_params(axis='both', direction='in')
+            ax_lsen.spines['top'].set_visible(False)
+            ax_lsen.spines['right'].set_visible(False)
+            # Legend: condition colors + sex marker shapes
+            _sen_legend_handles = [
+                Line2D([0], [0], color=col, linewidth=plt.rcParams['lines.linewidth'], label=cond)
+                for cond, col in sorted(cond_color_map.items())
+            ]
+            _sen_legend_handles.append(
+                Line2D([0], [0], color='gray', marker='s', linestyle='None',
+                       markersize=plt.rcParams['lines.markersize'], label='Male'))
+            _sen_legend_handles.append(
+                Line2D([0], [0], color='gray', marker='o', linestyle='None',
+                       markersize=plt.rcParams['lines.markersize'], label='Female'))
+            ax_lsen.legend(handles=_sen_legend_handles, frameon=False,
+                           fontsize=plt.rcParams['legend.fontsize'])
+            # tight_layout() omitted — constrained_layout=True handles spacing
+
+    # ── Per-level immobility proportion — individual mice ────────────────────
+    level_immobility_prop_fig = None
+    if 'level_immobility_prop' in (selected_plots or set()) and animal_level_accum:
+        _immo_by_mouse: dict = {}  # animal_id -> [(level_idx, immo_prop)]
+        _all_levs_im = sorted({lv for (_, lv) in animal_level_accum}, key=sort_key)
+        _lev_to_idx_im = {lv: i + 1 for i, lv in enumerate(_all_levs_im)}
+        for (_mn_im, _lv_im), _acc_im in animal_level_accum.items():
+            _dur_im = _acc_im.get('immo_dur_s', 0.0)
+            if _dur_im > 0:
+                _prop_im = _acc_im.get('immo_total_s', 0.0) / _dur_im
+                _immo_by_mouse.setdefault(_mn_im, []).append(
+                    (_lev_to_idx_im[_lv_im], _prop_im))
+        if _immo_by_mouse:
+            level_immobility_prop_fig = plt.figure(
+                figsize=plt.rcParams['figure.figsize'], constrained_layout=True)
+            for _mn_im2 in sorted(_immo_by_mouse):
+                _cond_im2  = (animal_conditions or {}).get(_mn_im2, 'Unknown')
+                _color_im2 = cond_color_map.get(_cond_im2, 'gray')
+                _marker_im2 = (animal_markers or {}).get(_mn_im2, 'o')
+                _pts_im = sorted(_immo_by_mouse[_mn_im2])
+                plt.plot([p[0] for p in _pts_im], [p[1] for p in _pts_im],
+                         f'-{_marker_im2}',
+                         color=_color_im2,
+                         linewidth=plt.rcParams['lines.linewidth'],
+                         markersize=plt.rcParams['lines.markersize'],
+                         label=_mn_im2)
+            _ax_im2 = plt.gca()
+            _ax_im2.set_xticks(range(1, len(_all_levs_im) + 1))
+            _ax_im2.set_xticklabels(
+                [lv.replace('level_', 'L').replace('.json', '')
+                 for lv in _all_levs_im],
+                rotation=45, ha='right')
+            _ax_im2.set_title(
+                'Immobility Proportion by Level \u2014 Individual Mice\n'
+                '(raw speed = 0 cm/s for \u2265 2 s; within-level window)')
+            _ax_im2.set_xlabel('Level')
+            _ax_im2.set_ylabel('Proportion of level window time immobile')
+            _ax_im2.set_ylim(0, 1.0)
+            _ax_im2.tick_params(axis='both', direction='in')
+            _ax_im2.spines['top'].set_visible(False)
+            _ax_im2.spines['right'].set_visible(False)
+            _immo_legend_handles = [
+                Line2D([0], [0], color=col,
+                       linewidth=plt.rcParams['lines.linewidth'], label=cond)
+                for cond, col in sorted(cond_color_map.items())
+            ]
+            _immo_legend_handles.append(
+                Line2D([0], [0], color='gray', marker='s', linestyle='None',
+                       markersize=plt.rcParams['lines.markersize'], label='Male'))
+            _immo_legend_handles.append(
+                Line2D([0], [0], color='gray', marker='o', linestyle='None',
+                       markersize=plt.rcParams['lines.markersize'], label='Female'))
+            _ax_im2.legend(handles=_immo_legend_handles, frameon=False,
+                           fontsize=plt.rcParams['legend.fontsize'])
+
     # ── Package level data for the descriptive stats report ──────────────────
     _level_stats = {
         'condition_level_reward_rate':   condition_level_data,
@@ -1645,18 +3534,35 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, sel
         'condition_level_bout':          condition_level_bout,
         'condition_level_bout_avg_spd':  condition_level_bout_avg_spd,
         'condition_level_bout_avg_dist': condition_level_bout_avg_dist_lvl,
-    } if condition_level_data else None
+        'level_progression':             _prog_by_animal,
+    } if (condition_level_data or _prog_by_animal) else None
 
-    return level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, _level_stats
+    return level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_sensitivity_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, last_level_bar_fig, level_survivor_fig, time_to_level2_fig, level_progression_indiv_fig, level_progression_condition_fig, level_progression_bar_fig, level_immobility_prop_fig, _level_stats
 
 
 # ── Descriptive statistics report ────────────────────────────────────────────
 
 def generate_descriptive_stats_report(all_results, level_stats_data=None, output_dir=None):
-    """Generate a descriptive statistics Excel workbook (.xlsx) with one sheet
-    per metric sliced across training sessions (time) and, if level data are
-    available, per level.  Metrics are grouped by starting condition; statistics
-    reported per group are: mean, SEM, SD, N, min, max, median.
+    """Generate a comprehensive descriptive statistics Excel workbook (.xlsx).
+
+    Sheets
+    ------
+    Overview          : One row per DV – overall condition means, SDs, SEMs, 95 % CIs,
+                        medians, Cohen's d, and Mann-Whitney U p (between conditions).
+    Per-DV sheets     : Rows = Overall (all sessions) + Week 1 + Week 2 + …
+                        Columns = per-condition stats + between-condition effect sizes.
+                        Week means are computed as per-animal weekly averages before
+                        aggregating across animals (avoids session-level pseudoreplication).
+    Level sheets      : Condition-level breakdowns (requires level_stats_data).
+
+    Reported statistics per condition group
+    ----------------------------------------
+    N  Mean  SD  SEM  95%-CI lo  95%-CI hi  Median
+
+    Between-condition effect sizes (all condition pairs)
+    ----------------------------------------------------
+    Cohen's d (pooled SD)  |  effect label (negligible/small/medium/large)
+    Mann-Whitney U  p-value (two-sided, exact=False)
 
     Parameters
     ----------
@@ -1669,58 +3575,344 @@ def generate_descriptive_stats_report(all_results, level_stats_data=None, output
         Directory to save the report.  Defaults to current working directory.
     """
     try:
-        import openpyxl
+        import openpyxl                                          # noqa: F401
         from openpyxl.styles import Font, PatternFill, Alignment
         from openpyxl.utils import get_column_letter
-        from scipy.stats import t as t_dist
+        from scipy.stats import t as t_dist, mannwhitneyu as _scipy_mwu
     except ImportError:
-        print("[WARN] openpyxl not found — descriptive stats report skipped. "
-              "Install it with:  pip install openpyxl")
+        print("[WARN] openpyxl / scipy not found — descriptive stats report skipped.\n"
+              "       Install with:  pip install openpyxl scipy")
         return
 
-    STAT_COLS = ['mean', 'sem', 'sd', 'n', 'min', 'max', 'median', 'ci95_lo', 'ci95_hi']
-    HEADER_FONT   = Font(bold=True, color='FFFFFF')
-    HEADER_FILL_A = PatternFill(start_color='1F497D', end_color='1F497D', fill_type='solid')
-    ROW_FILLS = [
-        PatternFill(start_color='DCE6F1', end_color='DCE6F1', fill_type='solid'),
-        PatternFill(start_color='E2EFDA', end_color='E2EFDA', fill_type='solid'),
+    # ── Styling ───────────────────────────────────────────────────────────────
+    _WH_BOLD   = Font(bold=True, color='FFFFFF')
+    _CTR_WRAP  = Alignment(horizontal='center', wrap_text=True)
+    _CTR       = Alignment(horizontal='center')
+    # Header fill colours by condition index (dark) + effect columns
+    _COND_HDR  = ['1F497D', '375623', '7B2C2C', '614F28', '553B78']
+    _EFF_HDR   = '7B5B00'
+    _IDX_HDR   = '404040'
+    # Alternating data-row fills by condition index (light / lighter)
+    _COND_ROW  = [
+        ['DCE6F1', 'B8CCE4'],   # blue tints
+        ['E2EFDA', 'C6E0B4'],   # green tints
+        ['FCE4D6', 'F4B8A0'],   # red tints
+        ['EBE3F5', 'CEC0E8'],   # purple tints
     ]
+    _EFF_ROW   = ['FFF2CC', 'FFE699']   # yellow tints
 
-    # ── Helpers ──────────────────────────────────────────────────────────────
+    # ── Core helpers ──────────────────────────────────────────────────────────
 
-    def _clean(v):
+    def _ok(v):
+        """True when v is a usable numeric value."""
         if v is None:
             return False
-        if isinstance(v, float) and np.isnan(v):
+        try:
+            return not np.isnan(float(v))
+        except (TypeError, ValueError):
             return False
-        return True
 
-    def _desc_stats(vals):
-        a = np.array([v for v in vals if _clean(v)], dtype=float)
-        if len(a) == 0:
-            return dict(mean=np.nan, sem=np.nan, sd=np.nan, n=0,
-                        min=np.nan, max=np.nan, median=np.nan,
-                        ci95_lo=np.nan, ci95_hi=np.nan)
-        _mean = float(np.mean(a))
-        _sd   = float(np.std(a, ddof=1)) if len(a) > 1 else np.nan
-        _sem  = float(_sd / np.sqrt(len(a))) if len(a) > 1 else np.nan
-        if len(a) > 1:
-            _t = t_dist.ppf(0.975, df=len(a) - 1)
-            _ci_lo = _mean - _t * _sem
-            _ci_hi = _mean + _t * _sem
+    def _arr(vals):
+        return np.array([float(v) for v in vals if _ok(v)], dtype=float)
+
+    def _desc(vals):
+        a = _arr(vals)
+        n = len(a)
+        if n == 0:
+            return {'N': 0, 'Mean': None, 'SD': None, 'SEM': None,
+                    'CI95_lo': None, 'CI95_hi': None, 'Median': None}
+        mu  = float(np.mean(a))
+        sd  = float(np.std(a, ddof=1)) if n > 1 else None
+        sem = float(sd / np.sqrt(n))   if sd is not None else None
+        if sem is not None:
+            tc = t_dist.ppf(0.975, df=n - 1)
+            ci_lo, ci_hi = mu - tc * sem, mu + tc * sem
         else:
-            _ci_lo = _ci_hi = np.nan
-        return dict(
-            mean=_mean,
-            sem=_sem,
-            sd=_sd,
-            n=int(len(a)),
-            min=float(np.min(a)),
-            max=float(np.max(a)),
-            median=float(np.median(a)),
-            ci95_lo=_ci_lo,
-            ci95_hi=_ci_hi,
-        )
+            ci_lo = ci_hi = None
+        return {'N': n, 'Mean': mu, 'SD': sd, 'SEM': sem,
+                'CI95_lo': ci_lo, 'CI95_hi': ci_hi,
+                'Median': float(np.median(a))}
+
+    def _cohens_d(va, vb):
+        a, b = _arr(va), _arr(vb)
+        na, nb = len(a), len(b)
+        if na < 2 or nb < 2:
+            return None
+        vp = ((na - 1) * np.var(a, ddof=1) + (nb - 1) * np.var(b, ddof=1)) / (na + nb - 2)
+        if vp <= 0:
+            return None
+        return float((np.mean(a) - np.mean(b)) / np.sqrt(vp))
+
+    def _d_label(d):
+        if d is None:
+            return ''
+        ad = abs(d)
+        return ('negligible' if ad < 0.2 else
+                'small'      if ad < 0.5 else
+                'medium'     if ad < 0.8 else
+                'large')
+
+    def _mwu_p(va, vb):
+        a, b = _arr(va), _arr(vb)
+        if len(a) < 3 or len(b) < 3:
+            return None
+        try:
+            _, p = _scipy_mwu(a, b, alternative='two-sided')
+            return float(p)
+        except Exception:
+            return None
+
+    # ── DV extraction helpers ─────────────────────────────────────────────────
+
+    def _get(df_r, i, col):
+        if col not in df_r.columns or i >= len(df_r):
+            return None
+        v = df_r.iat[i, df_r.columns.get_loc(col)]
+        return float(v) if pd.notna(v) else None
+
+    def _reward_rate_fn(df_r, i):
+        # Rewards come from the trial log / treadmill — unaffected by capacitive gaps.
+        # Use raw session_length (minutes); hits / session_min = hits/min
+        h, s = _get(df_r, i, 'hits'), _get(df_r, i, 'session_length')
+        return h / s if h is not None and s and s > 0 else None
+
+    def _lick_rate_fn(df_r, i):
+        # Prefer gap-excluded valid_session_length; fall back to raw session_length.
+        # Both stored in minutes → lick_count / session_min = licks/min
+        lc = _get(df_r, i, 'lick_count')
+        s = _get(df_r, i, 'valid_session_length') or _get(df_r, i, 'session_length')
+        return lc / s if lc is not None and s and s > 0 else None
+
+    def _dist_m_fn(df_r, i):
+        v = _get(df_r, i, 'total_distance')
+        return v / 1000.0 if v is not None else None
+
+    def _bout_dist_m_fn(df_r, i):
+        v = _get(df_r, i, 'avg_dist_per_bout')
+        return v / 1000.0 if v is not None else None
+
+    # ── DV specifications: (long_label, col_name_or_fn, excel_tab_name) ───────
+    _DV_SPECS = [
+        ('Average Speed (cm/s)',          'average_speed',           'Speed'),
+        ('Reward Count',                  'hits',                    'Reward Count'),
+        ('Reward Rate (hits/min)',         _reward_rate_fn,           'Reward Rate'),
+        ('Sensitivity (H \u2212 FA)',     'sensitivity',             'Sensitivity'),
+        ("d\u2019  (detectability)",      'dprime',                  "d-prime"),
+        ('Lick Count',                    'lick_count',              'Lick Count'),
+        ('Lick Rate (licks/min)',          _lick_rate_fn,             'Lick Rate'),
+        ('Avg Capacitive (raw mean)',       'avg_cap',                 'Avg Cap'),
+        ('Lick-After-Reward Proportion',  'lick_after_reward_prop',  'Lick-Rew Prop'),
+        ('Rewards per Bout',              'rewards_per_bout',        'Rew per Bout'),
+        ('Total Distance (m)',            _dist_m_fn,                'Distance'),
+        ('Bout Count',                    'bout_count',              'Bout Count'),
+        ('Bout Avg Speed (cm/s)',         'avg_speed_per_bout',      'Bout Speed'),
+        ('Bout Avg Distance (m)',         _bout_dist_m_fn,           'Bout Distance'),
+        ('Immobility Proportion',         'immobility_prop',         'Immobility'),
+        ('False Alarms',                  'false_alarms',            'False Alarms'),
+        ('Correct Rejections',            'correct_rejections',      'Correct Rej'),
+        ('Specificity',                   'specificity',             'Specificity'),
+        ('Avg Lick Latency (s)',          'avg_lick_latency',        'Lick Latency'),
+    ]
+    # Add ending_level if injected
+    if all_results and 'ending_level' in all_results[0].get('df', pd.DataFrame()).columns:
+        _DV_SPECS.append(('Ending Level', 'ending_level', 'Ending Level'))
+
+    conditions_sorted = sorted({r['starting_condition'] for r in all_results})
+    cond_pairs = [(conditions_sorted[i], conditions_sorted[j])
+                  for i in range(len(conditions_sorted))
+                  for j in range(i + 1, len(conditions_sorted))]
+    STAT_KEYS = ['N', 'Mean', 'SD', 'SEM', 'CI95_lo', 'CI95_hi', 'Median']
+
+    # ── Build per-animal × (overall + week) data for one DV ──────────────────
+
+    def _build_dv_data(col_or_fn):
+        """Return (overall_by_cond, week_by_cond).
+
+        overall_by_cond : {cond: [per-animal grand mean]}
+        week_by_cond    : {week_num: {cond: [per-animal week mean]}}
+        Per-animal weekly means are computed first; only those means feed into
+        the group statistics (avoids session-level pseudoreplication).
+        """
+        overall: dict = {c: [] for c in conditions_sorted}
+        by_week: dict = {}
+        for r in all_results:
+            df = r['df'].reset_index(drop=True)
+            cond = r['starting_condition']
+            if cond not in conditions_sorted:
+                continue
+            grand_vals: list = []
+            wk_vals: dict = {}
+            for i in range(len(df)):
+                v = col_or_fn(df, i) if callable(col_or_fn) else _get(df, i, col_or_fn)
+                if _ok(v):
+                    fv = float(v)
+                    grand_vals.append(fv)
+                    wk = i // 4 + 1
+                    wk_vals.setdefault(wk, []).append(fv)
+            if grand_vals:
+                overall[cond].append(float(np.mean(grand_vals)))
+            for wk, wv in wk_vals.items():
+                if wk not in by_week:
+                    by_week[wk] = {c: [] for c in conditions_sorted}
+                by_week[wk][cond].append(float(np.mean(wv)))
+        return overall, by_week
+
+    # ── Column-header / row helpers ───────────────────────────────────────────
+
+    def _make_headers(index_name='Period'):
+        hdrs = [index_name]
+        for c in conditions_sorted:
+            for sk in STAT_KEYS:
+                hdrs.append(f'{c}  {sk}')
+        for ca, cb in cond_pairs:
+            hdrs.append(f"Cohen's d  ({ca} vs {cb})")
+            hdrs.append(f"d_label  ({ca} vs {cb})")
+            hdrs.append(f"MWU p  ({ca} vs {cb})")
+        return hdrs
+
+    def _make_row(index_val, cond_vals, index_name='Period'):
+        rec = {index_name: index_val}
+        for c in conditions_sorted:
+            st = _desc(cond_vals.get(c, []))
+            for sk in STAT_KEYS:
+                rec[f'{c}  {sk}'] = st[sk]
+        for ca, cb in cond_pairs:
+            va, vb = cond_vals.get(ca, []), cond_vals.get(cb, [])
+            d = _cohens_d(va, vb)
+            rec[f"Cohen's d  ({ca} vs {cb})"] = d
+            rec[f"d_label  ({ca} vs {cb})"]   = _d_label(d)
+            rec[f"MWU p  ({ca} vs {cb})"]     = _mwu_p(va, vb)
+        return rec
+
+    # ── Generic sheet writer ──────────────────────────────────────────────────
+
+    def _write_stats_sheet(writer, sheet_name, records, hdrs):
+        """Write records (list of dicts) to an Excel sheet with full formatting."""
+        cols_ordered = [h for h in hdrs if h in records[0]]
+        df_s = pd.DataFrame(records, columns=cols_ordered)
+        df_s.to_excel(writer, sheet_name=sheet_name, index=False)
+
+        ws = writer.sheets[sheet_name]
+        ws.freeze_panes = 'B2'
+        n_cond_cols = len(conditions_sorted) * len(STAT_KEYS)
+
+        # ── Header row ──
+        for col_idx, cell in enumerate(ws[1], 1):
+            cell.font      = _WH_BOLD
+            cell.alignment = _CTR_WRAP
+            if col_idx == 1:
+                color = _IDX_HDR
+            elif col_idx <= 1 + n_cond_cols:
+                ci    = (col_idx - 2) // len(STAT_KEYS)
+                color = _COND_HDR[ci % len(_COND_HDR)]
+            else:
+                color = _EFF_HDR
+            cell.fill = PatternFill(start_color=color, end_color=color, fill_type='solid')
+
+        # ── Data rows ──
+        for row_idx in range(2, len(records) + 2):
+            alt = (row_idx - 2) % 2
+            for col_idx in range(1, len(cols_ordered) + 1):
+                cell = ws.cell(row=row_idx, column=col_idx)
+                cell.alignment = _CTR
+                if col_idx == 1:
+                    pass  # no fill for index column
+                elif col_idx <= 1 + n_cond_cols:
+                    ci   = (col_idx - 2) // len(STAT_KEYS)
+                    pair = _COND_ROW[ci % len(_COND_ROW)]
+                    cell.fill = PatternFill(start_color=pair[alt],
+                                            end_color=pair[alt], fill_type='solid')
+                else:
+                    cell.fill = PatternFill(start_color=_EFF_ROW[alt],
+                                            end_color=_EFF_ROW[alt], fill_type='solid')
+                # Number formats
+                h = hdrs[col_idx - 1] if col_idx <= len(hdrs) else ''
+                if isinstance(cell.value, (int, float)) and cell.value is not None:
+                    if h.endswith('  N'):
+                        cell.number_format = '0'
+                    elif 'MWU p' in h:
+                        cell.number_format = '0.000000'
+                    else:
+                        cell.number_format = '0.0000'
+
+        # ── Auto-fit columns ──
+        for col_cells in ws.columns:
+            mx = max((len(str(c.value)) if c.value is not None else 0)
+                     for c in col_cells)
+            ws.column_dimensions[
+                get_column_letter(col_cells[0].column)
+            ].width = max(9, min(mx + 2, 30))
+
+    # ── Per-DV by-week sheet ──────────────────────────────────────────────────
+
+    def _write_dv_sheet(writer, sheet_name, overall_cond, week_cond):
+        hdrs = _make_headers('Period')
+        rows_data = [('Overall (all sessions)', overall_cond)]
+        for wk in sorted(week_cond.keys()):
+            rows_data.append((f'Week {wk}', week_cond[wk]))
+        records = [_make_row(lbl, cv, 'Period') for lbl, cv in rows_data]
+        _write_stats_sheet(writer, sheet_name, records, hdrs)
+
+    # ── Overview sheet ────────────────────────────────────────────────────────
+
+    def _write_overview(writer, all_dv_overall):
+        """One row per DV – overall condition stats + effect sizes."""
+        hdrs    = _make_headers('Measure')
+        records = [_make_row(lbl, ov, 'Measure')
+                   for lbl, ov in all_dv_overall]
+        # Reuse the same generic writer; n_cond_cols math is identical
+        cols_ordered = [h for h in hdrs if h in records[0]]
+        df_ov = pd.DataFrame(records, columns=cols_ordered)
+        df_ov.to_excel(writer, sheet_name='Overview', index=False)
+
+        ws = writer.sheets['Overview']
+        ws.freeze_panes = 'B2'
+        n_cond_cols = len(conditions_sorted) * len(STAT_KEYS)
+
+        for col_idx, cell in enumerate(ws[1], 1):
+            cell.font      = _WH_BOLD
+            cell.alignment = _CTR_WRAP
+            if col_idx == 1:
+                color = _IDX_HDR
+            elif col_idx <= 1 + n_cond_cols:
+                ci    = (col_idx - 2) // len(STAT_KEYS)
+                color = _COND_HDR[ci % len(_COND_HDR)]
+            else:
+                color = _EFF_HDR
+            cell.fill = PatternFill(start_color=color, end_color=color, fill_type='solid')
+
+        for row_idx in range(2, len(records) + 2):
+            alt = (row_idx - 2) % 2
+            for col_idx in range(1, len(cols_ordered) + 1):
+                cell = ws.cell(row=row_idx, column=col_idx)
+                cell.alignment = _CTR
+                if col_idx == 1:
+                    pass
+                elif col_idx <= 1 + n_cond_cols:
+                    ci   = (col_idx - 2) // len(STAT_KEYS)
+                    pair = _COND_ROW[ci % len(_COND_ROW)]
+                    cell.fill = PatternFill(start_color=pair[alt],
+                                            end_color=pair[alt], fill_type='solid')
+                else:
+                    cell.fill = PatternFill(start_color=_EFF_ROW[alt],
+                                            end_color=_EFF_ROW[alt], fill_type='solid')
+                h = hdrs[col_idx - 1] if col_idx <= len(hdrs) else ''
+                if isinstance(cell.value, (int, float)) and cell.value is not None:
+                    if h.endswith('  N'):
+                        cell.number_format = '0'
+                    elif 'MWU p' in h:
+                        cell.number_format = '0.000000'
+                    else:
+                        cell.number_format = '0.0000'
+
+        for col_cells in ws.columns:
+            mx = max((len(str(c.value)) if c.value is not None else 0)
+                     for c in col_cells)
+            ws.column_dimensions[
+                get_column_letter(col_cells[0].column)
+            ].width = max(12, min(mx + 2, 35))
+
+    # ── Level sheets (extended with effect sizes) ─────────────────────────────
 
     def _sort_level(lv):
         if lv.startswith('level_'):
@@ -1730,174 +3922,192 @@ def generate_descriptive_stats_report(all_results, level_stats_data=None, output
                 pass
         return (1, lv)
 
-    def _write_sheet(writer, sheet_name, index_label, rows):
-        """Write a stats sheet to the Excel workbook.
+    def _write_level_sheet(writer, sheet_name, cond_level_dict):
+        if not cond_level_dict:
+            return
+        lvl_conds = sorted(cond_level_dict.keys())
+        lvl_pairs = [(lvl_conds[i], lvl_conds[j])
+                     for i in range(len(lvl_conds))
+                     for j in range(i + 1, len(lvl_conds))]
+        lvls = sorted(
+            {lv for cd in cond_level_dict.values() for lv in cd},
+            key=_sort_level,
+        )
 
-        rows : list[dict]
-            Each dict has {index_label: display_value, cond_name: [float_list], ...}.
-        """
-        all_conds = sorted({k for row in rows for k in row if k != index_label})
-        col_names = [index_label]
-        for cond in all_conds:
-            for stat in STAT_COLS:
-                col_names.append(f'{cond}_{stat}')
+        # Build headers using the level-specific condition list
+        lvl_hdrs = ['Level']
+        for c in lvl_conds:
+            for sk in STAT_KEYS:
+                lvl_hdrs.append(f'{c}  {sk}')
+        for ca, cb in lvl_pairs:
+            lvl_hdrs.append(f"Cohen's d  ({ca} vs {cb})")
+            lvl_hdrs.append(f"d_label  ({ca} vs {cb})")
+            lvl_hdrs.append(f"MWU p  ({ca} vs {cb})")
 
         records = []
-        for row in rows:
-            rec = {index_label: row[index_label]}
-            for cond in all_conds:
-                st = _desc_stats(row.get(cond, []))
-                for stat in STAT_COLS:
-                    rec[f'{cond}_{stat}'] = st[stat]
+        for lv in lvls:
+            lv_label = lv.replace('level_', 'L').replace('.json', '')
+            rec = {'Level': lv_label}
+            cond_vals = {c: cond_level_dict[c].get(lv, []) for c in lvl_conds}
+            for c in lvl_conds:
+                st = _desc(cond_vals[c])
+                for sk in STAT_KEYS:
+                    rec[f'{c}  {sk}'] = st[sk]
+            for ca, cb in lvl_pairs:
+                d = _cohens_d(cond_vals[ca], cond_vals[cb])
+                rec[f"Cohen's d  ({ca} vs {cb})"] = d
+                rec[f"d_label  ({ca} vs {cb})"]   = _d_label(d)
+                rec[f"MWU p  ({ca} vs {cb})"]     = _mwu_p(cond_vals[ca], cond_vals[cb])
             records.append(rec)
 
-        df_sheet = pd.DataFrame(records, columns=col_names)
-        df_sheet.to_excel(writer, sheet_name=sheet_name, index=False)
+        if not records:
+            return
+
+        # Write using the generic sheet writer with level-specific column count
+        n_lc = len(lvl_conds)
+        n_cond_cols_lvl = n_lc * len(STAT_KEYS)
+
+        cols_ordered = [h for h in lvl_hdrs if h in records[0]]
+        df_lv = pd.DataFrame(records, columns=cols_ordered)
+        df_lv.to_excel(writer, sheet_name=sheet_name, index=False)
 
         ws = writer.sheets[sheet_name]
         ws.freeze_panes = 'B2'
+        for col_idx, cell in enumerate(ws[1], 1):
+            cell.font      = _WH_BOLD
+            cell.alignment = _CTR_WRAP
+            if col_idx == 1:
+                color = _IDX_HDR
+            elif col_idx <= 1 + n_cond_cols_lvl:
+                ci    = (col_idx - 2) // len(STAT_KEYS)
+                color = _COND_HDR[ci % len(_COND_HDR)]
+            else:
+                color = _EFF_HDR
+            cell.fill = PatternFill(start_color=color, end_color=color, fill_type='solid')
 
-        # Style header
-        for cell in ws[1]:
-            cell.font  = HEADER_FONT
-            cell.fill  = HEADER_FILL_A
-            cell.alignment = Alignment(horizontal='center', wrap_text=True)
+        for row_idx in range(2, len(records) + 2):
+            alt = (row_idx - 2) % 2
+            for col_idx in range(1, len(cols_ordered) + 1):
+                cell = ws.cell(row=row_idx, column=col_idx)
+                cell.alignment = _CTR
+                if col_idx == 1:
+                    pass
+                elif col_idx <= 1 + n_cond_cols_lvl:
+                    ci   = (col_idx - 2) // len(STAT_KEYS)
+                    pair = _COND_ROW[ci % len(_COND_ROW)]
+                    cell.fill = PatternFill(start_color=pair[alt],
+                                            end_color=pair[alt], fill_type='solid')
+                else:
+                    cell.fill = PatternFill(start_color=_EFF_ROW[alt],
+                                            end_color=_EFF_ROW[alt], fill_type='solid')
+                h = lvl_hdrs[col_idx - 1] if col_idx <= len(lvl_hdrs) else ''
+                if isinstance(cell.value, (int, float)) and cell.value is not None:
+                    if h.endswith('  N'):
+                        cell.number_format = '0'
+                    elif 'MWU p' in h:
+                        cell.number_format = '0.000000'
+                    else:
+                        cell.number_format = '0.0000'
 
-        # Alternating condition shading
-        for ci, cond in enumerate(all_conds):
-            fill = ROW_FILLS[ci % len(ROW_FILLS)]
-            col_start = 2 + ci * len(STAT_COLS)
-            col_end   = col_start + len(STAT_COLS) - 1
-            for row_idx in range(2, len(records) + 2):
-                for col_idx in range(col_start, col_end + 1):
-                    ws.cell(row=row_idx, column=col_idx).fill = fill
-
-        # Auto-fit column widths (capped 10–25)
         for col_cells in ws.columns:
-            max_len = max(
-                (len(str(c.value)) if c.value is not None else 0) for c in col_cells
-            )
+            mx = max((len(str(c.value)) if c.value is not None else 0)
+                     for c in col_cells)
             ws.column_dimensions[
                 get_column_letter(col_cells[0].column)
-            ].width = max(10, min(max_len + 2, 25))
+            ].width = max(9, min(mx + 2, 28))
 
-    # ── Time-based rows ───────────────────────────────────────────────────────
-
-    conditions_sorted = sorted({r['starting_condition'] for r in all_results})
-    max_sessions = max(len(r['df']) for r in all_results)
-
-    def _extract(df_r, sess_idx, col):
-        if sess_idx >= len(df_r):
-            return np.nan
-        v = df_r.iat[sess_idx, df_r.columns.get_loc(col)]
-        return float(v) if pd.notna(v) else np.nan
-
-    def _session_rows(col_or_fn):
-        """Build rows for a time-based sheet.
-        col_or_fn: column name (str) or callable(df_r, sess_idx) -> float.
-        """
-        rows = []
-        for sess_idx in range(max_sessions):
-            row = {'Session': sess_idx + 1}
-            for cond in conditions_sorted:
-                vals = []
-                for r in all_results:
-                    if r['starting_condition'] != cond:
-                        continue
-                    df_r = r['df'].reset_index(drop=True)
-                    if callable(col_or_fn):
-                        v = col_or_fn(df_r, sess_idx)
-                    else:
-                        v = _extract(df_r, sess_idx, col_or_fn)
-                    if _clean(v):
-                        vals.append(float(v))
-                row[cond] = vals
-            rows.append(row)
-        return rows
-
-    def _reward_rate(df_r, i):
-        h = _extract(df_r, i, 'hits')
-        s = _extract(df_r, i, 'session_length')
-        return h / s if _clean(h) and _clean(s) and s > 0 else np.nan
-
-    def _lick_rate(df_r, i):
-        lc = _extract(df_r, i, 'lick_count')
-        s  = _extract(df_r, i, 'session_length')
-        return lc / s if _clean(lc) and _clean(s) and s > 0 else np.nan
-
-    def _dist_m(df_r, i):
-        v = _extract(df_r, i, 'total_distance')
-        return v / 1000.0 if _clean(v) else np.nan
-
-    def _bout_dist_m(df_r, i):
-        v = _extract(df_r, i, 'avg_dist_per_bout')
-        return v / 1000.0 if _clean(v) else np.nan
-
-    time_sheets = [
-        ('Time - Speed',          _session_rows('average_speed')),
-        ('Time - Reward Count',   _session_rows('hits')),
-        ('Time - Reward Rate',    _session_rows(_reward_rate)),
-        ('Time - Lick Rate',      _session_rows(_lick_rate)),
-        ('Time - Distance (m)',   _session_rows(_dist_m)),
-        ('Time - Bout Count',     _session_rows('bout_count')),
-        ('Time - Bout Avg Speed', _session_rows('avg_speed_per_bout')),
-        ('Time - Bout Avg Dist',  _session_rows(_bout_dist_m)),
-    ]
-
-    # ── Level-based rows ──────────────────────────────────────────────────────
-
-    level_sheets = []
-    if level_stats_data is not None:
-
-        def _level_rows(cond_level_dict):
-            if not cond_level_dict:
-                return []
-            lvls = sorted(
-                {lv for cd in cond_level_dict.values() for lv in cd},
-                key=_sort_level,
-            )
-            rows = []
-            for lv in lvls:
-                row = {'Level': lv.replace('level_', 'L').replace('.json', '')}
-                for cond in sorted(cond_level_dict.keys()):
-                    row[cond] = cond_level_dict[cond].get(lv, [])
-                rows.append(row)
-            return rows
-
-        level_sheets = [
-            ('Level - Reward Rate',    _level_rows(level_stats_data['condition_level_reward_rate'])),
-            ('Level - Speed',          _level_rows(level_stats_data['condition_level_speed'])),
-            ('Level - Lick Rate',      _level_rows(level_stats_data['condition_level_lick'])),
-            ('Level - Distance (m)',   _level_rows(level_stats_data['condition_level_dist'])),
-            ('Level - Bout Count',     _level_rows(level_stats_data['condition_level_bout'])),
-            ('Level - Bout Avg Speed', _level_rows(level_stats_data['condition_level_bout_avg_spd'])),
-            ('Level - Bout Avg Dist',  _level_rows(level_stats_data['condition_level_bout_avg_dist'])),
-        ]
-
-    # ── Write workbook ────────────────────────────────────────────────────────
+    # ── Build data + write workbook ───────────────────────────────────────────
 
     if output_dir is None:
         output_dir = os.getcwd()
     os.makedirs(output_dir, exist_ok=True)
-    timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S')
-    out_path = os.path.join(output_dir, f'descriptive_stats_{timestamp_str}.xlsx')
+    ts       = datetime.now().strftime('%Y%m%d_%H%M%S')
+    out_path = os.path.join(output_dir, f'descriptive_stats_{ts}.xlsx')
+
+    all_dv_overall: list = []   # [(label, overall_by_cond), ...] for Overview
 
     with pd.ExcelWriter(out_path, engine='openpyxl') as writer:
-        for sheet_name, rows in time_sheets:
-            if rows:
-                _write_sheet(writer, sheet_name, 'Session', rows)
-        for sheet_name, rows in level_sheets:
-            if rows:
-                _write_sheet(writer, sheet_name, 'Level', rows)
+
+        # Per-DV sheets (Overview written last, then moved to front)
+        for dv_label, col_or_fn, tab_name in _DV_SPECS:
+            overall_cond, week_cond = _build_dv_data(col_or_fn)
+            all_dv_overall.append((dv_label, overall_cond))
+            _write_dv_sheet(writer, tab_name, overall_cond, week_cond)
+
+        # Overview sheet
+        _write_overview(writer, all_dv_overall)
+
+        # Move Overview to the first tab
+        wb = writer.book
+        if 'Overview' in wb.sheetnames:
+            wb.move_sheet('Overview', offset=-wb.sheetnames.index('Overview'))
+
+        # Level sheets
+        if level_stats_data is not None:
+            _lsd = level_stats_data
+            _level_sheet_specs = [
+                ('Lvl Reward Rate',  _lsd.get('condition_level_reward_rate')),
+                ('Lvl Speed',        _lsd.get('condition_level_speed')),
+                ('Lvl Lick Rate',    _lsd.get('condition_level_lick')),
+                ('Lvl Distance',     _lsd.get('condition_level_dist')),
+                ('Lvl Bout Count',   _lsd.get('condition_level_bout')),
+                ('Lvl Bout Speed',   _lsd.get('condition_level_bout_avg_spd')),
+                ('Lvl Bout Dist',    _lsd.get('condition_level_bout_avg_dist')),
+            ]
+            for sname, cld in _level_sheet_specs:
+                if cld:
+                    _write_level_sheet(writer, sname, cld)
 
     print(f"\nDescriptive stats report saved to:\n  {out_path}")
+
+def print_session_weekday_alignment(all_results):
+    """Print a verification table mapping each session to its assigned weekday.
+
+    Sessions are numbered sequentially (0-based) per mouse and assigned to
+    the fixed 4-day training cycle: Monday → Tuesday → Thursday → Friday,
+    repeating from the start of each new week.
+
+    A ``<-- week boundary`` marker is printed at the start of every new
+    week (i.e. every 4th session after the first) so you can visually
+    confirm that the cycle resets correctly.
+
+    Parameters
+    ----------
+    all_results : list[dict]
+        As returned by ``analyze_mouse_data``.  Each dict must contain
+        keys ``'mouse'``, ``'starting_condition'``, and ``'df'`` (the
+        per-mouse results DataFrame, which must include a ``'weekday'``
+        column — added automatically during data collection).
+    """
+    DOW_CYCLE = ['Monday', 'Tuesday', 'Thursday', 'Friday']
+    _sep = '=' * 66
+    _inner = '-' * 66
+    print('\n' + _sep)
+    print('  SESSION  ↔  WEEKDAY  ALIGNMENT  CHECK')
+    print(_sep)
+    for result in all_results:
+        mouse     = result['mouse']
+        condition = result['starting_condition']
+        df_r      = result['df']
+        print(f'\n  Mouse : {mouse}   (starting condition: {condition})')
+        print(f'  {"Sess #":>6}  {"Date":<14}  {"Weekday":<12}  {"Week #":>6}')
+        print('  ' + _inner)
+        for sess_i, (_, row) in enumerate(df_r.iterrows()):
+            date_str = str(row['date'])[:10]
+            wd       = row.get('weekday', DOW_CYCLE[sess_i % 4])
+            week_num = sess_i // 4 + 1
+            marker   = '  <-- new week' if sess_i % 4 == 0 and sess_i > 0 else ''
+            print(f'  {sess_i + 1:>6}  {date_str:<14}  {wd:<12}  {week_num:>6}{marker}')
+    print('\n' + _sep + '\n')
 
 
 def _plot_epoch_panels(all_results, signal_key, ylabel, title_prefix,
                       condition_color_map, window_s=EPOCH_WINDOW_S,
                       hierarchy='event', use_sd=False, show_individual_traces=True,
                       reward_delivery_vline=True, group_key='starting_condition',
-                      group_color_map=None, group_label='By Starting Condition'):
+                      group_color_map=None, group_label='By Starting Condition',
+                      canonical_time=None,
+                      xlim=None, ylim=None, xticks=None, y_scale=1.0):
     """Create per-mouse and condition-averaged epoch figures for a given signal.
 
     Parameters
@@ -1924,7 +4134,7 @@ def _plot_epoch_panels(all_results, signal_key, ylabel, title_prefix,
     fig_per_mouse : matplotlib.figure.Figure  (one subplot per mouse)
     fig_cond      : matplotlib.figure.Figure  (condition-averaged overlay)
     """
-    canonical_time = EPOCH_CANONICAL_TIME
+    canonical_time = EPOCH_CANONICAL_TIME if canonical_time is None else canonical_time
     unit_label     = 'sessions' if hierarchy == 'session' else 'events'
     hier_label     = '(session-averaged)' if hierarchy == 'session' else '(event-averaged)'
     _active_color_map = group_color_map if group_color_map is not None else condition_color_map
@@ -1933,8 +4143,9 @@ def _plot_epoch_panels(all_results, signal_key, ylabel, title_prefix,
     n_mice = len(all_results)
     ncols  = min(3, n_mice)
     nrows  = (n_mice + ncols - 1) // ncols
+    _rc_w, _rc_h = plt.rcParams.get('figure.figsize', (4.0, 2.5))
     fig_per_mouse, axs = plt.subplots(nrows, ncols,
-                                      figsize=(5 * ncols, 4 * nrows),
+                                      figsize=(_rc_w * ncols, _rc_h * nrows),
                                       sharex=True, sharey=True,
                                       squeeze=False)
     axs_flat = axs.flatten()
@@ -1948,6 +4159,7 @@ def _plot_epoch_panels(all_results, signal_key, ylabel, title_prefix,
         color      = _active_color_map.get(condition, 'steelblue')
 
         if matrix is not None and matrix.shape[0] > 0:
+            matrix = matrix * y_scale
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore', RuntimeWarning)
                 mean_trace = np.nanmean(matrix, axis=0)
@@ -1960,7 +4172,7 @@ def _plot_epoch_panels(all_results, signal_key, ylabel, title_prefix,
                                          0.0)
             _yvals_per.append(float(np.nanmax(mean_trace + err_trace)))
             _yvals_per.append(float(np.nanmin(mean_trace - err_trace)))
-            ax.plot(canonical_time, mean_trace, color=color, linewidth=1.8,
+            ax.plot(canonical_time, mean_trace, color=color,
                     label=f'n={matrix.shape[0]} {unit_label}')
             ax.fill_between(canonical_time,
                             mean_trace - err_trace,
@@ -1968,23 +4180,25 @@ def _plot_epoch_panels(all_results, signal_key, ylabel, title_prefix,
                             color=color, alpha=0.25)
         else:
             ax.text(0.5, 0.5, 'No data', ha='center', va='center',
-                    transform=ax.transAxes, fontsize=9)
+                    transform=ax.transAxes)
 
-        ax.axvline(0, color='red', linestyle='--', linewidth=1.2)
+        ax.axvline(0, color='red', linestyle='--')
         if reward_delivery_vline:
-            ax.axvline(0.65, color='black', linestyle='--', linewidth=1.0)
-        ax.set_title(mouse_name, fontsize=10)
-        ax.set_xlim(-window_s, window_s)
+            ax.axvline(0.65, color='black', linestyle='--')
+        ax.set_title(mouse_name)
+        ax.set_xlim(xlim if xlim is not None else (-window_s, window_s))
+        if xticks is not None:
+            ax.set_xticks(xticks)
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
-        ax.legend(fontsize=8, loc='upper right')
+        ax.legend(loc='upper right')
 
     for j in range(n_mice, len(axs_flat)):
         axs_flat[j].set_visible(False)
 
     for ax in axs_flat[:n_mice]:
-        ax.set_xlabel('Time from reward zone entry (s)', fontsize=9)
-        ax.set_ylabel(ylabel, fontsize=9)
+        ax.set_xlabel('Time from reward zone entry (s)')
+        ax.set_ylabel(ylabel)
 
     # Shared y-axis: fitted to mean ± SEM of averaged data (5 % headroom).
     # With sharey=True one set_ylim call propagates everywhere.
@@ -1994,13 +4208,13 @@ def _plot_epoch_panels(all_results, signal_key, ylabel, title_prefix,
     else:
         _ymax_per, _ymin_per = 1.0, 0.0
     _bot_per = _ymin_per * 1.05 if _ymin_per < 0 else 0.0
-    axs_flat[0].set_ylim(_bot_per, _ymax_per * 1.05)
+    axs_flat[0].set_ylim(ylim if ylim is not None else (_bot_per, _ymax_per * 1.05))
 
-    fig_per_mouse.suptitle(f'{title_prefix} {hier_label} — Per Mouse', fontsize=13)
+    fig_per_mouse.suptitle(f'{title_prefix} {hier_label} — Per Mouse')
     fig_per_mouse.tight_layout()
 
     # ── Figure 2: condition-averaged ─────────────────────────────────────────
-    fig_cond, ax_cond = plt.subplots(figsize=(9, 5))
+    fig_cond, ax_cond = plt.subplots(figsize=plt.rcParams.get('figure.figsize', (4.0, 2.5)))
 
     condition_mouse_means  = {}
     condition_all_matrices = {}
@@ -2009,6 +4223,7 @@ def _plot_epoch_panels(all_results, signal_key, ylabel, title_prefix,
         matrix    = result.get(signal_key)
         condition = result.get(group_key, 'unknown')
         if matrix is not None and matrix.shape[0] > 0:
+            matrix = matrix * y_scale
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore', RuntimeWarning)
                 mouse_mean = np.nanmean(matrix, axis=0)
@@ -2020,13 +4235,6 @@ def _plot_epoch_panels(all_results, signal_key, ylabel, title_prefix,
         color       = _active_color_map.get(condition, 'steelblue')
         mouse_means = np.array(condition_mouse_means[condition])  # (n_mice_in_cond, 501)
         n_mice_cond = mouse_means.shape[0]
-
-        # Thin per-mouse lines for within-condition spread (optional)
-        if show_individual_traces:
-            for mm in mouse_means:
-                ax_cond.plot(canonical_time, mm, color=color, linewidth=0.8, alpha=0.4)
-                _yvals_cond.append(float(np.nanmax(mm)))
-                _yvals_cond.append(float(np.nanmin(mm)))
 
         with warnings.catch_warnings():
             warnings.simplefilter('ignore', RuntimeWarning)
@@ -2040,20 +4248,31 @@ def _plot_epoch_panels(all_results, signal_key, ylabel, title_prefix,
         _yvals_cond.append(float(np.nanmax(cond_mean + cond_err)))
         _yvals_cond.append(float(np.nanmin(cond_mean - cond_err)))
 
-        ax_cond.plot(canonical_time, cond_mean, color=color, linewidth=2.2,
-                     label=f'{condition} (n={n_mice_cond} mice)')
+        # Draw SEM band first (backdrop), then individual traces, then mean line
         ax_cond.fill_between(canonical_time,
                              cond_mean - cond_err,
                              cond_mean + cond_err,
                              color=color, alpha=0.20)
 
-    ax_cond.axvline(0, color='red', linestyle='--', linewidth=1.5, label='Zone entry (t=0)')
+        # Thin per-mouse lines for within-condition spread (optional)
+        if show_individual_traces:
+            for mm in mouse_means:
+                ax_cond.plot(canonical_time, mm, color=color, alpha=0.4)
+                _yvals_cond.append(float(np.nanmax(mm)))
+                _yvals_cond.append(float(np.nanmin(mm)))
+
+        ax_cond.plot(canonical_time, cond_mean, color=color,
+                     label=f'{condition} (n={n_mice_cond} mice)')
+
+    ax_cond.axvline(0, color='red', linestyle='--', label='Zone entry (t=0)')
     if reward_delivery_vline:
-        ax_cond.axvline(0.65, color='black', linestyle='--', linewidth=1.0, label='Reward delivery (t=0.65 s)')
+        ax_cond.axvline(0.65, color='black', linestyle='--', label='Reward delivery (t=0.65 s)')
     ax_cond.set_xlabel('Time from reward zone entry (s)')
     ax_cond.set_ylabel(ylabel)
     ax_cond.set_title(f'{title_prefix} {hier_label} — {group_label}')
-    ax_cond.set_xlim(-window_s, window_s)
+    ax_cond.set_xlim(xlim if xlim is not None else (-window_s, window_s))
+    if xticks is not None:
+        ax_cond.set_xticks(xticks)
     # Fit y-axis to mean ± SEM of averaged data (5 % headroom)
     if _yvals_cond:
         _ymax_cond = float(np.nanmax(_yvals_cond))
@@ -2061,13 +4280,297 @@ def _plot_epoch_panels(all_results, signal_key, ylabel, title_prefix,
     else:
         _ymax_cond, _ymin_cond = 1.0, 0.0
     _bot_cond = _ymin_cond * 1.05 if _ymin_cond < 0 else 0.0
-    ax_cond.set_ylim(_bot_cond, _ymax_cond * 1.05)
+    ax_cond.set_ylim(ylim if ylim is not None else (_bot_cond, _ymax_cond * 1.05))
     ax_cond.legend()
     ax_cond.spines['top'].set_visible(False)
     ax_cond.spines['right'].set_visible(False)
     fig_cond.tight_layout()
 
     return fig_per_mouse, fig_cond
+
+
+def _plot_epoch_panels_by_level(all_results, transitions_csv_path,
+                                 data_files,
+                                 event_type,
+                                 ylabel, title_prefix, condition_color_map,
+                                 window_s=EPOCH_WINDOW_S, canonical_time=None,
+                                 reward_delivery_vline=True,
+                                 levels_to_include=None,
+                                 xlim=None, ylim=None):
+    """One condition-averaged epoch figure per level, using timestamp-correct level slicing.
+
+    Level boundaries are derived directly from the ``transition_ts`` column in
+    the transitions CSV — exactly the same logic used by ``analyze_levels()``.
+    For each (animal, session, level-segment) triplet the reward zone entry (or
+    delivery) timestamps that fall within ``[start_t, end_t)`` are extracted
+    from the trial_log and used to build per-event speed epoch windows from the
+    treadmill CSV.  Those windows are then averaged: first across events within
+    a level-segment, then across sessions, then across mice within each
+    condition.
+
+    Parameters
+    ----------
+    all_results          : list[dict] from analyze_mouse_data (used only for
+                           starting_condition lookup; file paths come from data_files)
+    transitions_csv_path : path to the transitions CSV (level_sorter.py output)
+    data_files           : list of master CSV paths passed to analyze_mouse_data
+    event_type           : ``'reward_entry'`` — align to reward zone entry times
+                           ``'delivery'``     — align to reward delivery times
+                           (delivery = entry + 0.65 s for non-RV cohort;
+                            ``_match_rewards_to_zones`` for RV cohort)
+    ylabel, title_prefix : axis/title strings
+    condition_color_map  : dict condition -> colour
+    reward_delivery_vline: if True, draw a dashed vline at t=0.65 s
+
+    Returns
+    -------
+    list of (level_name: str, fig: matplotlib.Figure) pairs, sorted by level number
+    """
+    if not transitions_csv_path:
+        print(f"  [WARN] No transitions CSV — skipping by-level epoch plots ({event_type})")
+        return []
+    try:
+        trans_df = pd.read_csv(transitions_csv_path)
+        trans_df['date'] = pd.to_datetime(trans_df['date'])
+    except Exception as e:
+        print(f"  [WARN] Cannot read transitions CSV for by-level epochs: {e}")
+        return []
+
+    canonical_time = EPOCH_CANONICAL_TIME if canonical_time is None else canonical_time
+
+    # ── Starting-condition lookup (from all_results) ──────────────────────────
+    condition_lookup: dict[str, str] = {
+        r['mouse']: r.get('starting_condition', 'Unknown')
+        for r in all_results
+    }
+
+    # ── File-path lookup: (animal_id, date_norm) -> {trial_log, treadmill} ───
+    session_lookup: dict = {}
+    for data_file in data_files:
+        animal_id = os.path.basename(data_file).split('_')[0]
+        try:
+            df_master = pd.read_csv(data_file)
+        except Exception:
+            continue
+        if 'date' in df_master.columns:
+            df_master['date'] = pd.to_datetime(df_master['date'])
+        for _, row in df_master.iterrows():
+            date_key = pd.Timestamp(row['date']).normalize()
+            session_lookup[(animal_id, date_key)] = {
+                'trial_log':  row.get('trial_log'),
+                'treadmill':  row.get('treadmill'),
+            }
+
+    # ── Accumulate per-event epoch rows: level -> condition -> animal -> [arrays]
+    # level_mouse_epochs[level][condition][animal_id] = list of 1-D epoch arrays
+    level_mouse_epochs: dict = {}
+
+    for animal_id, animal_group in trans_df.groupby('animal_id'):
+        condition = condition_lookup.get(animal_id, 'Unknown')
+        mouse_is_rv = _is_rv_cohort(animal_id)
+
+        for session_num, session_group in animal_group.groupby('session_num'):
+            session_group = session_group.reset_index(drop=True)
+            date_key = pd.Timestamp(session_group.iloc[0]['date']).normalize()
+
+            sess_info = session_lookup.get((animal_id, date_key))
+            if sess_info is None:
+                continue
+
+            trial_log_path = sess_info.get('trial_log')
+            treadmill_path = sess_info.get('treadmill')
+
+            if not isinstance(trial_log_path, str) or pd.isna(trial_log_path):
+                continue
+            try:
+                tl = pd.read_csv(trial_log_path)
+            except Exception as e:
+                print(f"  [WARN] {animal_id} sess {session_num}: cannot read trial_log — {e}")
+                continue
+
+            # Load raw treadmill data (no smoothing — epoch averaging is the smoothing)
+            treadmill_df = None
+            if isinstance(treadmill_path, str) and not pd.isna(treadmill_path):
+                try:
+                    tm = pd.read_csv(treadmill_path)
+                    if 'global_time' in tm.columns and 'speed' in tm.columns:
+                        treadmill_df = tm[['global_time', 'speed']].dropna(
+                            subset=['global_time', 'speed'])
+                except Exception:
+                    pass
+
+            if treadmill_df is None or len(treadmill_df) == 0:
+                continue
+
+            sp_time = treadmill_df['global_time'].values
+            sp_val  = treadmill_df['speed'].values / 10.0  # mm/s → cm/s
+
+            # All reward zone entry times for this session
+            try:
+                all_zone_times = np.array(_extract_reward_zone_entry_times(tl), dtype=float)
+            except Exception:
+                all_zone_times = np.array([], dtype=float)
+
+            # Delivery times: entry + 0.65 s (non-RV) or matched (RV)
+            if event_type == 'delivery':
+                try:
+                    if mouse_is_rv:
+                        _pairs = _match_rewards_to_zones(tl)
+                        all_event_times = np.array([rd for _, rd in _pairs], dtype=float)
+                    else:
+                        all_event_times = all_zone_times + 0.65
+                except Exception:
+                    all_event_times = np.array([], dtype=float)
+            else:
+                all_event_times = all_zone_times
+
+            if len(all_event_times) == 0:
+                continue
+
+            # ── Per-level-segment slicing (mirrors analyze_levels logic) ─────
+            levels   = session_group['level'].tolist()
+            trans_ts = session_group['transition_ts'].tolist()
+
+            # Session end time fallback
+            tc_vals = tl['texture_change_time'].dropna() if 'texture_change_time' in tl.columns else pd.Series([], dtype=float)
+            session_end_time = float(tc_vals.max()) if len(tc_vals) > 0 else float(sp_time[-1])
+
+            start_times = [0.0]
+            for ts in trans_ts[:-1]:
+                start_times.append(float(ts) if pd.notna(ts) else float('inf'))
+
+            end_times = []
+            for ts in trans_ts:
+                if pd.notna(ts):
+                    end_times.append(float(ts))
+                else:
+                    end_times.append(session_end_time)
+
+            for i, level in enumerate(levels):
+                level = level.replace('.json', '')
+                start_t = start_times[i]
+                end_t   = end_times[i]
+                if end_t is None or start_t >= end_t:
+                    continue
+
+                # Events within this level's time window
+                mask = (all_event_times >= start_t) & (all_event_times < end_t)
+                lvl_event_times = all_event_times[mask]
+                if len(lvl_event_times) == 0:
+                    continue
+
+                # Build epoch matrix for events in this level-segment
+                mat = _build_epoch_matrix(sp_time, sp_val, lvl_event_times,
+                                          window_s=window_s,
+                                          canonical_time=canonical_time)
+                if mat is None:
+                    continue
+
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    seg_mean = np.nanmean(mat, axis=0)   # mean across events this segment
+
+                (level_mouse_epochs
+                 .setdefault(level, {})
+                 .setdefault(condition, {})
+                 .setdefault(animal_id, [])
+                 .append(seg_mean))
+
+    if not level_mouse_epochs:
+        print(f"  [WARN] No level-matched epoch data found for event_type='{event_type}' — "
+              "check that animal IDs in the transitions CSV match the data file names.")
+        return []
+
+    # ── Sort levels numerically ───────────────────────────────────────────────
+    def _lvl_sort_key(name):
+        parts = name.split('_')
+        return int(parts[-1]) if parts[-1].isdigit() else 999
+
+    all_levels = sorted(level_mouse_epochs.keys(), key=_lvl_sort_key)
+
+    # Filter to only the requested levels (if provided)
+    if levels_to_include is not None:
+        all_levels = [lv for lv in all_levels if lv in levels_to_include]
+
+    # ── Pass 1: compute per-level condition means/SEMs; find global y-range ──
+    # level_computed[lvl] = list of (condition, color, cond_mean, cond_err, n_mice)
+    level_computed: dict = {}
+    global_yvals: list = []
+
+    for lvl in all_levels:
+        lvl_data = level_mouse_epochs[lvl]
+        lvl_entries = []
+        for condition in sorted(lvl_data.keys()):
+            color      = condition_color_map.get(condition, 'steelblue')
+            mouse_dict = lvl_data[condition]
+
+            mouse_means = []
+            for _aid, seg_means in mouse_dict.items():
+                arr = np.array(seg_means)
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    mouse_means.append(np.nanmean(arr, axis=0))
+
+            if not mouse_means:
+                continue
+            mouse_means = np.array(mouse_means)
+            n_mice      = mouse_means.shape[0]
+
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', RuntimeWarning)
+                cond_mean = np.nanmean(mouse_means, axis=0)
+                cond_err  = (np.nanstd(mouse_means, axis=0, ddof=1) / np.sqrt(n_mice)
+                             if n_mice > 1 else np.zeros_like(cond_mean))
+
+            global_yvals.extend([float(np.nanmax(cond_mean + cond_err)),
+                                  float(np.nanmin(cond_mean - cond_err))])
+            lvl_entries.append((condition, color, cond_mean, cond_err, n_mice))
+
+        if lvl_entries:
+            level_computed[lvl] = lvl_entries
+
+    # Shared y-axis bounds across all level panels (bottom always 0)
+    if global_yvals:
+        _global_ymax = float(np.nanmax(global_yvals))
+        _shared_ybot = 0.0
+        _shared_ytop = _global_ymax * 1.05
+    else:
+        _shared_ybot, _shared_ytop = 0.0, 1.0
+
+    # ── Pass 2: build one figure per level, all with the shared y-axis ───────
+    figs = []
+    for lvl in all_levels:
+        if lvl not in level_computed:
+            continue
+        lvl_display = lvl.replace('_', ' ').title()
+
+        fig, ax = plt.subplots(figsize=plt.rcParams.get('figure.figsize', (4.0, 2.5)))
+
+        for condition, color, cond_mean, cond_err, n_mice in level_computed[lvl]:
+            ax.plot(canonical_time, cond_mean, color=color,
+                    label=f'{condition} (n={n_mice})')
+            ax.fill_between(canonical_time,
+                            cond_mean - cond_err,
+                            cond_mean + cond_err,
+                            color=color, alpha=0.20)
+
+        ax.axvline(0, color='red', linestyle='--', label='Event (t=0)')
+        if reward_delivery_vline:
+            ax.axvline(0.65, color='black', linestyle='--',
+                       label='Reward delivery (t=0.65 s)')
+        ax.set_xlabel('Time (s)')
+        ax.set_ylabel(ylabel)
+        ax.set_title(f'{title_prefix} — {lvl_display}')
+        ax.set_xlim(-5, 5)
+        ax.set_xticks([-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5])
+        ax.set_ylim(0, 14)
+        ax.legend()
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        fig.tight_layout()
+        figs.append((lvl, fig))
+
+    return figs
 
 
 def _plot_epoch_early_late_panels(all_results, signal_key, ylabel, title_prefix,
@@ -2118,8 +4621,9 @@ def _plot_epoch_early_late_panels(all_results, signal_key, ylabel, title_prefix,
         # ── per-mouse figure (ceil(n_mice/2) rows × 2 cols) ──────────────────
         n_cols = 2
         n_rows = math.ceil(n_mice / n_cols)
+        _rc_w2, _rc_h2 = plt.rcParams.get('figure.figsize', (5.0, 2.5))
         fig_pm, axs = plt.subplots(n_rows, n_cols,
-                                   figsize=(12, 4 * n_rows),
+                                   figsize=(_rc_w2 * n_cols, _rc_h2 * n_rows),
                                    sharex=True, sharey=True,
                                    squeeze=False)
         # hide any unused axes in the last row
@@ -2135,17 +4639,17 @@ def _plot_epoch_early_late_panels(all_results, signal_key, ylabel, title_prefix,
             color      = condition_color_map.get(condition, 'steelblue')
             ax         = axs[i // n_cols, i % n_cols]
 
-            ax.axvline(0, color='red', linestyle='--', linewidth=1.2)
+            ax.axvline(0, color='red', linestyle='--')
             if reward_delivery_vline:
-                ax.axvline(0.65, color='black', linestyle='--', linewidth=1.0)
+                ax.axvline(0.65, color='black', linestyle='--')
             ax.set_xlim(-window_s, window_s)
-            ax.set_ylabel(ylabel, fontsize=9)
-            ax.set_title(f'{mouse_name} — {half_label}', fontsize=10)
+            ax.set_ylabel(ylabel)
+            ax.set_title(f'{mouse_name} — {half_label}')
             ax.spines['top'].set_visible(False)
             ax.spines['right'].set_visible(False)
             # x-label on bottom row only
             if i // n_cols == n_rows - 1:
-                ax.set_xlabel('Time from reward zone entry (s)', fontsize=9)
+                ax.set_xlabel('Time from reward zone entry (s)')
 
             if matrix is not None and indices is not None and len(indices) > 0:
                 mask = (indices < global_half) if is_early else (indices >= global_half)
@@ -2153,7 +4657,7 @@ def _plot_epoch_early_late_panels(all_results, signal_key, ylabel, title_prefix,
 
                 if sub.shape[0] == 0:
                     ax.text(0.5, 0.5, 'No data', ha='center', va='center',
-                            transform=ax.transAxes, fontsize=9)
+                            transform=ax.transAxes)
                 else:
                     with warnings.catch_warnings():
                         warnings.simplefilter('ignore', RuntimeWarning)
@@ -2167,7 +4671,7 @@ def _plot_epoch_early_late_panels(all_results, signal_key, ylabel, title_prefix,
                                                   0.0)
                     _yvals_pm.append(float(np.nanmax(mean_trace + err_trace)))
                     _yvals_pm.append(float(np.nanmin(mean_trace - err_trace)))
-                    ax.plot(canonical_time, mean_trace, color=color, linewidth=1.8,
+                    ax.plot(canonical_time, mean_trace, color=color,
                             label=f'n={sub.shape[0]} {row_unit}')
                     ax.fill_between(canonical_time,
                                     mean_trace - err_trace,
@@ -2175,9 +4679,9 @@ def _plot_epoch_early_late_panels(all_results, signal_key, ylabel, title_prefix,
                                     color=color, alpha=0.25)
             else:
                 ax.text(0.5, 0.5, 'No data', ha='center', va='center',
-                        transform=ax.transAxes, fontsize=9)
+                        transform=ax.transAxes)
 
-            ax.legend(fontsize=8, loc='upper right')
+            ax.legend(loc='upper right')
 
         if _yvals_pm:
             _ymax_pm = float(np.nanmax(_yvals_pm))
@@ -2186,11 +4690,11 @@ def _plot_epoch_early_late_panels(all_results, signal_key, ylabel, title_prefix,
             _ymax_pm, _ymin_pm = 1.0, 0.0
         _bot_pm = _ymin_pm * 1.05 if _ymin_pm < 0 else 0.0
         axs[0, 0].set_ylim(_bot_pm, _ymax_pm * 1.05)
-        fig_pm.suptitle(f'{title_prefix} — {half_label} (Per Mouse)', fontsize=13)
+        fig_pm.suptitle(f'{title_prefix} — {half_label} (Per Mouse)')
         fig_pm.tight_layout()
 
         # ── condition figure ──────────────────────────────────────────────────
-        fig_cond, ax_cond = plt.subplots(figsize=(10, 5))
+        fig_cond, ax_cond = plt.subplots()
 
         cond_data: dict = {}
         cond_raw:  dict = {}
@@ -2215,12 +4719,6 @@ def _plot_epoch_early_late_panels(all_results, signal_key, ylabel, title_prefix,
             color       = condition_color_map.get(condition, 'steelblue')
             mouse_means = np.array(cond_data[condition])
             n_m         = mouse_means.shape[0]
-            if show_individual_traces:
-                for mm in mouse_means:
-                    ax_cond.plot(canonical_time, mm, color=color,
-                                 linewidth=0.6, alpha=0.3)
-                    _yvals_cond_half.append(float(np.nanmax(mm)))
-                    _yvals_cond_half.append(float(np.nanmin(mm)))
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore', RuntimeWarning)
                 cond_mean = np.nanmean(mouse_means, axis=0)
@@ -2232,16 +4730,24 @@ def _plot_epoch_early_late_panels(all_results, signal_key, ylabel, title_prefix,
                                 if n_m > 1 else np.zeros_like(cond_mean))
             _yvals_cond_half.append(float(np.nanmax(cond_mean + cond_err)))
             _yvals_cond_half.append(float(np.nanmin(cond_mean - cond_err)))
-            ax_cond.plot(canonical_time, cond_mean, color=color, linewidth=2.2,
-                         label=f'{condition} (n={n_m} mice)')
+
+            # Draw SEM band first (backdrop), then individual traces, then mean line
             ax_cond.fill_between(canonical_time,
                                  cond_mean - cond_err,
                                  cond_mean + cond_err,
-                                 color=color, alpha=0.15)
+                                 color=color, alpha=0.20)
+            if show_individual_traces:
+                for mm in mouse_means:
+                    ax_cond.plot(canonical_time, mm, color=color,
+                                 alpha=0.3)
+                    _yvals_cond_half.append(float(np.nanmax(mm)))
+                    _yvals_cond_half.append(float(np.nanmin(mm)))
+            ax_cond.plot(canonical_time, cond_mean, color=color,
+                         label=f'{condition} (n={n_m} mice)')
 
-        ax_cond.axvline(0, color='red', linestyle='--', linewidth=1.5, label='Zone entry (t=0)')
+        ax_cond.axvline(0, color='red', linestyle='--', label='Zone entry (t=0)')
         if reward_delivery_vline:
-            ax_cond.axvline(0.65, color='black', linestyle='--', linewidth=1.0, label='Reward delivery (t=0.65 s)')
+            ax_cond.axvline(0.65, color='black', linestyle='--', label='Reward delivery (t=0.65 s)')
         ax_cond.set_xlabel('Time from reward zone entry (s)')
         ax_cond.set_ylabel(ylabel)
         ax_cond.set_title(f'{title_prefix} — {half_label} (By Condition)')
@@ -2281,24 +4787,28 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     # Create color mapping based on starting conditions
     # Sort so that the condition→color assignment is deterministic across runs
     unique_conditions = sorted(set(starting_conditions))
-    condition_colors = generate_colors(len(unique_conditions))
-    condition_color_map = {condition: color for condition, color in zip(unique_conditions, condition_colors)}
+    condition_color_map = {cond: _condition_to_color(cond) for cond in unique_conditions}
     
     speed_fig             = plt.figure(figsize=(12, 6)) if 'speed'              in selected_plots else None
-    sensitivity_fig       = plt.figure(figsize=(12, 6)) if 'sensitivity'        in selected_plots else None
+    sensitivity_fig       = plt.figure(figsize=plt.rcParams['figure.figsize']) if 'sensitivity'        in selected_plots else None
     lick_fig              = plt.figure(figsize=(12, 6)) if 'lick_count'         in selected_plots else None
     reward_fig            = plt.figure(figsize=(12, 6)) if 'reward_count'       in selected_plots else None
+    lick_reward_ratio_fig = plt.figure(figsize=(12, 6)) if 'lick_reward_ratio'  in selected_plots else None
     avg_reward_fig        = plt.figure(figsize=(12, 6)) if 'avg_reward'         in selected_plots else None
     sex_reward_fig        = plt.figure(figsize=(12, 6)) if 'sex_reward'         in selected_plots else None
+    avg_sex_speed_fig     = plt.figure(figsize=(12, 6)) if 'avg_sex_speed'      in selected_plots else None
     avg_lick_rate_fig     = plt.figure(figsize=(12, 6)) if 'avg_lick_rate'      in selected_plots else None
     sex_lick_rate_fig     = plt.figure(figsize=(12, 6)) if 'sex_lick_rate'      in selected_plots else None
     false_alarm_fig       = plt.figure(figsize=(12, 6)) if 'false_alarms'       in selected_plots else None
     correct_rejection_fig = plt.figure(figsize=(12, 6)) if 'correct_rejections' in selected_plots else None
     specificity_fig       = plt.figure(figsize=(12, 6)) if 'specificity'        in selected_plots else None
     dprime_fig            = plt.figure(figsize=(12, 6)) if 'dprime'             in selected_plots else None
-    distance_fig          = plt.figure(figsize=(12, 6)) if 'distance'           in selected_plots else None
+    distance_fig          = plt.figure(figsize=(plt.rcParams['figure.figsize'])) if 'distance'           in selected_plots else None
+    immobility_prop_fig   = plt.figure(figsize=(12, 6))                          if 'immobility_prop'    in selected_plots else None
     bout_count_fig        = plt.figure(figsize=(12, 6)) if 'bout_count'         in selected_plots else None
     avg_bout_count_fig    = plt.figure(figsize=(12, 6)) if 'avg_bout_count'     in selected_plots else None
+    rewards_per_bout_fig  = plt.figure(figsize=(12, 6)) if 'rewards_per_bout'   in selected_plots else None
+    first_lick_latency_fig= plt.figure(figsize=(12, 6)) if 'first_lick_latency' in selected_plots else None
     bout_avg_speed_fig    = plt.figure(figsize=(12, 6)) if 'bout_avg_speed'     in selected_plots else None
     bout_avg_dist_fig     = plt.figure(figsize=(12, 6)) if 'bout_avg_dist'      in selected_plots else None
     sex_speed_fig         = plt.figure(figsize=(12, 6)) if 'sex_speed'          in selected_plots else None
@@ -2311,7 +4821,14 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     for idx, data_file in enumerate(data_files):
         # Read the combined data file
         df = pd.read_csv(data_file, index_col='timestamp')
-        
+
+        # Detect cohort from the file name prefix (e.g. "RV1_data.csv" → "RV1" → RV cohort)
+        _mouse_name_prefix = os.path.basename(data_file).split("_")[0]
+        _mouse_is_rv = _is_rv_cohort(_mouse_name_prefix)
+        if _mouse_is_rv:
+            print(f"[RV COHORT] {_mouse_name_prefix}: reward delivery times will be determined "
+                  f"by zone-to-reward matching (variable delay, not fixed 0.65 s)")
+
         print(f"Reading data from: {data_file}")
         
         # Initialize lists to store results
@@ -2319,15 +4836,22 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         speeds = []
         total_distances = []  # List for total session distances (cm)
         bout_counts = []  # List for locomotion bout counts per session
+        rewards_per_bout_list = []  # List for avg rewards per locomotion bout per session
         avg_speeds_per_bout = []  # List for avg speed per locomotion bout (cm/s)
         avg_dists_per_bout  = []  # List for avg distance per locomotion bout (mm)
         hits = []  # List for reward events
+        hits_gap_aware = []  # Reward count excluding events inside capacitive gaps (for lick/reward ratio only)
         misses_list = []  # List for misses (texture changes minus hits)
         sensitivities = []  # List for sensitivity values
         lick_counts = []  # List for daily lick counts
-        session_lengths = []  # List for session lengths in minutes
+        session_lengths = []  # List for session lengths in minutes (raw total)
+        valid_session_lengths = []  # List for gap-excluded session lengths in minutes
+        avg_cap_values = []  # List for per-session mean raw capacitive sensor value
         false_alarms_list = []  # List for false alarm counts
         correct_rejections_list = []  # List for correct rejection counts
+        # Per-mouse accumulators for punishment zone percentage
+        _mouse_punish_count = 0
+        _mouse_total_zone_count = 0
         specificities_list = []  # List for specificity values
         dprimes_list = []  # List for d-prime values
         session_file_errors = {}  # {date_str: [list of missing file labels]}
@@ -2347,32 +4871,196 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         punish_cap_epoch_session_indices_all   = []  # same for capacitive (punishment zone)
         punish_speed_epoch_event_indices_all   = []  # session index repeated per event row (punishment zone)
         punish_cap_epoch_event_indices_all     = []  # same for capacitive (punishment zone)
+        lick_epoch_session_means_all           = []  # per-session mean lick-count trace (reward zone)
+        punish_lick_epoch_session_means_all    = []  # per-session mean lick-count trace (punishment zone)
+        delivery_speed_epoch_session_means_all   = []  # per-session mean speed trace aligned to reward delivery
+        delivery_speed_epoch_session_indices_all  = []  # 0-based session index for each delivery speed mean
+        delivery_cap_epoch_session_means_all   = []  # per-session mean cap (z-score) trace aligned to reward delivery
+        delivery_lick_epoch_session_means_all  = []  # per-session mean lick trace aligned to reward delivery
+        avg_lick_latency_list                  = []  # per-session avg first-lick latency after reward delivery (s)
+        lick_after_reward_prop_list            = []  # per-session proportion of reward deliveries with ≥1 lick in 2 s post-delivery window
+        lick_after_reward_prop_5s_list         = []  # per-session proportion of reward deliveries with ≥1 lick in 5 s post-delivery window
+        immobility_prop_list                   = []  # per-session proportion of session time spent immobile (raw speed = 0 cm/s for ≥ 2 s)
+        _treadmill_paths_all                   = []  # treadmill file path per session (or None)
+        _reward_zone_periods_all               = []  # list of (entry, exit) pairs per session (reward zones)
+        _punish_zone_periods_all               = []  # list of (entry, exit) pairs per session (punish zones)
 
         # Process each date's data
         for _sess_idx, (timestamp, row) in enumerate(df.iterrows()):
             date_str = datetime.fromtimestamp(int(timestamp)).strftime('%Y-%m-%d')
             missing_files = []
             try:
-                # Read the treadmill data from the file path
-                try:
-                    treadmill_data = pd.read_csv(row['treadmill'])
-                except Exception:
-                    missing_files.append('treadmill')
-                    treadmill_data = None
+                # ── Session-level cache check ─────────────────────────────────────
+                _s_paths = [
+                    str(row.get('treadmill',  '') or ''),
+                    str(row.get('capacitive', '') or ''),
+                    str(row.get('trial_log',  '') or ''),
+                ]
+                _s_key   = _session_cache_key(_s_paths)
+                _s_cache = _load_session_cache(_s_key)
 
-                # Read capacitive data for lick detection
-                try:
-                    capacitive_data = pd.read_csv(row['capacitive'])
-                except Exception:
-                    missing_files.append('capacitive')
-                    capacitive_data = None
+                if _s_cache is not None:
+                    # ── Cache HIT: restore pre-computed session data ───────────────
+                    print(f"  [CACHE] {date_str}: loading pre-computed session data")
+                    _c = _s_cache
+                    missing_files = _c.get('missing_files', [])
 
-                # Read trial log
-                try:
-                    trial_log = pd.read_csv(row['trial_log'])
-                except Exception:
-                    missing_files.append('trial_log')
-                    trial_log = None
+                    if missing_files == ['treadmill', 'capacitive', 'trial_log']:
+                        session_file_errors[date_str] = missing_files
+                        print(f"  [WARN] {date_str}: all files missing — skipping (cached)")
+                        continue
+                    if missing_files:
+                        session_file_errors[date_str] = missing_files
+
+                    # Restore gap info (needed for gap printing below)
+                    _cap_gap_info = _c['cap_gap_info']
+                    if _cap_gap_info['has_gaps']:
+                        print(f"  [GAP] {date_str}: {_cap_gap_info['n_gaps']} gap(s) in "
+                              f"capacitive file (cached) — total trimmed: {_cap_gap_info['total_gap_s']:.2f}s")
+                    else:
+                        print(f"  [GAP] {date_str}: no gaps (cached)")
+
+                    # Restore scalars
+                    date                    = _c['date']
+                    avg_speed               = _c['avg_speed']
+                    total_distance          = _c['total_distance']
+                    bout_count              = _c['bout_count']
+                    rewards_per_bout_val    = _c['rewards_per_bout_val']
+                    avg_speed_per_bout      = _c['avg_speed_per_bout']
+                    avg_dist_per_bout       = _c['avg_dist_per_bout']
+                    reward_count            = _c['reward_count']
+                    _gap_aware_reward_count = _c['gap_aware_reward_count']
+                    misses                  = _c['misses']
+                    sensitivity             = _c['sensitivity']
+                    lick_count              = _c['lick_count']
+                    session_length_minutes  = _c['session_length_minutes']
+                    valid_session_length_minutes = _c.get('valid_session_length_minutes', session_length_minutes)
+                    avg_cap_session         = _c['avg_cap_session']
+                    false_alarm_count       = _c['false_alarm_count']
+                    correct_rejection_count = _c['correct_rejection_count']
+                    specificity             = _c['specificity']
+                    dprime                  = _c['dprime']
+                    _first_lick_lat         = _c['first_lick_lat']
+                    _lick_after_rew_prop    = _c['lick_after_rew_prop']
+                    _lick_after_rew_prop_5s = _c.get('lick_after_rew_prop_5s', float('nan'))
+                    immobility_prop         = _c.get('immobility_prop', float('nan'))
+
+                    # Accumulate punishment zone percentage deltas
+                    _mouse_punish_count      += _c.get('punish_count_delta', 0)
+                    _mouse_total_zone_count  += _c.get('total_zone_count_delta', 0)
+
+                    # Append scalars to per-mouse result lists
+                    dates.append(date)
+                    speeds.append(avg_speed)
+                    total_distances.append(total_distance)
+                    bout_counts.append(bout_count)
+                    rewards_per_bout_list.append(rewards_per_bout_val)
+                    avg_speeds_per_bout.append(avg_speed_per_bout)
+                    avg_dists_per_bout.append(avg_dist_per_bout)
+                    hits.append(reward_count)
+                    hits_gap_aware.append(_gap_aware_reward_count)
+                    misses_list.append(misses)
+                    sensitivities.append(sensitivity)
+                    lick_counts.append(lick_count)
+                    session_lengths.append(session_length_minutes)
+                    valid_session_lengths.append(valid_session_length_minutes)
+                    avg_cap_values.append(avg_cap_session)
+                    false_alarms_list.append(false_alarm_count)
+                    correct_rejections_list.append(correct_rejection_count)
+                    specificities_list.append(specificity)
+                    dprimes_list.append(dprime)
+                    avg_lick_latency_list.append(_first_lick_lat)
+                    lick_after_reward_prop_list.append(_lick_after_rew_prop)
+                    lick_after_reward_prop_5s_list.append(_lick_after_rew_prop_5s)
+                    immobility_prop_list.append(immobility_prop)
+
+                    # Restore epoch matrices and append to accumulator lists
+                    _sp_mat_c = _c.get('sp_epoch_mat')
+                    if _sp_mat_c is not None:
+                        speed_epoch_windows_all.append(_sp_mat_c)
+                        with warnings.catch_warnings():
+                            warnings.simplefilter('ignore', RuntimeWarning)
+                            speed_epoch_session_means_all.append(np.nanmean(_sp_mat_c, axis=0))
+                        speed_epoch_session_indices_all.append(_sess_idx)
+                        speed_epoch_event_indices_all.extend([_sess_idx] * _sp_mat_c.shape[0])
+
+                    _cp_mat_c = _c.get('cp_epoch_mat')
+                    if _cp_mat_c is not None:
+                        cap_epoch_windows_all.append(_cp_mat_c)
+                        with warnings.catch_warnings():
+                            warnings.simplefilter('ignore', RuntimeWarning)
+                            cap_epoch_session_means_all.append(np.nanmean(_cp_mat_c, axis=0))
+                        cap_epoch_session_indices_all.append(_sess_idx)
+                        cap_epoch_event_indices_all.extend([_sess_idx] * _cp_mat_c.shape[0])
+
+                    _lk_mean_c = _c.get('lick_epoch_mean')
+                    if _lk_mean_c is not None:
+                        lick_epoch_session_means_all.append(_lk_mean_c)
+
+                    _psp_mat_c = _c.get('punish_sp_epoch_mat')
+                    if _psp_mat_c is not None:
+                        punish_speed_epoch_windows_all.append(_psp_mat_c)
+                        with warnings.catch_warnings():
+                            warnings.simplefilter('ignore', RuntimeWarning)
+                            punish_speed_epoch_session_means_all.append(np.nanmean(_psp_mat_c, axis=0))
+                        punish_speed_epoch_session_indices_all.append(_sess_idx)
+                        punish_speed_epoch_event_indices_all.extend([_sess_idx] * _psp_mat_c.shape[0])
+
+                    _pcp_mat_c = _c.get('punish_cp_epoch_mat')
+                    if _pcp_mat_c is not None:
+                        punish_cap_epoch_windows_all.append(_pcp_mat_c)
+                        with warnings.catch_warnings():
+                            warnings.simplefilter('ignore', RuntimeWarning)
+                            punish_cap_epoch_session_means_all.append(np.nanmean(_pcp_mat_c, axis=0))
+                        punish_cap_epoch_session_indices_all.append(_sess_idx)
+                        punish_cap_epoch_event_indices_all.extend([_sess_idx] * _pcp_mat_c.shape[0])
+
+                    _plk_mean_c = _c.get('punish_lick_epoch_mean')
+                    if _plk_mean_c is not None:
+                        punish_lick_epoch_session_means_all.append(_plk_mean_c)
+
+                    _dsp_mean_c = _c.get('delivery_sp_epoch_mean')
+                    if _dsp_mean_c is not None:
+                        delivery_speed_epoch_session_means_all.append(_dsp_mean_c)
+                        delivery_speed_epoch_session_indices_all.append(_sess_idx)
+
+                    _dcp_mean_c = _c.get('delivery_cp_epoch_mean')
+                    if _dcp_mean_c is not None:
+                        delivery_cap_epoch_session_means_all.append(_dcp_mean_c)
+
+                    _dlk_mean_c = _c.get('delivery_lk_epoch_mean')
+                    if _dlk_mean_c is not None:
+                        delivery_lick_epoch_session_means_all.append(_dlk_mean_c)
+
+                    # Zone periods for true-zone shuffle Z-score
+                    _treadmill_paths_all.append(row.get('treadmill') or None)
+                    _reward_zone_periods_all.append(_c.get('reward_zone_periods', []))
+                    _punish_zone_periods_all.append(_c.get('punish_zone_periods', []))
+
+                    continue  # skip all normal processing for this session
+                # ── End cache HIT ─────────────────────────────────────────────────
+
+                # ── Cache MISS: read CSVs in parallel, process normally ────────────
+                # Reset per-session variables that are set conditionally, so a
+                # session that lacks capacitive data never inherits stale values
+                # from the previous iteration.
+                _sess_lick_times = None
+                treadmill_data, capacitive_data, trial_log, missing_files = _read_three_csvs(
+                    _s_paths[0], _s_paths[1], _s_paths[2])
+
+                # ── Gap detection on freshly-loaded capacitive data ───────────────
+                if capacitive_data is not None:
+                    _cap_gap_info = detect_capacitive_gaps(capacitive_data)
+                    if _cap_gap_info['has_gaps']:
+                        print(f"  [GAP] {date_str}: {_cap_gap_info['n_gaps']} gap(s) detected in "
+                              f"capacitive file — total trimmed time: {_cap_gap_info['total_gap_s']:.2f}s")
+                        for _gi, _g in enumerate(_cap_gap_info['gaps']):
+                            print(f"    gap {_gi+1}: {_g[0]:.3f}s → {_g[1]:.3f}s "
+                                  f"(duration: {_g[2]:.3f}s)")
+                    else:
+                        print(f"  [GAP] {date_str}: no gaps detected — file is continuous")
+                else:
+                    _cap_gap_info = {'has_gaps': False, 'n_gaps': 0, 'gaps': [], 'total_gap_s': 0.0}
 
                 if len(missing_files) == 3:
                     # All three files missing — nothing to process for this date
@@ -2387,16 +5075,50 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                 # ── Treadmill-derived metrics ─────────────────────────────
                 if treadmill_data is not None:
                     _speed_raw = treadmill_data['speed']
+                    # Estimate sampling rate from global_time, ignoring duplicate rows
+                    # (the treadmill file sometimes logs the same timestamp twice, making
+                    #  the raw median diff = 0 and the butter cutoff invalid).
+                    _gt_diffs = treadmill_data['global_time'].diff().dropna()
+                    _gt_diffs_pos = _gt_diffs[_gt_diffs > 0]
+                    if len(_gt_diffs_pos) > 0:
+                        _fs = 1.0 / _gt_diffs_pos.median()
+                    elif 'timestamp' in treadmill_data.columns:
+                        # Fall back to the raw µs timestamp column
+                        _ts_diffs = treadmill_data['timestamp'].diff().dropna()
+                        _ts_diffs_pos = _ts_diffs[_ts_diffs > 0]
+                        _fs = 1e6 / _ts_diffs_pos.median() if len(_ts_diffs_pos) > 0 else 50.0
+                    else:
+                        _fs = 50.0  # safe fallback
                     # Butterworth low-pass (0.25 Hz, order 3) applied to raw speed
-                    _fs = 1.0 / treadmill_data['global_time'].diff().median()
-                    _b, _a = butter(3, 0.25 / (_fs / 2.0), btype='low')
+                    _nyq = _fs / 2.0
+                    _cutoff = min(0.25 / _nyq, 0.999)  # clamp below Nyquist
+                    _b, _a = butter(3, _cutoff, btype='low')
                     _speed_filt = filtfilt(_b, _a, _speed_raw)
                     avg_speed = float(np.mean(_speed_filt)) / 10.0
                     _, total_distance = compute_session_distance(treadmill_data)
                     # Bout detection on filtered speed (mm/s → cm/s)
                     _time_arr = treadmill_data['global_time'].values
                     _speed_cm = _speed_filt / 10.0
+                    # Immobility: raw speed == 0 cm/s for ≥ 2 continuous seconds
+                    _speed_raw_cm = np.asarray(_speed_raw, dtype=float) / 10.0
+                    _immo_mask = _speed_raw_cm <= 0.0
+                    _sess_dur_s = (float(_time_arr[-1] - _time_arr[0])
+                                   if len(_time_arr) > 1 else 0.0)
+                    _immo_total_s = 0.0
+                    if _sess_dur_s > 0 and np.any(_immo_mask):
+                        _pad_m = np.concatenate([[False], _immo_mask, [False]])
+                        _dm    = np.diff(_pad_m.astype(np.int8))
+                        _i_starts = np.where(_dm == 1)[0]
+                        _i_ends   = np.where(_dm == -1)[0]
+                        for _is_i, _ie_i in zip(_i_starts, _i_ends):
+                            _t0_im = _time_arr[_is_i]
+                            _t1_im = _time_arr[min(_ie_i, len(_time_arr) - 1)]
+                            if (_t1_im - _t0_im) >= 2.0:
+                                _immo_total_s += _t1_im - _t0_im
+                    immobility_prop = (float(_immo_total_s / _sess_dur_s)
+                                       if _sess_dur_s > 0 else float('nan'))
                     _bouts = detect_locomotion_bouts(_time_arr, _speed_cm)
+                    _session_bouts = _bouts  # saved for rewards_per_bout computation below
                     bout_count = len(_bouts)
                     # Per-bout averages (speed in cm/s; dist in mm)
                     if _bouts:
@@ -2425,10 +5147,20 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     bout_count = float('nan')
                     avg_speed_per_bout = float('nan')
                     avg_dist_per_bout  = float('nan')
+                    immobility_prop = float('nan')
+                    _session_bouts = []
 
                 # ── Capacitive-derived metrics ────────────────────────────
                 if capacitive_data is not None:
-                    session_length_minutes = capacitive_data['elapsed_time'].max() / 60.0
+                    session_length_minutes = float(capacitive_data['elapsed_time'].max()) / 60.0
+                    # Use gap-excluded valid duration so lick rate is not diluted by
+                    # trimmed segments.  compute_valid_session_duration() sums only the
+                    # inter-sample intervals ≤ 1 s, giving the true recorded time.
+                    _valid_dur_s = compute_valid_session_duration(capacitive_data)
+                    if np.isfinite(_valid_dur_s) and _valid_dur_s > 0:
+                        valid_session_length_minutes = _valid_dur_s / 60.0
+                    else:
+                        valid_session_length_minutes = session_length_minutes
 
                     cap_df = capacitive_data.copy()
                     cap_df['Time_sec'] = cap_df['elapsed_time']
@@ -2443,6 +5175,10 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     cap_df = lda.compute_KDE_normalizations(cap_df, 'capacitive_value', kde_value)
                     events_df, threshold_used = lda.detect_events_above_threshold(cap_df, 'capacitive_value', threshold=None)
                     lick_count = events_df['capacitive_value_event'].sum()
+                    # Store timestamps of detected lick events for epoch analysis
+                    _sess_lick_times = events_df.loc[
+                        events_df['capacitive_value_event'] == 1, 'Time_sec'
+                    ].values.astype(float)
 
                     if save_lick_plots and output_dir:
                         mouse_name_plot = os.path.basename(data_file).split('_')[0]
@@ -2458,9 +5194,20 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                         )
                         fig.savefig(plot_path, dpi=150, bbox_inches='tight')
                         plt.close(fig)
+                    # Per-session mean of the raw capacitive sensor signal
+                    _cap_raw = pd.to_numeric(
+                        capacitive_data['capacitive_value'], errors='coerce').dropna()
+                    avg_cap_session = float(np.nanmean(_cap_raw)) if len(_cap_raw) > 0 else float('nan')
                 else:
-                    session_length_minutes = float('nan')
+                    # Fall back to treadmill global_time span if available
+                    if treadmill_data is not None and 'global_time' in treadmill_data.columns:
+                        _tm_times = pd.to_numeric(treadmill_data['global_time'], errors='coerce').dropna()
+                        session_length_minutes = float(_tm_times.max()) / 60.0 if len(_tm_times) > 0 else float('nan')
+                    else:
+                        session_length_minutes = float('nan')
+                    valid_session_length_minutes = session_length_minutes  # no cap data → no gaps to exclude
                     lick_count = float('nan')
+                    avg_cap_session = float('nan')
 
                 # ── Trial-log-derived metrics ─────────────────────────────
                 if trial_log is not None:
@@ -2589,34 +5336,315 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     specificity = float('nan')
                     dprime = float('nan')
 
+                # ── Gap-aware reward count (lick/reward ratio denominator only) ──────
+                # Exclude reward/hits events whose timestamp falls inside a capacitive
+                # gap window.  All other reward_count uses remain unfiltered.
+                if _cap_gap_info['has_gaps'] and not (
+                    isinstance(reward_count, float) and np.isnan(reward_count)
+                ):
+                    _gaps = _cap_gap_info['gaps']
+                    _rew_in_gap = np.array([
+                        any(g[0] <= t <= g[1] for g in _gaps)
+                        for t in reward_event_times
+                    ]) if len(reward_event_times) > 0 else np.array([], dtype=bool)
+                    _hits_in_gap = np.array([
+                        any(g[0] <= t <= g[1] for g in _gaps)
+                        for t in hits_event_times
+                    ]) if len(hits_event_times) > 0 else np.array([], dtype=bool)
+                    _gap_aware_reward_count = int(
+                        np.sum(~_rew_in_gap) + np.sum(~_hits_in_gap)
+                    )
+                else:
+                    # No gaps or no trial log: use the same value as reward_count
+                    _gap_aware_reward_count = reward_count
+
                 # Convert Unix timestamp to datetime and store results
                 date = datetime.fromtimestamp(int(timestamp))
+
+                # ── Rewards per locomotion bout ───────────────────────────
+                # Assign each reward event to a bout; compute mean rewards/bout
+                if _session_bouts and trial_log is not None:
+                    try:
+                        _all_reward_ts = np.concatenate([
+                            pd.to_numeric(trial_log['reward_event'], errors='coerce').dropna().values,
+                            (pd.to_numeric(trial_log['hits_event'], errors='coerce').dropna().values
+                             if 'hits_event' in trial_log.columns else np.array([])),
+                        ])
+                        _rewards_in_bout = 0
+                        for _bt0, _bt1 in _session_bouts:
+                            _rewards_in_bout += int(np.sum(
+                                (_all_reward_ts >= _bt0) & (_all_reward_ts <= _bt1)
+                            ))
+                        rewards_per_bout_val = _rewards_in_bout / len(_session_bouts)
+                    except Exception:
+                        rewards_per_bout_val = float('nan')
+                else:
+                    rewards_per_bout_val = float('nan')
+
+                # ── Punishment zone percentage (accumulated across all sessions) ──
+                _sess_punish_count_delta      = 0
+                _sess_total_zone_count_delta  = 0
+                if trial_log is not None and 'texture_history' in trial_log.columns:
+                    _th = trial_log['texture_history'].dropna()
+                    _sess_total_zone_count_delta  = len(_th)
+                    _sess_punish_count_delta       = int((_th == 'assets/punish_mean100.jpg').sum())
+                    _mouse_total_zone_count += _sess_total_zone_count_delta
+                    _mouse_punish_count     += _sess_punish_count_delta
+
+                # ── First-lick latency after reward delivery ──────────────────────
+                # For each reward delivery, find the first lick that follows it and
+                # record the latency.  Average across all trials with a valid first lick.
+                #
+                # Standard cohorts : reward delivered 0.65 s after zone entry.
+                # RV cohort        : actual delivery time determined by zone-to-reward
+                #                    matching (_match_rewards_to_zones).
+                _first_lick_lat = float('nan')
+                _sess_lick_arr = _sess_lick_times if _sess_lick_times is not None else np.array([])
+                if trial_log is not None and len(_sess_lick_arr) > 0:
+                    try:
+                        # Build (zone_entry_time, reward_delivery_time) pairs
+                        if _mouse_is_rv:
+                            _fll_pairs = _match_rewards_to_zones(trial_log)
+                        else:
+                            _fll_pairs = [
+                                (_zt, _zt + 0.65)
+                                for _zt in _extract_reward_zone_entry_times(trial_log)
+                            ]
+                        if _DIAGNOSTIC_MODE:
+                            _diag_method = 'zone-to-reward match' if _mouse_is_rv else 'zone+0.65s'
+                            print(f"  [FLL] {_mouse_name_prefix} | {date_str} | "
+                                  f"{len(_fll_pairs)} pairs via {_diag_method}")
+                        _fll_latencies = []
+                        for _fll_zt, _fll_rd in _fll_pairs:
+                            # Drop trial if the reward delivery itself lands inside a gap.
+                            if _cap_gap_info['has_gaps']:
+                                _delivery_in_gap = [
+                                    g for g in _cap_gap_info['gaps']
+                                    if g[0] <= _fll_rd <= g[1]
+                                ]
+                                if _delivery_in_gap:
+                                    if _DIAGNOSTIC_MODE:
+                                        _dg = _delivery_in_gap[0]
+                                        print(f"    trial zone@{_fll_zt:.3f}s delivery@{_fll_rd:.3f}s "
+                                              f"→ SKIP (delivery inside gap {_dg[0]:.3f}–{_dg[1]:.3f}s)")
+                                    continue
+                            _fll_candidates = _sess_lick_arr[_sess_lick_arr > _fll_rd]
+                            if len(_fll_candidates) == 0:
+                                if _DIAGNOSTIC_MODE:
+                                    print(f"    trial zone@{_fll_zt:.3f}s delivery@{_fll_rd:.3f}s "
+                                          f"→ SKIP (no lick after delivery)")
+                                continue
+                            _first_lick = _fll_candidates[0]
+                            # Drop trial if a gap interrupts the window between
+                            # reward delivery and the first detected lick.
+                            if _cap_gap_info['has_gaps']:
+                                _blocking_gaps = [
+                                    g for g in _cap_gap_info['gaps']
+                                    if g[0] > _fll_rd and g[0] < _first_lick
+                                ]
+                                if _blocking_gaps:
+                                    if _DIAGNOSTIC_MODE:
+                                        print(f"    trial zone@{_fll_zt:.3f}s delivery@{_fll_rd:.3f}s "
+                                              f"→ SKIP (gap {_blocking_gaps[0][0]:.3f}–{_blocking_gaps[0][1]:.3f}s "
+                                              f"before first lick@{_first_lick:.3f}s)")
+                                    continue
+                            _lat = float(_first_lick - _fll_rd)
+                            if _DIAGNOSTIC_MODE:
+                                print(f"    trial zone@{_fll_zt:.3f}s delivery@{_fll_rd:.3f}s "
+                                      f"first_lick@{_first_lick:.3f}s → latency {_lat:.3f}s")
+                            _fll_latencies.append(_lat)
+                        if _fll_latencies:
+                            _first_lick_lat = float(np.mean(_fll_latencies))
+                        if _DIAGNOSTIC_MODE:
+                            print(f"  [FLL] session mean latency: "
+                                  f"{_first_lick_lat:.3f}s  ({len(_fll_latencies)}/{len(_fll_pairs)} trials valid)")
+                    except Exception:
+                        _first_lick_lat = float('nan')
+                avg_lick_latency_list.append(_first_lick_lat)
+
+                # ── Proportion of reward deliveries with licks (2 s post-delivery window) ──
+                # Window: [delivery_time, delivery_time + 2 s]. Binary per delivery:
+                # 1 if any lick detected in window, 0 otherwise. NaN if data unavailable.
+                #
+                # Standard cohorts : delivery_time = zone_entry + 0.65 s.
+                # RV cohort        : delivery_time determined by zone-to-reward matching.
+                _lick_after_rew_prop = float('nan')
+                _lick_after_rew_prop_5s = float('nan')
+                if trial_log is not None and capacitive_data is not None:
+                    try:
+                        # Build list of actual reward delivery times for this session
+                        if _mouse_is_rv:
+                            _lar_delivery_times = [
+                                rd for _, rd in _match_rewards_to_zones(trial_log)
+                            ]
+                        else:
+                            _lar_delivery_times = [
+                                _zt + 0.65
+                                for _zt in _extract_reward_zone_entry_times(trial_log)
+                            ]
+                        if _DIAGNOSTIC_MODE:
+                            _diag_method = 'zone-to-reward match' if _mouse_is_rv else 'zone+0.65s'
+                            print(f"  [LAR] {_mouse_name_prefix} | {date_str} | "
+                                  f"{len(_lar_delivery_times)} deliveries via {_diag_method}")
+                        if _lar_delivery_times:
+                            _lar_binary = []
+                            for _lar_rd in _lar_delivery_times:
+                                _lar_start = _lar_rd
+                                _lar_end   = _lar_rd + 2.0  # 2 s post-delivery detection window
+                                # Drop trial if a gap falls anywhere in the detection window.
+                                if _cap_gap_info['has_gaps']:
+                                    _lar_blocking = [
+                                        g for g in _cap_gap_info['gaps']
+                                        if g[0] < _lar_end and g[1] > _lar_start
+                                    ]
+                                    if _lar_blocking:
+                                        if _DIAGNOSTIC_MODE:
+                                            print(f"    delivery@{_lar_rd:.3f}s window [{_lar_start:.3f},{_lar_end:.3f}] "
+                                                  f"→ SKIP (gap {_lar_blocking[0][0]:.3f}–{_lar_blocking[0][1]:.3f}s)")
+                                        continue
+                                _hit = int(np.any(
+                                    (_sess_lick_arr >= _lar_start) & (_sess_lick_arr < _lar_end)
+                                ))
+                                if _DIAGNOSTIC_MODE:
+                                    _licks_in_win = _sess_lick_arr[
+                                        (_sess_lick_arr >= _lar_start) & (_sess_lick_arr < _lar_end)
+                                    ]
+                                    _hit_str = f"HIT  licks={list(np.round(_licks_in_win, 3))}" if _hit else "MISS"
+                                    print(f"    delivery@{_lar_rd:.3f}s window [{_lar_start:.3f},{_lar_end:.3f}] → {_hit_str}")
+                                _lar_binary.append(_hit)
+                            _lick_after_rew_prop = (float(np.mean(_lar_binary))
+                                                    if _lar_binary else float('nan'))
+                            # ── 5 s window version ────────────────────────────────────────
+                            _lar_binary_5s = []
+                            for _lar_rd in _lar_delivery_times:
+                                _lar_start = _lar_rd
+                                _lar_end   = _lar_rd + 5.0  # 5 s post-delivery detection window
+                                if _cap_gap_info['has_gaps']:
+                                    _lar_blocking = [
+                                        g for g in _cap_gap_info['gaps']
+                                        if g[0] < _lar_end and g[1] > _lar_start
+                                    ]
+                                    if _lar_blocking:
+                                        continue
+                                _hit = int(np.any(
+                                    (_sess_lick_arr >= _lar_start) & (_sess_lick_arr < _lar_end)
+                                ))
+                                _lar_binary_5s.append(_hit)
+                            _lick_after_rew_prop_5s = (float(np.mean(_lar_binary_5s))
+                                                       if _lar_binary_5s else float('nan'))
+                        if _DIAGNOSTIC_MODE:
+                            _n_valid = len(_lar_binary) if _lar_delivery_times else 0
+                            print(f"  [LAR] session proportion: "
+                                  f"{_lick_after_rew_prop:.3f}  ({_n_valid}/{len(_lar_delivery_times)} trials valid)")
+                    except Exception:
+                        _lick_after_rew_prop = float('nan')
+                        _lick_after_rew_prop_5s = float('nan')
+                lick_after_reward_prop_list.append(_lick_after_rew_prop)
+                lick_after_reward_prop_5s_list.append(_lick_after_rew_prop_5s)
+
+                # ── Zone periods for true-zone shuffle Z-score ────────────────────
+                _reward_periods_sess = []
+                _punish_periods_sess = []
+                if (trial_log is not None
+                        and 'texture_change_time' in trial_log.columns
+                        and 'texture_history' in trial_log.columns):
+                    _sess_end_t = (float(treadmill_data['global_time'].max())
+                                   if treadmill_data is not None else 0.0)
+                    _tz_entry = pd.to_numeric(
+                        trial_log['texture_change_time'], errors='coerce').values
+                    _revert_col = ('texture_revert'
+                                   if 'texture_revert' in trial_log.columns else None)
+                    _tz_exit = (pd.to_numeric(
+                                    trial_log[_revert_col], errors='coerce'
+                                ).fillna(_sess_end_t).values
+                                if _revert_col else
+                                np.full(len(trial_log), _sess_end_t))
+                    _tz_th = trial_log['texture_history'].fillna('').values
+                    # For reward zones: clip end to reward delivery time so that
+                    # post-reward stopping (drinking) is excluded from speed measurement.
+                    _rew_ev_col = ('reward_event' if 'reward_event' in trial_log.columns else None)
+                    _hits_ev_col = ('hits_event' if 'hits_event' in trial_log.columns else None)
+                    _tz_rew_ev = (pd.to_numeric(trial_log[_rew_ev_col], errors='coerce').values
+                                  if _rew_ev_col else np.full(len(trial_log), np.nan))
+                    _tz_hits_ev = (pd.to_numeric(trial_log[_hits_ev_col], errors='coerce').values
+                                   if _hits_ev_col else np.full(len(trial_log), np.nan))
+                    for _ze, _zx, _zth, _zre, _zhe in zip(
+                            _tz_entry, _tz_exit, _tz_th, _tz_rew_ev, _tz_hits_ev):
+                        if _ze is None or (isinstance(_ze, float) and np.isnan(_ze)):
+                            continue
+                        if _zth == 'assets/reward_mean100.jpg':
+                            # Use earliest reward delivery time as zone end, if present
+                            _rew_times = [t for t in (_zre, _zhe)
+                                          if t is not None and not (isinstance(t, float) and np.isnan(t))
+                                          and float(t) > float(_ze)]
+                            if _rew_times:
+                                _zx = min(float(_zx), min(float(t) for t in _rew_times))
+                            _reward_periods_sess.append((float(_ze), float(_zx)))
+                        elif _zth == 'assets/punish_mean100.jpg':
+                            _punish_periods_sess.append((float(_ze), float(_zx)))
+                _treadmill_paths_all.append(row.get('treadmill') or None)
+                _reward_zone_periods_all.append(_reward_periods_sess)
+                _punish_zone_periods_all.append(_punish_periods_sess)
 
                 dates.append(date)
                 speeds.append(avg_speed)
                 total_distances.append(total_distance)
                 bout_counts.append(bout_count)
+                rewards_per_bout_list.append(rewards_per_bout_val)
                 avg_speeds_per_bout.append(avg_speed_per_bout)
                 avg_dists_per_bout.append(avg_dist_per_bout)
                 hits.append(reward_count)
+                hits_gap_aware.append(_gap_aware_reward_count)
                 misses_list.append(misses)
                 sensitivities.append(sensitivity)
                 lick_counts.append(lick_count)
                 session_lengths.append(session_length_minutes)
+                valid_session_lengths.append(valid_session_length_minutes)
+                avg_cap_values.append(avg_cap_session)
                 false_alarms_list.append(false_alarm_count)
                 correct_rejections_list.append(correct_rejection_count)
                 specificities_list.append(specificity)
                 dprimes_list.append(dprime)
+                immobility_prop_list.append(immobility_prop)
+
+                # ── Pre-sample continuous signals once (shared for both epoch blocks) ─
+                # Avoids reading and interpolating the same large arrays twice per session.
+                _sess_sp_time = _sess_sp_val = None
+                _sess_cp_time = _sess_cp_val_z = None
+                if treadmill_data is not None:
+                    _sess_sp_time, _sess_sp_val = uniformly_sample_treadmill(treadmill_data)
+                if capacitive_data is not None:
+                    _sess_cp_time, _sess_cp_val_raw = uniformly_sample_capacitive(capacitive_data)
+                    _cp_mu  = np.nanmean(_sess_cp_val_raw)
+                    _cp_sig = np.nanstd(_sess_cp_val_raw, ddof=1)
+                    if _cp_sig > 0:
+                        _sess_cp_val_z = (_sess_cp_val_raw - _cp_mu) / _cp_sig
+                    else:
+                        _sess_cp_val_z = _sess_cp_val_raw - _cp_mu
+
+                # Record list lengths before epoch extraction for reliable cache harvesting
+                _n_sp_before  = len(speed_epoch_windows_all)
+                _n_cp_before  = len(cap_epoch_windows_all)
+                _n_lk_before  = len(lick_epoch_session_means_all)
+                _n_psp_before = len(punish_speed_epoch_windows_all)
+                _n_pcp_before = len(punish_cap_epoch_windows_all)
+                _n_plk_before = len(punish_lick_epoch_session_means_all)
+                _n_dsp_before = len(delivery_speed_epoch_session_means_all)
+                _n_dcp_before = len(delivery_cap_epoch_session_means_all)
+                _n_dlk_before = len(delivery_lick_epoch_session_means_all)
 
                 # ── Behavioral epoch extraction (reward zone entry) ──────────────────
                 if trial_log is not None and (treadmill_data is not None or capacitive_data is not None):
                     try:
                         _zone_times = _extract_reward_zone_entry_times(trial_log)
+                        # Filtered list for capacitive/lick epochs: drop trials whose
+                        # ±EPOCH_WINDOW_S window is interrupted by a trimmed gap.
+                        _zone_times_cap = _filter_event_times_by_gaps(_zone_times, _cap_gap_info)
                         if _zone_times:
-                            if treadmill_data is not None:
-                                # Use raw (unfiltered) speed via uniformly_sample_treadmill.
-                                _sp_time, _sp_val = uniformly_sample_treadmill(treadmill_data)
-                                _sp_mat = _build_epoch_matrix(_sp_time, _sp_val, _zone_times)
+                            if treadmill_data is not None and _sess_sp_time is not None:
+                                # Use pre-sampled (unfiltered) speed — computed once above.
+                                # Speed epochs are NOT gap-filtered (treadmill data is untrimmed).
+                                _sp_mat = _build_epoch_matrix(_sess_sp_time, _sess_sp_val, _zone_times)
                                 if _sp_mat is not None:
                                     speed_epoch_windows_all.append(_sp_mat)
                                     with warnings.catch_warnings():
@@ -2626,18 +5654,9 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                                     speed_epoch_session_indices_all.append(_sess_idx)
                                     speed_epoch_event_indices_all.extend(
                                         [_sess_idx] * _sp_mat.shape[0])
-                            if capacitive_data is not None:
-                                _cp_time, _cp_val = uniformly_sample_capacitive(capacitive_data)
-                                # Z-score the capacitive signal for this session so that
-                                # sessions with different baselines / dynamic ranges are
-                                # comparable when epochs are averaged across sessions or mice.
-                                _cp_mu  = np.nanmean(_cp_val)
-                                _cp_sig = np.nanstd(_cp_val, ddof=1)
-                                if _cp_sig > 0:
-                                    _cp_val = (_cp_val - _cp_mu) / _cp_sig
-                                else:
-                                    _cp_val = _cp_val - _cp_mu  # zero-mean, can't scale
-                                _cp_mat = _build_epoch_matrix(_cp_time, _cp_val, _zone_times)
+                            if capacitive_data is not None and _sess_cp_time is not None:
+                                # Use pre-sampled, z-scored capacitive signal — computed once above.
+                                _cp_mat = _build_epoch_matrix(_sess_cp_time, _sess_cp_val_z, _zone_times_cap)
                                 if _cp_mat is not None:
                                     cap_epoch_windows_all.append(_cp_mat)
                                     with warnings.catch_warnings():
@@ -2647,6 +5666,14 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                                     cap_epoch_session_indices_all.append(_sess_idx)
                                     cap_epoch_event_indices_all.extend(
                                         [_sess_idx] * _cp_mat.shape[0])
+                            # ── Lick count epoch (reward zone) ───────────────────────────
+                            if capacitive_data is not None and _sess_lick_times is not None:
+                                _lk_mat = _build_lick_epoch_matrix(_sess_lick_times, _zone_times_cap)
+                                if _lk_mat is not None:
+                                    with warnings.catch_warnings():
+                                        warnings.simplefilter('ignore', RuntimeWarning)
+                                        lick_epoch_session_means_all.append(
+                                            np.nanmean(_lk_mat, axis=0))
                     except Exception as _epoch_err:
                         print(f"  [WARN] {date_str}: epoch extraction failed — {_epoch_err}")
 
@@ -2654,10 +5681,13 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                 if trial_log is not None and (treadmill_data is not None or capacitive_data is not None):
                     try:
                         _punish_times = _extract_punish_zone_entry_times(trial_log)
+                        # Filtered list for capacitive/lick epochs only.
+                        _punish_times_cap = _filter_event_times_by_gaps(_punish_times, _cap_gap_info)
                         if _punish_times:
-                            if treadmill_data is not None:
-                                _sp_time, _sp_val = uniformly_sample_treadmill(treadmill_data)
-                                _sp_mat = _build_epoch_matrix(_sp_time, _sp_val, _punish_times)
+                            if treadmill_data is not None and _sess_sp_time is not None:
+                                # Use pre-sampled speed — already computed above.
+                                # Speed epochs are NOT gap-filtered (treadmill data is untrimmed).
+                                _sp_mat = _build_epoch_matrix(_sess_sp_time, _sess_sp_val, _punish_times)
                                 if _sp_mat is not None:
                                     punish_speed_epoch_windows_all.append(_sp_mat)
                                     with warnings.catch_warnings():
@@ -2667,15 +5697,9 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                                     punish_speed_epoch_session_indices_all.append(_sess_idx)
                                     punish_speed_epoch_event_indices_all.extend(
                                         [_sess_idx] * _sp_mat.shape[0])
-                            if capacitive_data is not None:
-                                _cp_time, _cp_val = uniformly_sample_capacitive(capacitive_data)
-                                _cp_mu  = np.nanmean(_cp_val)
-                                _cp_sig = np.nanstd(_cp_val, ddof=1)
-                                if _cp_sig > 0:
-                                    _cp_val = (_cp_val - _cp_mu) / _cp_sig
-                                else:
-                                    _cp_val = _cp_val - _cp_mu
-                                _cp_mat = _build_epoch_matrix(_cp_time, _cp_val, _punish_times)
+                            if capacitive_data is not None and _sess_cp_time is not None:
+                                # Use pre-sampled, z-scored capacitive signal — computed once above.
+                                _cp_mat = _build_epoch_matrix(_sess_cp_time, _sess_cp_val_z, _punish_times_cap)
                                 if _cp_mat is not None:
                                     punish_cap_epoch_windows_all.append(_cp_mat)
                                     with warnings.catch_warnings():
@@ -2685,8 +5709,116 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                                     punish_cap_epoch_session_indices_all.append(_sess_idx)
                                     punish_cap_epoch_event_indices_all.extend(
                                         [_sess_idx] * _cp_mat.shape[0])
+                            # ── Lick count epoch (punishment zone) ──────────────────────
+                            if capacitive_data is not None and _sess_lick_times is not None:
+                                _plk_mat = _build_lick_epoch_matrix(_sess_lick_times, _punish_times_cap)
+                                if _plk_mat is not None:
+                                    with warnings.catch_warnings():
+                                        warnings.simplefilter('ignore', RuntimeWarning)
+                                        punish_lick_epoch_session_means_all.append(
+                                            np.nanmean(_plk_mat, axis=0))
                     except Exception as _punish_epoch_err:
                         print(f"  [WARN] {date_str}: punish epoch extraction failed — {_punish_epoch_err}")
+
+                # ── Behavioral epoch extraction (reward delivery time) ─────────────────────────
+                if trial_log is not None and (treadmill_data is not None or capacitive_data is not None):
+                    try:
+                        # Build delivery time list using same branch as FLL / LAR
+                        if _mouse_is_rv:
+                            _del_pairs = _match_rewards_to_zones(trial_log)
+                        else:
+                            _del_pairs = [
+                                (_zt, _zt + 0.65)
+                                for _zt in _extract_reward_zone_entry_times(trial_log)
+                            ]
+                        _del_times = np.array([rd for _, rd in _del_pairs])
+                        # For cap/lick: exclude trials whose ±EPOCH_WINDOW_S window overlaps a gap
+                        _del_times_cap = _filter_event_times_by_gaps(_del_times, _cap_gap_info)
+                        if len(_del_times) > 0:
+                            if treadmill_data is not None and _sess_sp_time is not None:
+                                _dsp_mat = _build_epoch_matrix(
+                                    _sess_sp_time, _sess_sp_val, _del_times)
+                                if _dsp_mat is not None:
+                                    with warnings.catch_warnings():
+                                        warnings.simplefilter('ignore', RuntimeWarning)
+                                        delivery_speed_epoch_session_means_all.append(
+                                            np.nanmean(_dsp_mat, axis=0))
+                                        delivery_speed_epoch_session_indices_all.append(_sess_idx)
+                            if (capacitive_data is not None and _sess_cp_time is not None
+                                    and len(_del_times_cap) > 0):
+                                _dcp_mat = _build_epoch_matrix(
+                                    _sess_cp_time, _sess_cp_val_z, _del_times_cap)
+                                if _dcp_mat is not None:
+                                    with warnings.catch_warnings():
+                                        warnings.simplefilter('ignore', RuntimeWarning)
+                                        delivery_cap_epoch_session_means_all.append(
+                                            np.nanmean(_dcp_mat, axis=0))
+                            if (capacitive_data is not None and _sess_lick_times is not None
+                                    and len(_del_times_cap) > 0):
+                                _dlk_mat = _build_lick_epoch_matrix(
+                                    _sess_lick_times, _del_times_cap)
+                                if _dlk_mat is not None:
+                                    with warnings.catch_warnings():
+                                        warnings.simplefilter('ignore', RuntimeWarning)
+                                        delivery_lick_epoch_session_means_all.append(
+                                            np.nanmean(_dlk_mat, axis=0))
+                    except Exception as _del_epoch_err:
+                        print(f"  [WARN] {date_str}: delivery epoch extraction failed — {_del_epoch_err}")
+
+                # ── Save computed session data to cache ────────────────────────────────────────
+                try:
+                    # Harvest epoch matrices added during this session using pre-recorded lengths
+                    _cache_sp_mat   = speed_epoch_windows_all[-1]             if len(speed_epoch_windows_all)             > _n_sp_before  else None
+                    _cache_cp_mat   = cap_epoch_windows_all[-1]               if len(cap_epoch_windows_all)               > _n_cp_before  else None
+                    _cache_lk_mean  = lick_epoch_session_means_all[-1]        if len(lick_epoch_session_means_all)        > _n_lk_before  else None
+                    _cache_psp_mat  = punish_speed_epoch_windows_all[-1]      if len(punish_speed_epoch_windows_all)      > _n_psp_before else None
+                    _cache_pcp_mat  = punish_cap_epoch_windows_all[-1]        if len(punish_cap_epoch_windows_all)        > _n_pcp_before else None
+                    _cache_plk_mean = punish_lick_epoch_session_means_all[-1] if len(punish_lick_epoch_session_means_all) > _n_plk_before else None
+                    _cache_dsp_mean = delivery_speed_epoch_session_means_all[-1] if len(delivery_speed_epoch_session_means_all) > _n_dsp_before else None
+                    _cache_dcp_mean = delivery_cap_epoch_session_means_all[-1]   if len(delivery_cap_epoch_session_means_all)   > _n_dcp_before else None
+                    _cache_dlk_mean = delivery_lick_epoch_session_means_all[-1]  if len(delivery_lick_epoch_session_means_all)  > _n_dlk_before else None
+                    _save_session_cache(_s_key, {
+                        'missing_files':             missing_files,
+                        'cap_gap_info':              _cap_gap_info,
+                        'date':                      date,
+                        'avg_speed':                 avg_speed,
+                        'total_distance':            total_distance,
+                        'bout_count':                bout_count,
+                        'rewards_per_bout_val':      rewards_per_bout_val,
+                        'avg_speed_per_bout':        avg_speed_per_bout,
+                        'avg_dist_per_bout':         avg_dist_per_bout,
+                        'reward_count':              reward_count,
+                        'gap_aware_reward_count':    _gap_aware_reward_count,
+                        'misses':                    misses,
+                        'sensitivity':               sensitivity,
+                        'lick_count':                lick_count,
+                        'session_length_minutes':    session_length_minutes,
+                        'valid_session_length_minutes': valid_session_length_minutes,
+                        'avg_cap_session':           avg_cap_session,
+                        'false_alarm_count':         false_alarm_count,
+                        'correct_rejection_count':   correct_rejection_count,
+                        'specificity':               specificity,
+                        'dprime':                    dprime,
+                        'first_lick_lat':            _first_lick_lat,
+                        'lick_after_rew_prop':       _lick_after_rew_prop,
+                        'lick_after_rew_prop_5s':    _lick_after_rew_prop_5s,
+                        'immobility_prop':           immobility_prop,
+                        'punish_count_delta':        _sess_punish_count_delta,
+                        'total_zone_count_delta':    _sess_total_zone_count_delta,
+                        'sp_epoch_mat':              _cache_sp_mat,
+                        'cp_epoch_mat':              _cache_cp_mat,
+                        'lick_epoch_mean':           _cache_lk_mean,
+                        'punish_sp_epoch_mat':       _cache_psp_mat,
+                        'punish_cp_epoch_mat':       _cache_pcp_mat,
+                        'punish_lick_epoch_mean':    _cache_plk_mean,
+                        'delivery_sp_epoch_mean':    _cache_dsp_mean,
+                        'delivery_cp_epoch_mean':    _cache_dcp_mean,
+                        'delivery_lk_epoch_mean':    _cache_dlk_mean,
+                        'reward_zone_periods':        _reward_periods_sess,
+                        'punish_zone_periods':        _punish_periods_sess,
+                    })
+                except Exception as _cache_err:
+                    print(f"  [WARN] {date_str}: session cache save failed — {_cache_err}")
 
             except Exception as e:
                 print(f"Error processing date {timestamp}: {str(e)}")
@@ -2698,6 +5830,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             'average_speed': speeds,
             'total_distance': total_distances,
             'bout_count': bout_counts,
+            'rewards_per_bout': rewards_per_bout_list,
             'avg_speed_per_bout': avg_speeds_per_bout,
             'avg_dist_per_bout':  avg_dists_per_bout,
             'hits': hits,
@@ -2705,20 +5838,29 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             'sensitivity': sensitivities,
             'lick_count': lick_counts,
             'session_length': session_lengths,
+            'valid_session_length': valid_session_lengths,
+            'avg_cap': avg_cap_values,
             'false_alarms': false_alarms_list,
             'correct_rejections': correct_rejections_list,
             'specificity': specificities_list,
-            'dprime': dprimes_list
+            'dprime': dprimes_list,
+            'avg_lick_latency': avg_lick_latency_list,
+            'lick_after_reward_prop': lick_after_reward_prop_list,
+            'lick_after_reward_prop_5s': lick_after_reward_prop_5s_list,
+            'hits_gap_aware': hits_gap_aware,
+            'immobility_prop': immobility_prop_list,
         })
         
         # Sort and remove duplicates
         results_df = results_df.drop_duplicates(subset=['date'])
-        results_df = results_df.sort_values('date')
-        
-        # Remove the first date as requested for hits, misses, and sensitivity analysis
-        results_df.loc[1:, 'hits'] = results_df.loc[1:, 'hits']  # Keep only hits after first date
-        results_df.loc[1:, 'misses'] = results_df.loc[1:, 'misses']  # Keep only misses after first date
-        results_df.loc[1:, 'sensitivity'] = results_df.loc[1:, 'sensitivity']  # Keep only sensitivity after first date
+        results_df = results_df.sort_values('date').reset_index(drop=True)
+
+        # Assign each session a weekday in the fixed 4-day training cycle.
+        # The schedule is always: Mon → Tue → Thu → Fri → Mon → ...
+        _DOW_CYCLE = ['Monday', 'Tuesday', 'Thursday', 'Friday']
+        results_df['weekday'] = [_DOW_CYCLE[i % 4] for i in range(len(results_df))]
+        # Assign training week (4 sessions per week: sessions 1-4 = week 1, etc.)
+        results_df['week'] = [i // 4 + 1 for i in range(len(results_df))]
         
         # Get mouse name
         mouse_name = os.path.basename(data_file).split("_")[0]
@@ -2756,8 +5898,24 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                                               if punish_speed_epoch_event_indices_all   else None)
         punish_cap_epoch_event_indices     = (np.array(punish_cap_epoch_event_indices_all, dtype=int)
                                               if punish_cap_epoch_event_indices_all     else None)
+        lick_epoch_session_means           = (np.vstack(lick_epoch_session_means_all)
+                                              if lick_epoch_session_means_all           else None)
+        punish_lick_epoch_session_means    = (np.vstack(punish_lick_epoch_session_means_all)
+                                              if punish_lick_epoch_session_means_all    else None)
+        delivery_speed_epoch_session_means   = (np.vstack(delivery_speed_epoch_session_means_all)
+                                               if delivery_speed_epoch_session_means_all else None)
+        delivery_speed_epoch_session_indices = (np.array(delivery_speed_epoch_session_indices_all, dtype=int)
+                                               if delivery_speed_epoch_session_indices_all else None)
+        delivery_cap_epoch_session_means   = (np.vstack(delivery_cap_epoch_session_means_all)
+                                              if delivery_cap_epoch_session_means_all   else None)
+        delivery_lick_epoch_session_means  = (np.vstack(delivery_lick_epoch_session_means_all)
+                                              if delivery_lick_epoch_session_means_all  else None)
 
         # Store results for this mouse
+        _pct_punish_zones = (
+            float(_mouse_punish_count) / float(_mouse_total_zone_count) * 100.0
+            if _mouse_total_zone_count > 0 else float('nan')
+        )
         all_results.append({
             'mouse': mouse_name,
             'dates': dates,
@@ -2791,6 +5949,17 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             'punish_cap_epoch_session_indices':   punish_cap_epoch_session_indices,
             'punish_speed_epoch_event_indices':   punish_speed_epoch_event_indices,
             'punish_cap_epoch_event_indices':     punish_cap_epoch_event_indices,
+            'lick_epoch_session_means':           lick_epoch_session_means,
+            'punish_lick_epoch_session_means':    punish_lick_epoch_session_means,
+            'delivery_speed_epoch_session_means':   delivery_speed_epoch_session_means,
+            'delivery_speed_epoch_session_indices':  delivery_speed_epoch_session_indices,
+            'delivery_cap_epoch_session_means':   delivery_cap_epoch_session_means,
+            'delivery_lick_epoch_session_means':  delivery_lick_epoch_session_means,
+            'pct_punish_zones':                   _pct_punish_zones,
+            'avg_lick_latency_list':              avg_lick_latency_list,
+            'treadmill_paths':                    _treadmill_paths_all,
+            'reward_zone_periods':                _reward_zone_periods_all,
+            'punish_zone_periods':                _punish_zone_periods_all,
         })
 
     # ── Date-aligned per-mouse plots ─────────────────────────────────────────
@@ -2808,7 +5977,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         mouse_name      = result['mouse']
         df_r            = result['df']
         condition_color = condition_color_map[conditions[mouse_name]]
-        day_numbers     = list(range(len(df_r)))  # sequential session index, no calendar gaps
+        day_numbers     = list(range(1, len(df_r) + 1))  # sequential session index, no calendar gaps
 
         if speed_fig is not None:
             plt.figure(speed_fig.number)
@@ -2818,7 +5987,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         if sensitivity_fig is not None:
             plt.figure(sensitivity_fig.number)
             plt.plot(day_numbers, df_r['sensitivity'],
-                f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
+                f'{markers[mouse_name]}-', color=condition_color, markersize=plt.rcParams['lines.markersize'], label=mouse_name)
 
         if lick_fig is not None:
             plt.figure(lick_fig.number)
@@ -2828,6 +5997,17 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         if reward_fig is not None:
             plt.figure(reward_fig.number)
             plt.plot(day_numbers, df_r['hits'],
+                f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
+
+        if lick_reward_ratio_fig is not None:
+            plt.figure(lick_reward_ratio_fig.number)
+            _ratio = np.where(
+                (pd.to_numeric(df_r['hits_gap_aware'], errors='coerce').fillna(0) > 0),
+                pd.to_numeric(df_r['lick_count'], errors='coerce').values /
+                pd.to_numeric(df_r['hits_gap_aware'], errors='coerce').replace(0, np.nan).values,
+                np.nan,
+            )
+            plt.plot(day_numbers, _ratio,
                 f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
 
         if false_alarm_fig is not None:
@@ -2855,11 +6035,29 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             # convert mm → m
             dist_m = df_r['total_distance'] / 1000.0
             plt.plot(day_numbers, dist_m,
-                f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
+                f'{markers[mouse_name]}-', color=condition_color, markersize=plt.rcParams['lines.markersize'], label='_no_legend')
+
+        if immobility_prop_fig is not None:
+            plt.figure(immobility_prop_fig.number)
+            _immo_vals = pd.to_numeric(df_r.get('immobility_prop', pd.Series(dtype=float)),
+                                       errors='coerce')
+            plt.plot(day_numbers, _immo_vals,
+                f'{markers[mouse_name]}-', color=condition_color,
+                markersize=plt.rcParams['lines.markersize'], label=mouse_name)
 
         if bout_count_fig is not None:
             plt.figure(bout_count_fig.number)
             plt.plot(day_numbers, df_r['bout_count'],
+                f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
+
+        if rewards_per_bout_fig is not None:
+            plt.figure(rewards_per_bout_fig.number)
+            plt.plot(day_numbers, pd.to_numeric(df_r['rewards_per_bout'], errors='coerce'),
+                f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
+
+        if first_lick_latency_fig is not None:
+            plt.figure(first_lick_latency_fig.number)
+            plt.plot(day_numbers, pd.to_numeric(df_r['avg_lick_latency'], errors='coerce'),
                 f'{markers[mouse_name]}-', color=condition_color, markersize=8, label=mouse_name)
 
         if bout_avg_speed_fig is not None:
@@ -2928,7 +6126,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_day - 0.5)
+        ax.set_xlim(left=0.5, right=max_day + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -2945,11 +6143,9 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.tick_params(axis='both', direction='in')
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
-        ax.set_ylim(-0.05, 1.05)  # Sensitivity is between 0 and 1
-        ax.set_xlim(left=0, right=max_day - 0.5)
-        ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
-        ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
-        ax.tick_params(axis='x', which='minor', direction='in')
+        ax.set_ylim(0, 1.05)  # Sensitivity is between 0 and 1
+        ax.set_xlim(left=0, right=13)
+        ax.set_xticks(range(0, 14))
         ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
 
     # Configure lick count plot
@@ -2964,7 +6160,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)  # Lick counts cannot be negative
-        ax.set_xlim(left=0, right=max_day - 0.5)
+        ax.set_xlim(left=0.5, right=max_day + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -2982,7 +6178,25 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)  # Reward counts cannot be negative
-        ax.set_xlim(left=0, right=max_day - 0.5)
+        ax.set_xlim(left=0.5, right=max_day + 0.5)
+        ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
+        ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
+        ax.tick_params(axis='x', which='minor', direction='in')
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+
+    # Configure lick / reward ratio plot
+    if lick_reward_ratio_fig is not None:
+        plt.figure(lick_reward_ratio_fig.number)
+        plt.title('Lick Count / Reward Count Ratio Over Time')
+        plt.xlabel('Training Day')
+        plt.ylabel('Licks per Reward')
+        plt.grid(False)
+        ax = plt.gca()
+        ax.tick_params(axis='both', direction='in')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.set_ylim(bottom=0)
+        ax.set_xlim(left=0.5, right=max_day + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -3000,7 +6214,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_day - 0.5)
+        ax.set_xlim(left=0.5, right=max_day + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -3018,7 +6232,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_day - 0.5)
+        ax.set_xlim(left=0.5, right=max_day + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -3036,7 +6250,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(-0.05, 1.05)
-        ax.set_xlim(left=0, right=max_day - 0.5)
+        ax.set_xlim(left=0.5, right=max_day + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -3054,7 +6268,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.tick_params(axis='both', direction='in')
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
-        ax.set_xlim(left=0, right=max_day - 0.5)
+        ax.set_xlim(left=0.5, right=max_day + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -3063,20 +6277,68 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     # Configure distance plot
     if distance_fig is not None:
         plt.figure(distance_fig.number)
-        plt.title('Total Distance Per Session')
+        plt.title('Total Distance Moved Per Session')
         plt.xlabel('Training Day')
         plt.ylabel('Distance (m)')
+        plt.grid(False)
+        ax = plt.gca()
+
+        # Remove any existing legend artist first
+        old_leg = ax.get_legend()
+        if old_leg is not None:
+            old_leg.remove()
+
+        # Build combined legend showing all CA% × sex combinations
+        combined_handles = []
+        for cond in sorted(condition_color_map.keys()):
+            color = condition_color_map[cond]
+            # Male (square marker)
+            combined_handles.append(
+                Line2D([0], [0], marker='s', color=color, linestyle='-',
+                       markerfacecolor=color, markeredgecolor=color,
+                       markersize=plt.rcParams['lines.markersize'],
+                       linewidth=plt.rcParams['lines.linewidth'],
+                       label=f'{cond}% Male')
+            )
+            # Female (circle marker)
+            combined_handles.append(
+                Line2D([0], [0], marker='o', color=color, linestyle='-',
+                       markerfacecolor=color, markeredgecolor=color,
+                       markersize=plt.rcParams['lines.markersize'],
+                       linewidth=plt.rcParams['lines.linewidth'],
+                       label=f'{cond}% Female')
+            )
+        ax.legend(handles=combined_handles, title="Starting Condition × Sex",
+                  loc="upper left", frameon=False, ncol=1)
+        ax.tick_params(axis='both', direction='in')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.set_ylim(bottom=0, top=150)
+        ax.set_yticks(range(0, 151, 50))
+        ax.set_xlim(left=0, right=13)
+        ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
+        ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
+        ax.tick_params(axis='x', which='minor', direction='in')
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+
+    # Configure immobility proportion plot
+    if immobility_prop_fig is not None:
+        plt.figure(immobility_prop_fig.number)
+        plt.title('Immobility Proportion Over Time\n(raw speed = 0 cm/s for \u2265 2 s)')
+        plt.xlabel('Training Day')
+        plt.ylabel('Proportion of session time immobile')
         plt.grid(False)
         ax = plt.gca()
         ax.tick_params(axis='both', direction='in')
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
-        ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_day - 0.5)
+        ax.set_ylim(0, 1.0)
+        ax.set_xlim(left=0.5, right=max_day + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
         ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+        plt.legend(frameon=False, fontsize=plt.rcParams['legend.fontsize'])
 
     if bout_count_fig is not None:
         plt.figure(bout_count_fig.number)
@@ -3089,11 +6351,46 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_day - 0.5)
+        ax.set_xlim(left=0.5, right=max_day + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
         ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+
+    if rewards_per_bout_fig is not None:
+        plt.figure(rewards_per_bout_fig.number)
+        plt.title('Average Rewards per Locomotion Bout Per Session')
+        plt.xlabel('Training Day')
+        plt.ylabel('Rewards per Bout')
+        plt.grid(False)
+        ax = plt.gca()
+        ax.tick_params(axis='both', direction='in')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.set_ylim(bottom=0)
+        ax.set_xlim(left=0.5, right=max_day + 0.5)
+        ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
+        ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
+        ax.tick_params(axis='x', which='minor', direction='in')
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+
+    if first_lick_latency_fig is not None:
+        plt.figure(first_lick_latency_fig.number)
+        plt.title('Average First-Lick Latency After Reward Delivery Per Session')
+        plt.xlabel('Training Day')
+        plt.ylabel('First-Lick Latency (s)')
+        plt.grid(False)
+        ax = plt.gca()
+        ax.tick_params(axis='both', direction='in')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.set_ylim(bottom=0)
+        ax.set_xlim(left=0.5, right=max_day + 0.5)
+        ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
+        ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
+        ax.tick_params(axis='x', which='minor', direction='in')
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+        plt.legend()
 
     if bout_avg_speed_fig is not None:
         plt.figure(bout_avg_speed_fig.number)
@@ -3106,7 +6403,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_day - 0.5)
+        ax.set_xlim(left=0.5, right=max_day + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -3123,7 +6420,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_day - 0.5)
+        ax.set_xlim(left=0.5, right=max_day + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -3141,7 +6438,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_day - 0.5)
+        ax.set_xlim(left=0.5, right=max_day + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -3159,7 +6456,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_day - 0.5)
+        ax.set_xlim(left=0.5, right=max_day + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -3177,7 +6474,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_day - 0.5)
+        ax.set_xlim(left=0.5, right=max_day + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -3239,7 +6536,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     # Plot average rewards/minute with SEM
     if avg_reward_fig is not None:
         plt.figure(avg_reward_fig.number)
-        day_numbers = np.arange(0, max_days)
+        day_numbers = np.arange(1, max_days + 1)
         plt.plot(day_numbers, mean_rewards_per_min, '-', color='black', linewidth=2, label='Mean')
         plt.fill_between(day_numbers, mean_rewards_per_min - sem_rewards_per_min, mean_rewards_per_min + sem_rewards_per_min, 
                          color='gray', alpha=0.3, label='SEM')
@@ -3254,7 +6551,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_days - 1)
+        ax.set_xlim(left=0.5, right=max_days + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(5))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(1))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -3264,7 +6561,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     # Plot sex-specific average rewards/minute with SEM
     if sex_reward_fig is not None:
         plt.figure(sex_reward_fig.number)
-        day_numbers = np.arange(0, max_days)
+        day_numbers = np.arange(1, max_days + 1)
         
         # Plot male data if available
         if len(male_rewards_per_min) > 0:
@@ -3308,7 +6605,79 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_days - 1)
+        ax.set_xlim(left=0.5, right=max_days + 0.5)
+        ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
+        ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
+        ax.tick_params(axis='x', which='minor', direction='in')
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+        plt.legend()
+
+    # Build session-indexed per-mouse speed arrays split by sex (no calendar gaps)
+    all_speeds_agg    = np.full((len(data_files), max_sessions), np.nan)
+    male_speeds_agg   = []
+    female_speeds_agg = []
+
+    for i, result in enumerate(all_results):
+        df_r     = result['df']
+        spd_row  = np.full(max_sessions, np.nan)
+        for session_idx, (_, row) in enumerate(df_r.iterrows()):
+            if pd.notna(row['average_speed']):
+                spd_row[session_idx] = row['average_speed']
+        all_speeds_agg[i] = spd_row
+        mouse_name = result['mouse']
+        if markers[mouse_name] == 's':
+            male_speeds_agg.append(spd_row)
+        else:
+            female_speeds_agg.append(spd_row)
+
+    if male_speeds_agg:
+        male_speeds_agg = np.array(male_speeds_agg)
+    if female_speeds_agg:
+        female_speeds_agg = np.array(female_speeds_agg)
+
+    # Plot sex-specific average speed with SEM
+    if avg_sex_speed_fig is not None:
+        plt.figure(avg_sex_speed_fig.number)
+        day_numbers = np.arange(1, max_days + 1)
+
+        if len(male_speeds_agg) > 0:
+            if np.any(~np.isnan(male_speeds_agg)):
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    n_male_spd = np.sum(~np.isnan(male_speeds_agg), axis=0)
+                    mean_male_spd = np.where(n_male_spd > 0, np.nanmean(male_speeds_agg, axis=0), np.nan)
+                    sem_male_spd  = np.where(n_male_spd > 1,
+                                             np.nanstd(male_speeds_agg, axis=0) / np.sqrt(n_male_spd),
+                                             0)
+                plt.plot(day_numbers, mean_male_spd, '-', color='green', linewidth=2,
+                         label=f'Male (n={len(male_speeds_agg)})')
+                plt.fill_between(day_numbers, mean_male_spd - sem_male_spd,
+                                 mean_male_spd + sem_male_spd, color='green', alpha=0.2)
+
+        if len(female_speeds_agg) > 0:
+            if np.any(~np.isnan(female_speeds_agg)):
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    n_female_spd = np.sum(~np.isnan(female_speeds_agg), axis=0)
+                    mean_female_spd = np.where(n_female_spd > 0, np.nanmean(female_speeds_agg, axis=0), np.nan)
+                    sem_female_spd  = np.where(n_female_spd > 1,
+                                               np.nanstd(female_speeds_agg, axis=0) / np.sqrt(n_female_spd),
+                                               0)
+                plt.plot(day_numbers, mean_female_spd, '-', color='purple', linewidth=2,
+                         label=f'Female (n={len(female_speeds_agg)})')
+                plt.fill_between(day_numbers, mean_female_spd - sem_female_spd,
+                                 mean_female_spd + sem_female_spd, color='purple', alpha=0.2)
+
+        plt.title('Sex-Specific Average Speed')
+        plt.xlabel('Training Day')
+        plt.ylabel('Average Speed (cm/s) (Mean \u00b1 SEM)')
+        plt.grid(False)
+        ax = plt.gca()
+        ax.tick_params(axis='both', direction='in')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.set_ylim(bottom=0)
+        ax.set_xlim(left=0.5, right=max_days + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -3324,8 +6693,8 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         df_r    = result['df']
         lpm_row = np.full(max_sessions, np.nan)
         for session_idx, (_, row) in enumerate(df_r.iterrows()):
-            if pd.notna(row['session_length']) and row['session_length'] > 0 and pd.notna(row['lick_count']):
-                lpm_row[session_idx] = row['lick_count'] / row['session_length']
+            if pd.notna(row['valid_session_length']) and row['valid_session_length'] > 0 and pd.notna(row['lick_count']):
+                lpm_row[session_idx] = row['lick_count'] / row['valid_session_length']
         all_licks_per_min[i] = lpm_row
         mouse_name = result['mouse']
         if markers[mouse_name] == 's':
@@ -3349,7 +6718,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     # Plot average licks/minute with SEM
     if avg_lick_rate_fig is not None:
         plt.figure(avg_lick_rate_fig.number)
-        day_numbers = np.arange(0, max_days)
+        day_numbers = np.arange(1, max_days + 1)
         plt.plot(day_numbers, mean_licks_per_min, '-', color='black', linewidth=2, label='Mean')
         plt.fill_between(day_numbers,
                          mean_licks_per_min - sem_licks_per_min,
@@ -3364,7 +6733,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_days - 1)
+        ax.set_xlim(left=0.5, right=max_days + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(5))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(1))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -3374,7 +6743,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     # Plot sex-specific average licks/minute with SEM
     if sex_lick_rate_fig is not None:
         plt.figure(sex_lick_rate_fig.number)
-        day_numbers = np.arange(0, max_days)
+        day_numbers = np.arange(1, max_days + 1)
         if len(male_licks_per_min) > 0:
             if np.any(~np.isnan(male_licks_per_min)):
                 with warnings.catch_warnings():
@@ -3410,7 +6779,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_days - 1)
+        ax.set_xlim(left=0.5, right=max_days + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -3438,7 +6807,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
 
     if avg_bout_count_fig is not None:
         plt.figure(avg_bout_count_fig.number)
-        day_numbers = np.arange(0, max_days)
+        day_numbers = np.arange(1, max_days + 1)
         plt.plot(day_numbers, mean_bout_counts, '-', color='black', linewidth=2, label='Mean')
         plt.fill_between(day_numbers,
                          mean_bout_counts - sem_bout_counts,
@@ -3453,7 +6822,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_days - 1)
+        ax.set_xlim(left=0.5, right=max_days + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -3487,7 +6856,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     sex_distance_fig = plt.figure(figsize=(12, 6)) if 'sex_distance' in selected_plots else None
     if sex_distance_fig is not None:
         plt.figure(sex_distance_fig.number)
-        day_numbers = np.arange(0, max_days)
+        day_numbers = np.arange(1, max_days + 1)
         if len(male_distances_m) > 0 and np.any(~np.isnan(male_distances_m)):
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore', RuntimeWarning)
@@ -3515,7 +6884,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_days - 1)
+        ax.set_xlim(left=0.5, right=max_days + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -3537,7 +6906,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     dist_array[session_idx] = row['total_distance'] / 1000.0  # mm → m
             condition_dist_groups[condition].append(dist_array)
 
-        day_numbers = np.arange(0, max_sessions)
+        day_numbers = np.arange(1, max_sessions + 1)
         for condition, dist_list in condition_dist_groups.items():
             color = condition_color_map[condition]
             padded = np.array(dist_list)
@@ -3558,7 +6927,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_days - 1)
+        ax.set_xlim(left=0.5, right=max_days + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -3582,7 +6951,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             condition_groups[condition].append(rpm_array)
 
         # Plot each condition's data
-        day_numbers = np.arange(0, max_sessions)
+        day_numbers = np.arange(1, max_sessions + 1)
         for condition, rewards_list in condition_groups.items():
             color = condition_color_map[condition]
             padded_rewards = np.array(rewards_list)
@@ -3612,7 +6981,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_days - 1)
+        ax.set_xlim(left=0.5, right=max_days + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -3635,7 +7004,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             condition_speed_groups[condition].append(speed_array)
 
         # Plot each condition's speed data
-        day_numbers = np.arange(0, max_sessions)
+        day_numbers = np.arange(1, max_sessions + 1)
         for condition, speed_list in condition_speed_groups.items():
             color = condition_color_map[condition]
             padded_speeds = np.array(speed_list)
@@ -3665,7 +7034,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_days - 1)
+        ax.set_xlim(left=0.5, right=max_days + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -3687,7 +7056,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     bc_array[session_idx] = row['bout_count']
             condition_bout_count_groups[condition].append(bc_array)
 
-        day_numbers = np.arange(0, max_sessions)
+        day_numbers = np.arange(1, max_sessions + 1)
         for condition, bc_list in condition_bout_count_groups.items():
             color = condition_color_map[condition]
             padded_bcs = np.array(bc_list)
@@ -3712,12 +7081,616 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_days - 1)
+        ax.set_xlim(left=0.5, right=max_days + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
         ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
         plt.legend()
+
+    # Condition-based average rewards per locomotion bout
+    condition_rewards_per_bout_fig = plt.figure(figsize=(12, 6)) if 'condition_rewards_per_bout' in selected_plots else None
+    if condition_rewards_per_bout_fig is not None:
+        condition_rpb_groups = {}
+        for result in all_results:
+            condition = result['starting_condition']
+            if condition not in condition_rpb_groups:
+                condition_rpb_groups[condition] = []
+            df_r = result['df']
+            rpb_array = np.full(max_sessions, np.nan)
+            for session_idx, (_, row) in enumerate(df_r.iterrows()):
+                val = pd.to_numeric(row.get('rewards_per_bout', np.nan), errors='coerce')
+                if pd.notna(val):
+                    rpb_array[session_idx] = val
+            condition_rpb_groups[condition].append(rpb_array)
+
+        day_numbers = np.arange(1, max_sessions + 1)
+        for condition, rpb_list in condition_rpb_groups.items():
+            color = condition_color_map[condition]
+            padded_rpb = np.array(rpb_list)
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', RuntimeWarning)
+                n_mice = np.sum(~np.isnan(padded_rpb), axis=0)
+                mean_rpb = np.where(n_mice > 0, np.nanmean(padded_rpb, axis=0), np.nan)
+                sem_rpb  = np.where(n_mice > 1,
+                                    np.nanstd(padded_rpb, axis=0) / np.sqrt(n_mice),
+                                    0)
+            plt.plot(day_numbers, mean_rpb, '-', color=color, linewidth=2,
+                     label=f'{condition} (n={len(rpb_list)})')
+            plt.fill_between(day_numbers, mean_rpb - sem_rpb, mean_rpb + sem_rpb,
+                             color=color, alpha=0.2)
+
+        plt.title('Average Rewards per Locomotion Bout by Starting Condition')
+        plt.xlabel('Training Day')
+        plt.ylabel('Rewards per Bout (Mean \u00b1 SEM)')
+        plt.grid(False)
+        ax = plt.gca()
+        ax.tick_params(axis='both', direction='in')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.set_ylim(bottom=0)
+        ax.set_xlim(left=0.5, right=max_days + 0.5)
+        ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
+        ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
+        ax.tick_params(axis='x', which='minor', direction='in')
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+        plt.legend()
+
+    # ── Rewards per bout bar chart (one avg per mouse, collapsed across sessions) ─
+    condition_rewards_per_bout_bar_fig = None
+    if 'condition_rewards_per_bout_bar' in selected_plots:
+        condition_rewards_per_bout_bar_fig, ax_rpbbar = plt.subplots(figsize=(8, 6))
+
+        condition_mouse_rpb: dict[str, list] = {}
+        for result in all_results:
+            condition = result['starting_condition']
+            df_r = result['df']
+            session_vals = pd.to_numeric(df_r['rewards_per_bout'], errors='coerce').dropna().values
+            if len(session_vals) > 0:
+                if condition not in condition_mouse_rpb:
+                    condition_mouse_rpb[condition] = []
+                condition_mouse_rpb[condition].append((result['mouse'], float(np.mean(session_vals))))
+
+        conditions_sorted_rpbbar = sorted(condition_mouse_rpb.keys())
+        x_pos_rpbbar = np.arange(len(conditions_sorted_rpbbar))
+
+        rng_rpbbar = np.random.default_rng(seed=42)
+        for ci, condition in enumerate(conditions_sorted_rpbbar):
+            entries = condition_mouse_rpb[condition]
+            mouse_vals = [v for _, v in entries]
+            mean_rpb = float(np.mean(mouse_vals))
+            sem_rpb  = float(np.std(mouse_vals, ddof=1) / np.sqrt(len(mouse_vals))) if len(mouse_vals) > 1 else 0.0
+            color = condition_color_map[condition]
+            ax_rpbbar.bar(ci, mean_rpb, width=0.5, color=color, alpha=0.7,
+                          yerr=sem_rpb, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
+            jitter = (rng_rpbbar.random(len(mouse_vals)) - 0.5) * 0.22
+            ax_rpbbar.scatter(ci + jitter, mouse_vals,
+                              color=color, edgecolors='black',
+                              linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
+
+        ax_rpbbar.set_xticks(x_pos_rpbbar)
+        ax_rpbbar.set_xticklabels(conditions_sorted_rpbbar)
+        ax_rpbbar.set_xlabel('Starting Condition')
+        ax_rpbbar.set_ylabel('Rewards per Locomotion Bout (Mean \u00b1 SEM)')
+        ax_rpbbar.set_ylim(bottom=0)
+        ax_rpbbar.tick_params(axis='both', direction='in')
+        ax_rpbbar.spines['top'].set_visible(False)
+        ax_rpbbar.spines['right'].set_visible(False)
+
+        # ── Mann-Whitney U test: pairwise significance brackets ─────────────
+        from scipy.stats import mannwhitneyu as _mwu_rpbbar
+        import itertools as _it_rpbbar
+        _rpbbar_results = []
+        for (_rc1, _rc2) in _it_rpbbar.combinations(conditions_sorted_rpbbar, 2):
+            _rv1 = np.array([v for _, v in condition_mouse_rpb[_rc1]])
+            _rv2 = np.array([v for _, v in condition_mouse_rpb[_rc2]])
+            if len(_rv1) >= 2 and len(_rv2) >= 2:
+                _rpb_stat, _rpb_p = _mwu_rpbbar(_rv1, _rv2, alternative='two-sided')
+                _rpbbar_results.append((_rc1, _rc2, float(_rpb_stat), float(_rpb_p)))
+
+        if _rpbbar_results:
+            _rpbbar_y_max = max(
+                max(max(v for _, v in condition_mouse_rpb[c]) for c in conditions_sorted_rpbbar),
+                float(ax_rpbbar.get_ylim()[1]),
+            )
+            _rpbbar_step = _rpbbar_y_max * 0.12
+            for _bk_idx, (_rc1, _rc2, _rpb_stat, _rpb_p) in enumerate(_rpbbar_results):
+                _bx1 = conditions_sorted_rpbbar.index(_rc1)
+                _bx2 = conditions_sorted_rpbbar.index(_rc2)
+                _bk_y = _rpbbar_y_max + _rpbbar_step * (_bk_idx + 1)
+                ax_rpbbar.plot(
+                    [_bx1, _bx1, _bx2, _bx2],
+                    [_bk_y - _rpbbar_step * 0.2, _bk_y,
+                     _bk_y, _bk_y - _rpbbar_step * 0.2],
+                    color='black', linewidth=1.2,
+                )
+                _bsig = _fmt_p(_rpb_p)
+                ax_rpbbar.text(
+                    (_bx1 + _bx2) / 2.0,
+                    _bk_y + _rpbbar_step * 0.05,
+                    _bsig, ha='center', va='bottom', fontsize=9,
+                )
+            ax_rpbbar.set_ylim(
+                bottom=0,
+                top=_rpbbar_y_max + _rpbbar_step * (len(_rpbbar_results) + 1.8),
+            )
+
+        ax_rpbbar.set_title('Average Rewards per Locomotion Bout by Starting Condition\n(collapsed across all sessions; Mann-Whitney U test)')
+        condition_rewards_per_bout_bar_fig.tight_layout()
+        _write_mwu_report(
+            output_dir, 'condition_rewards_per_bout_bar',
+            'Rewards per Locomotion Bout',
+            [(_rc1, _rc2,
+              [v for _, v in condition_mouse_rpb[_rc1]],
+              [v for _, v in condition_mouse_rpb[_rc2]])
+             for (_rc1, _rc2, _, _) in _rpbbar_results],
+        )
+
+    # ── Condition-based first-lick latency line plot ──────────────────────────
+    condition_first_lick_latency_fig = plt.figure(figsize=(12, 6)) if 'condition_first_lick_latency' in selected_plots else None
+    if condition_first_lick_latency_fig is not None:
+        _cfll_groups = {}
+        for result in all_results:
+            condition = result['starting_condition']
+            if condition not in _cfll_groups:
+                _cfll_groups[condition] = []
+            df_r = result['df']
+            _fll_arr = np.full(max_sessions, np.nan)
+            for session_idx, (_, row) in enumerate(df_r.iterrows()):
+                val = pd.to_numeric(row.get('avg_lick_latency', np.nan), errors='coerce')
+                if pd.notna(val):
+                    _fll_arr[session_idx] = val
+            _cfll_groups[condition].append(_fll_arr)
+
+        day_numbers = np.arange(1, max_sessions + 1)
+        for condition, _fll_list in _cfll_groups.items():
+            color = condition_color_map[condition]
+            padded_fll = np.array(_fll_list)
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', RuntimeWarning)
+                n_mice = np.sum(~np.isnan(padded_fll), axis=0)
+                mean_fll = np.where(n_mice > 0, np.nanmean(padded_fll, axis=0), np.nan)
+                sem_fll  = np.where(n_mice > 1,
+                                    np.nanstd(padded_fll, axis=0) / np.sqrt(n_mice),
+                                    0)
+            plt.plot(day_numbers, mean_fll, '-', color=color, linewidth=2,
+                     label=f'{condition} (n={len(_fll_list)})')
+            plt.fill_between(day_numbers, mean_fll - sem_fll, mean_fll + sem_fll,
+                             color=color, alpha=0.2)
+
+        plt.title('Average First-Lick Latency After Reward Delivery by Starting Condition')
+        plt.xlabel('Training Day')
+        plt.ylabel('First-Lick Latency (s, Mean \u00b1 SEM)')
+        plt.grid(False)
+        ax = plt.gca()
+        ax.tick_params(axis='both', direction='in')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.set_ylim(bottom=0)
+        ax.set_xlim(left=0.5, right=max_days + 0.5)
+        ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
+        ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
+        ax.tick_params(axis='x', which='minor', direction='in')
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+        plt.legend()
+
+    # ── First-lick latency bar chart (one avg per mouse, collapsed across sessions) ─
+    condition_first_lick_latency_bar_fig = None
+    if 'condition_first_lick_latency_bar' in selected_plots:
+        condition_first_lick_latency_bar_fig, ax_fllbar = plt.subplots(figsize=(8, 6))
+
+        _condition_mouse_fll: dict[str, list] = {}
+        for result in all_results:
+            condition = result['starting_condition']
+            df_r = result['df']
+            session_vals = pd.to_numeric(df_r['avg_lick_latency'], errors='coerce').dropna().values
+            if len(session_vals) > 0:
+                if condition not in _condition_mouse_fll:
+                    _condition_mouse_fll[condition] = []
+                _condition_mouse_fll[condition].append((result['mouse'], float(np.mean(session_vals))))
+
+        _conditions_sorted_fllbar = sorted(_condition_mouse_fll.keys())
+        _x_pos_fllbar = np.arange(len(_conditions_sorted_fllbar))
+
+        _rng_fllbar = np.random.default_rng(seed=42)
+        for ci, condition in enumerate(_conditions_sorted_fllbar):
+            entries = _condition_mouse_fll[condition]
+            mouse_vals = [v for _, v in entries]
+            mean_fll = float(np.mean(mouse_vals))
+            sem_fll  = float(np.std(mouse_vals, ddof=1) / np.sqrt(len(mouse_vals))) if len(mouse_vals) > 1 else 0.0
+            color = condition_color_map[condition]
+            ax_fllbar.bar(ci, mean_fll, width=0.5, color=color, alpha=0.7,
+                          yerr=sem_fll, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
+            jitter = (_rng_fllbar.random(len(mouse_vals)) - 0.5) * 0.22
+            ax_fllbar.scatter(ci + jitter, mouse_vals,
+                              color=color, edgecolors='black',
+                              linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
+
+        ax_fllbar.set_xticks(_x_pos_fllbar)
+        ax_fllbar.set_xticklabels(_conditions_sorted_fllbar)
+        ax_fllbar.set_xlabel('Starting Condition')
+        ax_fllbar.set_ylabel('First-Lick Latency (s, Mean \u00b1 SEM)')
+        ax_fllbar.set_ylim(bottom=0)
+        ax_fllbar.tick_params(axis='both', direction='in')
+        ax_fllbar.spines['top'].set_visible(False)
+        ax_fllbar.spines['right'].set_visible(False)
+
+        # ── Mann-Whitney U test: pairwise significance brackets ─────────────
+        from scipy.stats import mannwhitneyu as _mwu_fllbar
+        import itertools as _it_fllbar
+        _fllbar_results = []
+        for (_fc1, _fc2) in _it_fllbar.combinations(_conditions_sorted_fllbar, 2):
+            _fv1 = np.array([v for _, v in _condition_mouse_fll[_fc1]])
+            _fv2 = np.array([v for _, v in _condition_mouse_fll[_fc2]])
+            if len(_fv1) >= 2 and len(_fv2) >= 2:
+                _fll_stat, _fll_p = _mwu_fllbar(_fv1, _fv2, alternative='two-sided')
+                _fllbar_results.append((_fc1, _fc2, float(_fll_stat), float(_fll_p)))
+
+        if _fllbar_results:
+            _fllbar_y_max = max(
+                max(max(v for _, v in _condition_mouse_fll[c]) for c in _conditions_sorted_fllbar),
+                float(ax_fllbar.get_ylim()[1]),
+            )
+            _fllbar_step = _fllbar_y_max * 0.12
+            for _bk_idx, (_fc1, _fc2, _fll_stat, _fll_p) in enumerate(_fllbar_results):
+                _bx1 = _conditions_sorted_fllbar.index(_fc1)
+                _bx2 = _conditions_sorted_fllbar.index(_fc2)
+                _bk_y = _fllbar_y_max + _fllbar_step * (_bk_idx + 1)
+                ax_fllbar.plot(
+                    [_bx1, _bx1, _bx2, _bx2],
+                    [_bk_y - _fllbar_step * 0.2, _bk_y,
+                     _bk_y, _bk_y - _fllbar_step * 0.2],
+                    color='black', linewidth=1.2,
+                )
+                _bsig = _fmt_p(_fll_p)
+                ax_fllbar.text(
+                    (_bx1 + _bx2) / 2.0,
+                    _bk_y + _fllbar_step * 0.05,
+                    _bsig, ha='center', va='bottom', fontsize=9,
+                )
+            ax_fllbar.set_ylim(
+                bottom=0,
+                top=_fllbar_y_max + _fllbar_step * (len(_fllbar_results) + 1.8),
+            )
+
+        ax_fllbar.set_title('Average First-Lick Latency After Reward Delivery by Starting Condition\n(collapsed across all sessions; Mann-Whitney U test)')
+        condition_first_lick_latency_bar_fig.tight_layout()
+        _write_mwu_report(
+            output_dir, 'condition_first_lick_latency_bar',
+            'First Lick Latency After Reward Delivery (s)',
+            [(_fc1, _fc2,
+              [v for _, v in _condition_mouse_fll[_fc1]],
+              [v for _, v in _condition_mouse_fll[_fc2]])
+             for (_fc1, _fc2, _, _) in _fllbar_results],
+        )
+
+    # ── Condition-based lick-after-reward proportion line plot ────────────────
+    condition_lick_after_reward_prop_fig = plt.figure(figsize=(12, 6)) if 'lick_after_reward_prop' in selected_plots else None
+    if condition_lick_after_reward_prop_fig is not None:
+        _clarp_groups = {}
+        for result in all_results:
+            condition = result['starting_condition']
+            if condition not in _clarp_groups:
+                _clarp_groups[condition] = []
+            df_r = result['df']
+            _larp_arr = np.full(max_sessions, np.nan)
+            for session_idx, (_, row) in enumerate(df_r.iterrows()):
+                val = pd.to_numeric(row.get('lick_after_reward_prop', np.nan), errors='coerce')
+                if pd.notna(val):
+                    _larp_arr[session_idx] = val
+            _clarp_groups[condition].append(_larp_arr)
+
+        day_numbers = np.arange(1, max_sessions + 1)
+        for condition, _larp_list in _clarp_groups.items():
+            color = condition_color_map[condition]
+            padded_larp = np.array(_larp_list)
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', RuntimeWarning)
+                n_mice = np.sum(~np.isnan(padded_larp), axis=0)
+                mean_larp = np.where(n_mice > 0, np.nanmean(padded_larp, axis=0), np.nan)
+                sem_larp  = np.where(n_mice > 1,
+                                     np.nanstd(padded_larp, axis=0) / np.sqrt(n_mice),
+                                     0)
+            plt.plot(day_numbers, mean_larp, '-', color=color, linewidth=2,
+                     label=f'{condition} (n={len(_larp_list)})')
+            plt.fill_between(day_numbers, mean_larp - sem_larp, mean_larp + sem_larp,
+                             color=color, alpha=0.2)
+
+        plt.title('Proportion of Reward Deliveries with Licks by Starting Condition\n(2 s window starting 0.65 s after reward zone entry)')
+        plt.xlabel('Training Day')
+        plt.ylabel('Proportion with Licks (Mean \u00b1 SEM)')
+        plt.grid(False)
+        ax = plt.gca()
+        ax.tick_params(axis='both', direction='in')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.set_ylim(0, 1.05)
+        ax.set_xlim(left=0.5, right=max_days + 0.5)
+        ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
+        ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
+        ax.tick_params(axis='x', which='minor', direction='in')
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+        plt.legend()
+
+    # ── Lick-after-reward proportion bar chart (one avg per mouse) ────────────
+    condition_lick_after_reward_prop_bar_fig = None
+    if 'lick_after_reward_prop_bar' in selected_plots:
+        condition_lick_after_reward_prop_bar_fig, ax_larpbar = plt.subplots(figsize=(plt.rcParams['figure.figsize']))
+
+        _condition_mouse_larp: dict[str, list] = {}
+        for result in all_results:
+            condition = result['starting_condition']
+            df_r = result['df']
+            session_vals = pd.to_numeric(df_r['lick_after_reward_prop'], errors='coerce').dropna().values
+            if len(session_vals) > 0:
+                if condition not in _condition_mouse_larp:
+                    _condition_mouse_larp[condition] = []
+                _condition_mouse_larp[condition].append((result['mouse'], float(np.mean(session_vals))))
+
+        _conditions_sorted_larp = sorted(_condition_mouse_larp.keys())
+        _x_pos_larp = np.arange(len(_conditions_sorted_larp))
+
+        _rng_larp = np.random.default_rng(seed=42)
+        for ci, condition in enumerate(_conditions_sorted_larp):
+            entries = _condition_mouse_larp[condition]
+            mouse_vals = [v for _, v in entries]
+            mean_larp_b = float(np.mean(mouse_vals))
+            sem_larp_b  = float(np.std(mouse_vals, ddof=1) / np.sqrt(len(mouse_vals))) if len(mouse_vals) > 1 else 0.0
+            color = condition_color_map[condition]
+            ax_larpbar.bar(ci, mean_larp_b, width=0.5, color=color, alpha=0.7,
+                           yerr=sem_larp_b, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
+            jitter = (_rng_larp.random(len(mouse_vals)) - 0.5) * 0.22
+            ax_larpbar.scatter(ci + jitter, mouse_vals,
+                               color=color, edgecolors='black',
+                               linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
+
+        ax_larpbar.set_xticks(_x_pos_larp)
+        ax_larpbar.set_xticklabels(_conditions_sorted_larp)
+        ax_larpbar.set_xlabel('Starting Condition')
+        ax_larpbar.set_ylabel('Proportion of Deliveries with Licks')
+        ax_larpbar.set_ylim(0, 1.2)
+        ax_larpbar.tick_params(axis='both', direction='in')
+        ax_larpbar.spines['top'].set_visible(False)
+        ax_larpbar.spines['right'].set_visible(False)
+
+        # ── Mann-Whitney U test: pairwise significance brackets ─────────────
+        from scipy.stats import mannwhitneyu as _mwu_larp
+        import itertools as _it_larp
+        _larp_results = []
+        for (_lc1, _lc2) in _it_larp.combinations(_conditions_sorted_larp, 2):
+            _lv1 = np.array([v for _, v in _condition_mouse_larp[_lc1]])
+            _lv2 = np.array([v for _, v in _condition_mouse_larp[_lc2]])
+            if len(_lv1) >= 2 and len(_lv2) >= 2:
+                _larp_stat, _larp_p = _mwu_larp(_lv1, _lv2, alternative='two-sided')
+                _larp_results.append((_lc1, _lc2, float(_larp_stat), float(_larp_p)))
+
+        if _larp_results:
+            _larp_y_max = 0.8  # proportion is bounded by [0, 1]; anchor brackets at 1.0
+            _larp_step = _larp_y_max * 0.12
+            for _bk_idx, (_lc1, _lc2, _larp_stat, _larp_p) in enumerate(_larp_results):
+                _bx1 = _conditions_sorted_larp.index(_lc1)
+                _bx2 = _conditions_sorted_larp.index(_lc2)
+                _bk_y = _larp_y_max + _larp_step * (_bk_idx + 1)
+                ax_larpbar.plot(
+                    [_bx1, _bx1, _bx2, _bx2],
+                    [_bk_y - _larp_step * 0.2, _bk_y,
+                     _bk_y, _bk_y - _larp_step * 0.2],
+                    color='black', linewidth=1.2,
+                )
+                _lsig = _fmt_p(_larp_p)
+                ax_larpbar.text(
+                    (_bx1 + _bx2) / 2.0,
+                    _bk_y + _larp_step * 0.05,
+                    _lsig, ha='center', va='bottom', fontsize=9,
+                )
+            ax_larpbar.set_ylim(
+                bottom=0,
+                top=1.2
+            )
+
+        ax_larpbar.set_title('Proportion of Reward Deliveries with Licks (2 s window)')
+        condition_lick_after_reward_prop_bar_fig.tight_layout()
+        _write_mwu_report(
+            output_dir, 'lick_after_reward_prop_bar',
+            'Proportion of Reward Deliveries with Post-Delivery Lick (2 s window)',
+            [(_lc1, _lc2,
+              [v for _, v in _condition_mouse_larp[_lc1]],
+              [v for _, v in _condition_mouse_larp[_lc2]])
+             for (_lc1, _lc2, _, _) in _larp_results],
+        )
+
+    # ── Lick-after-reward proportion bar chart — 5 s window ───────────────────
+    condition_lick_after_reward_prop_5s_bar_fig = None
+    if 'lick_after_reward_prop_5s_bar' in selected_plots:
+        condition_lick_after_reward_prop_5s_bar_fig, ax_larp5sbar = plt.subplots(figsize=(plt.rcParams['figure.figsize']))
+
+        _condition_mouse_larp5s: dict[str, list] = {}
+        for result in all_results:
+            condition = result['starting_condition']
+            df_r = result['df']
+            session_vals = pd.to_numeric(df_r['lick_after_reward_prop_5s'], errors='coerce').dropna().values
+            if len(session_vals) > 0:
+                if condition not in _condition_mouse_larp5s:
+                    _condition_mouse_larp5s[condition] = []
+                _condition_mouse_larp5s[condition].append((result['mouse'], float(np.mean(session_vals))))
+
+        _conditions_sorted_larp5s = sorted(_condition_mouse_larp5s.keys())
+        _x_pos_larp5s = np.arange(len(_conditions_sorted_larp5s))
+
+        _rng_larp5s = np.random.default_rng(seed=42)
+        for ci, condition in enumerate(_conditions_sorted_larp5s):
+            entries = _condition_mouse_larp5s[condition]
+            mouse_vals = [v for _, v in entries]
+            mean_larp5s_b = float(np.mean(mouse_vals))
+            sem_larp5s_b  = float(np.std(mouse_vals, ddof=1) / np.sqrt(len(mouse_vals))) if len(mouse_vals) > 1 else 0.0
+            color = condition_color_map[condition]
+            ax_larp5sbar.bar(ci, mean_larp5s_b, width=0.5, color=color, alpha=0.7,
+                             yerr=sem_larp5s_b, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
+            jitter = (_rng_larp5s.random(len(mouse_vals)) - 0.5) * 0.22
+            ax_larp5sbar.scatter(ci + jitter, mouse_vals,
+                                 color=color, edgecolors='black',
+                                 linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
+
+        ax_larp5sbar.set_xticks(_x_pos_larp5s)
+        ax_larp5sbar.set_xticklabels(_conditions_sorted_larp5s)
+        ax_larp5sbar.set_xlabel('Starting Condition')
+        ax_larp5sbar.set_ylabel('Proportion of Deliveries with Licks')
+        ax_larp5sbar.set_ylim(0, 1.2)
+        ax_larp5sbar.tick_params(axis='both', direction='in')
+        ax_larp5sbar.spines['top'].set_visible(False)
+        ax_larp5sbar.spines['right'].set_visible(False)
+
+        from scipy.stats import mannwhitneyu as _mwu_larp5s
+        import itertools as _it_larp5s
+        _larp5s_results = []
+        for (_l5c1, _l5c2) in _it_larp5s.combinations(_conditions_sorted_larp5s, 2):
+            _l5v1 = np.array([v for _, v in _condition_mouse_larp5s[_l5c1]])
+            _l5v2 = np.array([v for _, v in _condition_mouse_larp5s[_l5c2]])
+            if len(_l5v1) >= 2 and len(_l5v2) >= 2:
+                _l5_stat, _l5_p = _mwu_larp5s(_l5v1, _l5v2, alternative='two-sided')
+                _larp5s_results.append((_l5c1, _l5c2, float(_l5_stat), float(_l5_p)))
+
+        if _larp5s_results:
+            _larp5s_y_max = 0.8
+            _larp5s_step = _larp5s_y_max * 0.12
+            for _bk5s_idx, (_l5c1, _l5c2, _l5_stat, _l5_p) in enumerate(_larp5s_results):
+                _b5x1 = _conditions_sorted_larp5s.index(_l5c1)
+                _b5x2 = _conditions_sorted_larp5s.index(_l5c2)
+                _b5k_y = _larp5s_y_max + _larp5s_step * (_bk5s_idx + 1)
+                ax_larp5sbar.plot(
+                    [_b5x1, _b5x1, _b5x2, _b5x2],
+                    [_b5k_y - _larp5s_step * 0.2, _b5k_y,
+                     _b5k_y, _b5k_y - _larp5s_step * 0.2],
+                    color='black', linewidth=1.2,
+                )
+                _l5sig = _fmt_p(_l5_p)
+                ax_larp5sbar.text(
+                    (_b5x1 + _b5x2) / 2.0,
+                    _b5k_y + _larp5s_step * 0.05,
+                    _l5sig, ha='center', va='bottom', fontsize=9,
+                )
+            ax_larp5sbar.set_ylim(bottom=0, top=1.2)
+
+        ax_larp5sbar.set_title('Proportion of Reward Deliveries with Licks (5 s window)')
+        condition_lick_after_reward_prop_5s_bar_fig.tight_layout()
+        _write_mwu_report(
+            output_dir, 'lick_after_reward_prop_5s_bar',
+            'Proportion of Reward Deliveries with Post-Delivery Lick (5 s window)',
+            [(_l5c1, _l5c2,
+              [v for _, v in _condition_mouse_larp5s[_l5c1]],
+              [v for _, v in _condition_mouse_larp5s[_l5c2]])
+             for (_l5c1, _l5c2, _, _) in _larp5s_results],
+        )
+
+    # ── Weekday reward bar charts ─────────────────────────────────────────────
+    # For each mouse average its reward count (hits) across all sessions that
+    # share the same weekday label (Mon/Tue/Thu/Fri).  One value per weekday
+    # per mouse.
+    _DOW_ORDER = ['Monday', 'Tuesday', 'Thursday', 'Friday']
+
+    # Build the shared data structure used by both weekday plots
+    # weekday_mouse_data: weekday -> list of (mouse_name, condition, mean_reward)
+    _weekday_mouse_data: dict[str, list] = {d: [] for d in _DOW_ORDER}
+    for result in all_results:
+        df_r      = result['df']
+        mouse     = result['mouse']
+        condition = result['starting_condition']
+        if 'weekday' not in df_r.columns:
+            continue
+        for wd in _DOW_ORDER:
+            _wd_hits = pd.to_numeric(
+                df_r.loc[df_r['weekday'] == wd, 'hits'], errors='coerce'
+            ).dropna().values
+            if len(_wd_hits) > 0:
+                _weekday_mouse_data[wd].append((mouse, condition, float(np.mean(_wd_hits))))
+
+    # ── Plot 1: all mice pooled ───────────────────────────────────────────────
+    weekday_reward_bar_fig = None
+    if 'weekday_reward_bar' in selected_plots:
+        weekday_reward_bar_fig, ax_wdbar = plt.subplots(figsize=plt.rcParams['figure.figsize'])
+        _x_wd = np.arange(len(_DOW_ORDER))
+        _rng_wdbar = np.random.default_rng(seed=42)
+        for ci, wd in enumerate(_DOW_ORDER):
+            _vals = [v for _, _, v in _weekday_mouse_data[wd]]
+            if not _vals:
+                continue
+            _mean_wd = float(np.mean(_vals))
+            _sem_wd  = float(np.std(_vals, ddof=1) / np.sqrt(len(_vals))) if len(_vals) > 1 else 0.0
+            ax_wdbar.bar(ci, _mean_wd, width=0.5, color='steelblue', alpha=0.7,
+                         yerr=_sem_wd, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
+            _jit = (_rng_wdbar.random(len(_vals)) - 0.5) * 0.22
+            ax_wdbar.scatter(ci + _jit, _vals,
+                             color='steelblue', edgecolors='black',
+                             linewidths=0.5, s=plt.rcParams['lines.markersize'] ** 2,
+                             alpha=0.6, zorder=3)
+        ax_wdbar.set_xticks(_x_wd)
+        ax_wdbar.set_xticklabels(_DOW_ORDER)
+        ax_wdbar.set_xlabel('Training Day')
+        ax_wdbar.set_ylabel('Reward Count')
+        ax_wdbar.set_ylim(bottom=0, top=60)
+        ax_wdbar.tick_params(axis='both', direction='in')
+        ax_wdbar.spines['top'].set_visible(False)
+        ax_wdbar.spines['right'].set_visible(False)
+        ax_wdbar.set_title('Reward Count by Training Day')
+        weekday_reward_bar_fig.tight_layout()
+
+    # ── Plot 2: split by starting condition ──────────────────────────────────
+    weekday_reward_bar_condition_fig = None
+    if 'weekday_reward_bar_condition' in selected_plots:
+        weekday_reward_bar_condition_fig, ax_wdcbar = plt.subplots(figsize=plt.rcParams['figure.figsize'])
+
+        # condition -> weekday -> list of per-mouse mean reward counts
+        _wd_cond_data: dict[str, dict[str, list]] = {}
+        for result in all_results:
+            cond = result['starting_condition']
+            if cond not in _wd_cond_data:
+                _wd_cond_data[cond] = {d: [] for d in _DOW_ORDER}
+            df_r = result['df']
+            if 'weekday' not in df_r.columns:
+                continue
+            for wd in _DOW_ORDER:
+                _wd_hits = pd.to_numeric(
+                    df_r.loc[df_r['weekday'] == wd, 'hits'], errors='coerce'
+                ).dropna().values
+                if len(_wd_hits) > 0:
+                    _wd_cond_data[cond][wd].append(float(np.mean(_wd_hits)))
+
+        _conds_wd = sorted(_wd_cond_data.keys())
+        _n_conds  = len(_conds_wd)
+        _wd_x     = np.arange(len(_DOW_ORDER))
+        _bar_w    = 0.7 / max(_n_conds, 1)
+        _rng_wdcbar = np.random.default_rng(seed=42)
+
+        for ci, cond in enumerate(_conds_wd):
+            color  = condition_color_map[cond]
+            _offset = (_bar_w * ci) - (_bar_w * (_n_conds - 1) / 2.0)
+            for wi, wd in enumerate(_DOW_ORDER):
+                _vals = _wd_cond_data[cond][wd]
+                if not _vals:
+                    continue
+                _mean_wd = float(np.mean(_vals))
+                _sem_wd  = float(np.std(_vals, ddof=1) / np.sqrt(len(_vals))) if len(_vals) > 1 else 0.0
+                _bar_x   = _wd_x[wi] + _offset
+                ax_wdcbar.bar(_bar_x, _mean_wd, width=_bar_w * 0.9, color=color, alpha=0.7,
+                              yerr=_sem_wd, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2,
+                              label=cond if wi == 0 else '_nolegend_')
+                _jit = (_rng_wdcbar.random(len(_vals)) - 0.5) * (_bar_w * 0.35)
+                ax_wdcbar.scatter(_bar_x + _jit, _vals,
+                                  color=color, edgecolors='black',
+                                  linewidths=0.5, s=plt.rcParams['lines.markersize'] ** 2,
+                                  alpha=0.6, zorder=3)
+
+        ax_wdcbar.set_xticks(_wd_x)
+        ax_wdcbar.set_xticklabels(_DOW_ORDER)
+        ax_wdcbar.set_xlabel('Training Day')
+        ax_wdcbar.set_ylabel('Reward Count')
+        ax_wdcbar.set_ylim(bottom=0, top=40)
+        ax_wdcbar.tick_params(axis='both', direction='in')
+        ax_wdcbar.spines['top'].set_visible(False)
+        ax_wdcbar.spines['right'].set_visible(False)
+        ax_wdcbar.legend(title='Starting Condition', frameon=False)
+        ax_wdcbar.set_title('Reward Count by Training Day')
+        weekday_reward_bar_condition_fig.tight_layout()
 
     # Create a new figure for condition-based average speed per bout analysis
     condition_bout_avg_speed_fig = plt.figure(figsize=(12, 6)) if 'condition_bout_avg_speed' in selected_plots else None
@@ -3734,7 +7707,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     bas_array[session_idx] = row['avg_speed_per_bout']
             condition_bas_groups[condition].append(bas_array)
 
-        day_numbers = np.arange(0, max_sessions)
+        day_numbers = np.arange(1, max_sessions + 1)
         for condition, bas_list in condition_bas_groups.items():
             color = condition_color_map[condition]
             padded = np.array(bas_list)
@@ -3757,7 +7730,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_days - 1)
+        ax.set_xlim(left=0.5, right=max_days + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -3779,7 +7752,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     bad_array[session_idx] = row['avg_dist_per_bout'] / 1000.0  # mm → m
             condition_bad_groups[condition].append(bad_array)
 
-        day_numbers = np.arange(0, max_sessions)
+        day_numbers = np.arange(1, max_sessions + 1)
         for condition, bad_list in condition_bad_groups.items():
             color = condition_color_map[condition]
             padded = np.array(bad_list)
@@ -3802,7 +7775,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_days - 1)
+        ax.set_xlim(left=0.5, right=max_days + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -3825,7 +7798,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             condition_lick_groups[condition].append(lick_array)
 
         # Plot each condition's lick count data
-        day_numbers = np.arange(0, max_sessions)
+        day_numbers = np.arange(1, max_sessions + 1)
         for condition, lick_list in condition_lick_groups.items():
             color = condition_color_map[condition]
             padded_licks = np.array(lick_list)
@@ -3855,7 +7828,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_days - 1)
+        ax.set_xlim(left=0.5, right=max_days + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
@@ -3873,11 +7846,11 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             df_r = result['df']
             lpm_array = np.full(max_sessions, np.nan)
             for session_idx, (_, row) in enumerate(df_r.iterrows()):
-                if pd.notna(row['session_length']) and row['session_length'] > 0 and pd.notna(row['lick_count']):
-                    lpm_array[session_idx] = row['lick_count'] / row['session_length']
+                if pd.notna(row['valid_session_length']) and row['valid_session_length'] > 0 and pd.notna(row['lick_count']):
+                    lpm_array[session_idx] = row['lick_count'] / row['valid_session_length']
             condition_lick_rate_groups[condition].append(lpm_array)
 
-        day_numbers = np.arange(0, max_sessions)
+        day_numbers = np.arange(1, max_sessions + 1)
         for condition, lpm_list in condition_lick_rate_groups.items():
             color = condition_color_map[condition]
             padded_lpms = np.array(lpm_list)
@@ -3902,12 +7875,246 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
         ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0, right=max_days - 1)
+        ax.set_xlim(left=0.5, right=max_days + 0.5)
         ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
         ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
         plt.legend()
+
+    # Create a new figure for condition-based lick/reward ratio analysis
+    condition_lick_reward_ratio_fig = plt.figure(figsize=(12, 6)) if 'condition_lick_reward_ratio' in selected_plots else None
+    if condition_lick_reward_ratio_fig is not None:
+        condition_ratio_groups = {}
+        for result in all_results:
+            condition = result['starting_condition']
+            if condition not in condition_ratio_groups:
+                condition_ratio_groups[condition] = []
+            df_r = result['df']
+            ratio_array = np.full(max_sessions, np.nan)
+            for session_idx, (_, row) in enumerate(df_r.iterrows()):
+                hits_val = pd.to_numeric(row['hits_gap_aware'], errors='coerce')
+                lick_val = pd.to_numeric(row['lick_count'], errors='coerce')
+                if pd.notna(hits_val) and hits_val > 0 and pd.notna(lick_val):
+                    ratio_array[session_idx] = lick_val / hits_val
+            condition_ratio_groups[condition].append(ratio_array)
+
+        day_numbers = np.arange(1, max_sessions + 1)
+        for condition, ratio_list in condition_ratio_groups.items():
+            color = condition_color_map[condition]
+            padded_ratios = np.array(ratio_list)
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', RuntimeWarning)
+                n_mice = np.sum(~np.isnan(padded_ratios), axis=0)
+                mean_ratios = np.where(n_mice > 0, np.nanmean(padded_ratios, axis=0), np.nan)
+                sem_ratios  = np.where(n_mice > 1,
+                                       np.nanstd(padded_ratios, axis=0) / np.sqrt(n_mice),
+                                       0)
+            plt.plot(day_numbers, mean_ratios, '-', color=color, linewidth=2,
+                     label=f'{condition} (n={len(ratio_list)})')
+            plt.fill_between(day_numbers, mean_ratios - sem_ratios, mean_ratios + sem_ratios,
+                             color=color, alpha=0.2)
+
+        plt.title('Lick Count / Reward Count Ratio by Starting Condition')
+        plt.xlabel('Training Day')
+        plt.ylabel('Licks per Reward (Mean \u00b1 SEM)')
+        plt.grid(False)
+        ax = plt.gca()
+        ax.tick_params(axis='both', direction='in')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.set_ylim(bottom=0)
+        ax.set_xlim(left=0.5, right=max_days + 0.5)
+        ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
+        ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
+        ax.tick_params(axis='x', which='minor', direction='in')
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+        plt.legend()
+
+    # Create collapsed lick/reward ratio bar plot (one average per mouse, collapsed across all sessions)
+    condition_lick_reward_ratio_bar_fig = None
+    if 'condition_lick_reward_ratio_bar' in selected_plots:
+        condition_lick_reward_ratio_bar_fig, ax_lrrbar = plt.subplots(figsize=(8, 6))
+
+        condition_mouse_lrr: dict[str, list] = {}
+        for result in all_results:
+            condition = result['starting_condition']
+            df_r = result['df']
+            session_ratios = []
+            for _, row in df_r.iterrows():
+                hits_val = pd.to_numeric(row.get('hits_gap_aware', np.nan), errors='coerce')
+                lick_val = pd.to_numeric(row.get('lick_count', np.nan), errors='coerce')
+                if pd.notna(hits_val) and hits_val > 0 and pd.notna(lick_val):
+                    session_ratios.append(lick_val / hits_val)
+            if session_ratios:
+                if condition not in condition_mouse_lrr:
+                    condition_mouse_lrr[condition] = []
+                condition_mouse_lrr[condition].append((result['mouse'], float(np.mean(session_ratios))))
+
+        conditions_sorted_lrrbar = sorted(condition_mouse_lrr.keys())
+        x_pos_lrrbar = np.arange(len(conditions_sorted_lrrbar))
+
+        rng_lrrbar = np.random.default_rng(seed=42)
+        for ci, condition in enumerate(conditions_sorted_lrrbar):
+            entries = condition_mouse_lrr[condition]
+            mouse_lrrs = [v for _, v in entries]
+            mean_lrr = float(np.mean(mouse_lrrs))
+            sem_lrr  = float(np.std(mouse_lrrs, ddof=1) / np.sqrt(len(mouse_lrrs))) if len(mouse_lrrs) > 1 else 0.0
+            color = condition_color_map[condition]
+            ax_lrrbar.bar(ci, mean_lrr, width=0.5, color=color, alpha=0.7,
+                          yerr=sem_lrr, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
+            jitter = (rng_lrrbar.random(len(mouse_lrrs)) - 0.5) * 0.22
+            ax_lrrbar.scatter(ci + jitter, mouse_lrrs,
+                              color=color, edgecolors='black',
+                              linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
+
+        ax_lrrbar.set_xticks(x_pos_lrrbar)
+        ax_lrrbar.set_xticklabels(conditions_sorted_lrrbar)
+        ax_lrrbar.set_xlabel('Starting Condition')
+        ax_lrrbar.set_ylabel('Licks per Reward (Mean \u00b1 SEM)')
+        ax_lrrbar.set_ylim(bottom=0)
+        ax_lrrbar.tick_params(axis='both', direction='in')
+        ax_lrrbar.spines['top'].set_visible(False)
+        ax_lrrbar.spines['right'].set_visible(False)
+
+        # ── Mann-Whitney U test: pairwise significance brackets ─────────────
+        from scipy.stats import mannwhitneyu as _mwu_lrrbar
+        import itertools as _it_lrrbar
+        _lrrbar_results = []
+        for (_bc1, _bc2) in _it_lrrbar.combinations(conditions_sorted_lrrbar, 2):
+            _v1 = np.array([v for _, v in condition_mouse_lrr[_bc1]])
+            _v2 = np.array([v for _, v in condition_mouse_lrr[_bc2]])
+            if len(_v1) >= 2 and len(_v2) >= 2:
+                _bt_stat, _bt_p = _mwu_lrrbar(_v1, _v2, alternative='two-sided')
+                _lrrbar_results.append((_bc1, _bc2, float(_bt_stat), float(_bt_p)))
+
+        if _lrrbar_results:
+            # determine y ceiling from current bars + individual points
+            _lrrbar_y_max = max(
+                max(max(v for _, v in condition_mouse_lrr[c]) for c in conditions_sorted_lrrbar),
+                float(ax_lrrbar.get_ylim()[1]),
+            )
+            _lrrbar_step = _lrrbar_y_max * 0.12
+            for _bk_idx, (_bc1, _bc2, _bt_stat, _bt_p) in enumerate(_lrrbar_results):
+                _bx1 = conditions_sorted_lrrbar.index(_bc1)
+                _bx2 = conditions_sorted_lrrbar.index(_bc2)
+                _bk_y = _lrrbar_y_max + _lrrbar_step * (_bk_idx + 1)
+                ax_lrrbar.plot(
+                    [_bx1, _bx1, _bx2, _bx2],
+                    [_bk_y - _lrrbar_step * 0.2, _bk_y,
+                     _bk_y, _bk_y - _lrrbar_step * 0.2],
+                    color='black', linewidth=1.2,
+                )
+                _bsig = _fmt_p(_bt_p)
+                ax_lrrbar.text(
+                    (_bx1 + _bx2) / 2.0,
+                    _bk_y + _lrrbar_step * 0.05,
+                    _bsig, ha='center', va='bottom', fontsize=9,
+                )
+            ax_lrrbar.set_ylim(
+                bottom=0,
+                top=_lrrbar_y_max + _lrrbar_step * (len(_lrrbar_results) + 1.8),
+            )
+
+        ax_lrrbar.set_title('Average Lick Count / Reward Count Ratio by Starting Condition\n(collapsed across all sessions; Mann-Whitney U test)')
+        condition_lick_reward_ratio_bar_fig.tight_layout()
+        _write_mwu_report(
+            output_dir, 'condition_lick_reward_ratio_bar',
+            'Lick Count / Reward Count Ratio',
+            [(_bc1, _bc2,
+              [v for _, v in condition_mouse_lrr[_bc1]],
+              [v for _, v in condition_mouse_lrr[_bc2]])
+             for (_bc1, _bc2, _, _) in _lrrbar_results],
+        )
+
+    # ── Punishment zone percentage bar chart (one value per mouse) ────────────
+    condition_punish_zone_pct_bar_fig = None
+    if 'condition_punish_zone_pct_bar' in selected_plots:
+        condition_punish_zone_pct_bar_fig, ax_pzbar = plt.subplots(figsize=(8, 6))
+
+        condition_mouse_pzpct: dict[str, list] = {}
+        for result in all_results:
+            condition = result['starting_condition']
+            val = result.get('pct_punish_zones', float('nan'))
+            if pd.notna(val):
+                if condition not in condition_mouse_pzpct:
+                    condition_mouse_pzpct[condition] = []
+                condition_mouse_pzpct[condition].append((result['mouse'], val))
+
+        conditions_sorted_pzbar = sorted(condition_mouse_pzpct.keys())
+        x_pos_pzbar = np.arange(len(conditions_sorted_pzbar))
+
+        rng_pzbar = np.random.default_rng(seed=42)
+        for ci, condition in enumerate(conditions_sorted_pzbar):
+            entries = condition_mouse_pzpct[condition]
+            mouse_vals = [v for _, v in entries]
+            mean_pz = float(np.mean(mouse_vals))
+            sem_pz  = float(np.std(mouse_vals, ddof=1) / np.sqrt(len(mouse_vals))) if len(mouse_vals) > 1 else 0.0
+            color = condition_color_map[condition]
+            ax_pzbar.bar(ci, mean_pz, width=0.5, color=color, alpha=0.7,
+                         yerr=sem_pz, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
+            jitter = (rng_pzbar.random(len(mouse_vals)) - 0.5) * 0.22
+            ax_pzbar.scatter(ci + jitter, mouse_vals,
+                             color=color, edgecolors='black',
+                             linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
+
+        ax_pzbar.set_xticks(x_pos_pzbar)
+        ax_pzbar.set_xticklabels(conditions_sorted_pzbar)
+        ax_pzbar.set_xlabel('Starting Condition')
+        ax_pzbar.set_ylabel('Punishment Zones (% of all zones, Mean \u00b1 SEM)')
+        ax_pzbar.set_ylim(bottom=0)
+        ax_pzbar.tick_params(axis='both', direction='in')
+        ax_pzbar.spines['top'].set_visible(False)
+        ax_pzbar.spines['right'].set_visible(False)
+
+        # ── Mann-Whitney U test: pairwise significance brackets ─────────────
+        from scipy.stats import mannwhitneyu as _mwu_pzbar
+        import itertools as _it_pzbar
+        _pzbar_results = []
+        for (_pc1, _pc2) in _it_pzbar.combinations(conditions_sorted_pzbar, 2):
+            _v1 = np.array([v for _, v in condition_mouse_pzpct[_pc1]])
+            _v2 = np.array([v for _, v in condition_mouse_pzpct[_pc2]])
+            if len(_v1) >= 2 and len(_v2) >= 2:
+                _pz_stat, _pz_p = _mwu_pzbar(_v1, _v2, alternative='two-sided')
+                _pzbar_results.append((_pc1, _pc2, float(_pz_stat), float(_pz_p)))
+
+        if _pzbar_results:
+            _pzbar_y_max = max(
+                max(max(v for _, v in condition_mouse_pzpct[c]) for c in conditions_sorted_pzbar),
+                float(ax_pzbar.get_ylim()[1]),
+            )
+            _pzbar_step = _pzbar_y_max * 0.12
+            for _bk_idx, (_pc1, _pc2, _pz_stat, _pz_p) in enumerate(_pzbar_results):
+                _bx1 = conditions_sorted_pzbar.index(_pc1)
+                _bx2 = conditions_sorted_pzbar.index(_pc2)
+                _bk_y = _pzbar_y_max + _pzbar_step * (_bk_idx + 1)
+                ax_pzbar.plot(
+                    [_bx1, _bx1, _bx2, _bx2],
+                    [_bk_y - _pzbar_step * 0.2, _bk_y,
+                     _bk_y, _bk_y - _pzbar_step * 0.2],
+                    color='black', linewidth=1.2,
+                )
+                _pzsig = _fmt_p(_pz_p)
+                ax_pzbar.text(
+                    (_bx1 + _bx2) / 2.0,
+                    _bk_y + _pzbar_step * 0.05,
+                    _pzsig, ha='center', va='bottom', fontsize=9,
+                )
+            ax_pzbar.set_ylim(
+                bottom=0,
+                top=_pzbar_y_max + _pzbar_step * (len(_pzbar_results) + 1.8),
+            )
+
+        ax_pzbar.set_title('% Punishment Zones Across All Sessions by Starting Condition\n(one value per mouse; Mann-Whitney U test)')
+        condition_punish_zone_pct_bar_fig.tight_layout()
+        _write_mwu_report(
+            output_dir, 'condition_punish_zone_pct_bar',
+            '% Punishment Zones Across All Sessions',
+            [(_pc1, _pc2,
+              [v for _, v in condition_mouse_pzpct[_pc1]],
+              [v for _, v in condition_mouse_pzpct[_pc2]])
+             for (_pc1, _pc2, _, _) in _pzbar_results],
+        )
 
     # Create collapsed condition bar plot (one average rpm per mouse, collapsed across all days)
     condition_bar_fig = None
@@ -3937,13 +8144,12 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             mean_rpm = float(np.mean(mouse_rpms))
             sem_rpm  = float(np.std(mouse_rpms, ddof=1) / np.sqrt(len(mouse_rpms))) if len(mouse_rpms) > 1 else 0.0
             color = condition_color_map[condition]
-            ax_bar.bar(ci, mean_rpm, width=0.5, color=color, alpha=0.8,
-                       yerr=sem_rpm, capsize=7, error_kw={'elinewidth': 1.5, 'capthick': 1.5})
+            ax_bar.bar(ci, mean_rpm, width=0.5, color=color, alpha=0.7,
+                       yerr=sem_rpm, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
             jitter = (rng_bar.random(len(mouse_rpms)) - 0.5) * 0.22
-            for j, (mouse_name_bar, rpm_val) in enumerate(entries):
-                ax_bar.plot(ci + jitter[j], rpm_val, 'o',
-                            color='white', markeredgecolor=color,
-                            markeredgewidth=1.8, markersize=7, zorder=3)
+            ax_bar.scatter(ci + jitter, mouse_rpms,
+                           color=color, edgecolors='black',
+                           linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
 
         ax_bar.set_xticks(x_pos_bar)
         ax_bar.set_xticklabels(conditions_sorted_bar)
@@ -3981,13 +8187,12 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             mean_spd = float(np.mean(mouse_speeds))
             sem_spd  = float(np.std(mouse_speeds, ddof=1) / np.sqrt(len(mouse_speeds))) if len(mouse_speeds) > 1 else 0.0
             color = condition_color_map[condition]
-            ax_sbar.bar(ci, mean_spd, width=0.5, color=color, alpha=0.8,
-                        yerr=sem_spd, capsize=7, error_kw={'elinewidth': 1.5, 'capthick': 1.5})
+            ax_sbar.bar(ci, mean_spd, width=0.5, color=color, alpha=0.7,
+                        yerr=sem_spd, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
             jitter = (rng_sbar.random(len(mouse_speeds)) - 0.5) * 0.22
-            for j, (mouse_name_sbar, spd_val) in enumerate(entries):
-                ax_sbar.plot(ci + jitter[j], spd_val, 'o',
-                             color='white', markeredgecolor=color,
-                             markeredgewidth=1.8, markersize=7, zorder=3)
+            ax_sbar.scatter(ci + jitter, mouse_speeds,
+                            color=color, edgecolors='black',
+                            linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
 
         ax_sbar.set_xticks(x_pos_sbar)
         ax_sbar.set_xticklabels(conditions_sorted_sbar)
@@ -3999,6 +8204,3031 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax_sbar.spines['top'].set_visible(False)
         ax_sbar.spines['right'].set_visible(False)
         condition_speed_bar_fig.tight_layout()
+
+    # ── Condition-based sensitivity line plot (mean ± SEM by condition over training days) ─
+    condition_sensitivity_fig = plt.figure(figsize=plt.rcParams['figure.figsize']) if 'condition_sensitivity' in selected_plots else None
+    if condition_sensitivity_fig is not None:
+        condition_sensitivity_groups = {}
+        for result in all_results:
+            condition = result['starting_condition']
+            if condition not in condition_sensitivity_groups:
+                condition_sensitivity_groups[condition] = []
+            df_r = result['df']
+            sen_array = np.full(max_sessions, np.nan)
+            for session_idx, (_, row) in enumerate(df_r.iterrows()):
+                val = pd.to_numeric(row['sensitivity'], errors='coerce')
+                if pd.notna(val):
+                    sen_array[session_idx] = val
+            condition_sensitivity_groups[condition].append(sen_array)
+
+        day_numbers = np.arange(1, max_sessions + 1)
+        for condition, sen_list in condition_sensitivity_groups.items():
+            color = condition_color_map[condition]
+            padded = np.array(sen_list)
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', RuntimeWarning)
+                n_mice = np.sum(~np.isnan(padded), axis=0)
+                mean_sen = np.where(n_mice > 0, np.nanmean(padded, axis=0), np.nan)
+                sem_sen  = np.where(n_mice > 1,
+                                    np.nanstd(padded, axis=0) / np.sqrt(n_mice),
+                                    0)
+            plt.figure(condition_sensitivity_fig.number)
+            plt.plot(day_numbers, mean_sen, '-', color=color,
+                     linewidth=plt.rcParams['lines.linewidth'],
+                     label=f'{condition} (n={len(sen_list)})')
+            plt.fill_between(day_numbers, mean_sen - sem_sen, mean_sen + sem_sen,
+                             color=color, alpha=0.2)
+
+        plt.figure(condition_sensitivity_fig.number)
+        plt.title('Sensitivity by Starting Condition')
+        plt.xlabel('Training Day')
+        plt.ylabel('Sensitivity (Mean \u00b1 SEM)')
+        plt.grid(False)
+        ax = plt.gca()
+        ax.tick_params(axis='both', direction='in')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.set_ylim(0, 1.05)
+        ax.set_xlim(left=1, right=max_days + 0.5)
+        ax.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
+        ax.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
+        ax.tick_params(axis='x', which='minor', direction='in')
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+        plt.legend(frameon=False)
+        condition_sensitivity_fig.tight_layout()
+
+    condition_sensitivity_bar_fig = None
+    if 'condition_sensitivity_bar' in selected_plots:
+        condition_sensitivity_bar_fig, ax_senbar = plt.subplots(
+            figsize=plt.rcParams.get('figure.figsize', (4.0, 2.5)))
+
+        _csen_data: dict[str, list] = {}  # condition -> list of (mouse, mean_sensitivity)
+        for result in all_results:
+            condition = result['starting_condition']
+            df_r = result['df']
+            vals = pd.to_numeric(df_r['sensitivity'], errors='coerce').dropna()
+            vals = vals[vals.notna()]
+            if len(vals) > 0:
+                _csen_data.setdefault(condition, []).append(
+                    (result['mouse'], float(np.nanmean(vals))))
+
+        _csen_conds = sorted(_csen_data.keys())
+        _rng_senbar = np.random.default_rng(seed=42)
+        for ci, condition in enumerate(_csen_conds):
+            entries = _csen_data[condition]
+            mouse_vals = [v for _, v in entries]
+            mean_sen = float(np.mean(mouse_vals))
+            sem_sen  = (float(np.std(mouse_vals, ddof=1) / np.sqrt(len(mouse_vals)))
+                        if len(mouse_vals) > 1 else 0.0)
+            color = condition_color_map[condition]
+            ax_senbar.bar(ci, mean_sen, width=0.5, color=color, alpha=0.7,
+                          yerr=sem_sen, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
+            jitter = (_rng_senbar.random(len(mouse_vals)) - 0.5) * 0.22
+            ax_senbar.scatter(ci + jitter, mouse_vals,
+                              color=color, edgecolors='black',
+                              linewidths=plt.rcParams['lines.linewidth'],
+                              s=plt.rcParams['lines.markersize']**2, zorder=3)
+
+        ax_senbar.set_xticks(np.arange(len(_csen_conds)))
+        ax_senbar.set_xticklabels(_csen_conds)
+        ax_senbar.set_xlabel('Starting Condition')
+        ax_senbar.set_ylabel('Sensitivity (Mean \u00b1 SEM)')
+        ax_senbar.set_ylim(bottom=0)
+        ax_senbar.tick_params(axis='both', direction='in')
+        ax_senbar.spines['top'].set_visible(False)
+        ax_senbar.spines['right'].set_visible(False)
+
+        # ── Mann-Whitney U pairwise significance brackets ────────────────────
+        import itertools as _it_senbar
+        from scipy.stats import mannwhitneyu as _mwu_senbar
+        _senbar_pairs = []
+        for (_sc1, _sc2) in _it_senbar.combinations(_csen_conds, 2):
+            _sv1 = np.array([v for _, v in _csen_data[_sc1]])
+            _sv2 = np.array([v for _, v in _csen_data[_sc2]])
+            if len(_sv1) >= 2 and len(_sv2) >= 2:
+                _sstat, _sp = _mwu_senbar(_sv1, _sv2, alternative='two-sided')
+                _senbar_pairs.append((_sc1, _sc2, float(_sstat), float(_sp)))
+                print(f'  [SENSITIVITY] {_sc1} vs {_sc2}: U={_sstat:.1f}, p={_sp:.4f}')
+
+        if _senbar_pairs:
+            _all_sen_vals = [v for entries in _csen_data.values() for _, v in entries]
+            _senbar_ymax  = max(float(np.nanmax(_all_sen_vals)),
+                                float(ax_senbar.get_ylim()[1]))
+            _senbar_step  = _senbar_ymax * 0.12
+            for _bk_idx, (_sc1, _sc2, _ss, _sp) in enumerate(_senbar_pairs):
+                _bx1  = _csen_conds.index(_sc1)
+                _bx2  = _csen_conds.index(_sc2)
+                _bk_y = _senbar_ymax + _senbar_step * (_bk_idx + 1)
+                ax_senbar.plot(
+                    [_bx1, _bx1, _bx2, _bx2],
+                    [_bk_y - _senbar_step * 0.2, _bk_y,
+                     _bk_y, _bk_y - _senbar_step * 0.2],
+                    color='black', linewidth=1.2)
+                _bsig = _fmt_p(_sp)
+                ax_senbar.text((_bx1 + _bx2) / 2.0,
+                               _bk_y + _senbar_step * 0.05,
+                               _bsig, ha='center', va='bottom', fontsize=9)
+            ax_senbar.set_ylim(
+                bottom=0,
+                top=_senbar_ymax + _senbar_step * (len(_senbar_pairs) + 1.8))
+
+        ax_senbar.set_title(
+            'Average Sensitivity by Starting Condition\n'
+            '(collapsed across all sessions; Mann-Whitney U test)')
+        condition_sensitivity_bar_fig.tight_layout()
+        _write_mwu_report(
+            output_dir, 'condition_sensitivity_bar',
+            'Average Sensitivity by Condition',
+            [(_sc1, _sc2,
+              [v for _, v in _csen_data[_sc1]],
+              [v for _, v in _csen_data[_sc2]])
+             for (_sc1, _sc2, _, _) in _senbar_pairs],
+        )
+
+    # ── Exploratory: speed histogram ──────────────────────────────────────────
+    expl_speed_histogram_fig = None
+    if 'expl_speed_histogram' in selected_plots:
+        from scipy.stats import shapiro
+        from scipy.stats import gaussian_kde as _gkde
+
+        # Collect data (log-transformed: zero/negative values excluded)
+        all_session_speeds = []
+        per_mouse_means    = []
+        for _r in all_results:
+            _ss = pd.to_numeric(_r['df']['average_speed'], errors='coerce').dropna()
+            _ss = _ss[_ss > 0].tolist()
+            all_session_speeds.extend(_ss)
+            if _ss:
+                per_mouse_means.append(float(np.mean(_ss)))
+
+        all_session_speeds = np.log(np.array(all_session_speeds, dtype=float))
+        per_mouse_means    = np.log(np.array(per_mouse_means,    dtype=float))
+
+        expl_speed_histogram_fig, (ax_h1, ax_h2) = plt.subplots(1, 2, figsize=(14, 5))
+
+        for ax_h, data, panel_title in [
+            (ax_h1, all_session_speeds,
+             f'All session speeds (n={len(all_session_speeds)} sessions)'),
+            (ax_h2, per_mouse_means,
+             f'Per-mouse mean speed (n={len(per_mouse_means)} mice)'),
+        ]:
+            ax_h.hist(data, bins='auto', color='steelblue', alpha=0.65,
+                      edgecolor='white', linewidth=0.5, density=True)
+            # KDE overlay
+            if len(data) >= 3:
+                _kde_x = np.linspace(data.min(), data.max(), 300)
+                try:
+                    _kde = _gkde(data)
+                    ax_h.plot(_kde_x, _kde(_kde_x), color='navy', linewidth=2, label='KDE')
+                except Exception:
+                    pass
+            # Shapiro-Wilk (only valid for n >= 3)
+            if len(data) >= 3:
+                _sw_stat, _sw_p = shapiro(data)
+                _sw_text = (f'Shapiro-Wilk: W={_sw_stat:.3f}, p={_sw_p:.4f}\n'
+                            f'{"Normal (p>0.05)" if _sw_p > 0.05 else "Non-normal (p\u22640.05)"}')
+                ax_h.text(0.97, 0.97, _sw_text, transform=ax_h.transAxes,
+                          fontsize=8, va='top', ha='right',
+                          bbox=dict(boxstyle='round,pad=0.3', facecolor='lightyellow',
+                                    edgecolor='gray', alpha=0.8))
+            ax_h.set_title(panel_title)
+            ax_h.set_xlabel('log(Average speed)  [log cm/s]')
+            ax_h.set_ylabel('Density')
+            ax_h.tick_params(axis='both', direction='in')
+            ax_h.spines['top'].set_visible(False)
+            ax_h.spines['right'].set_visible(False)
+
+        expl_speed_histogram_fig.suptitle(
+            'Log-Transformed Speed Distribution — Exploratory\n'
+            'Left: one value per session per mouse (raw repeated-measures data)  |  '
+            'Right: one mean per mouse',
+            fontsize=10,
+        )
+        expl_speed_histogram_fig.tight_layout()
+
+    # ── Exploratory: average speed distribution fit (per-mouse means by cohort) ─
+    # One mean per mouse; grouped by starting_condition.
+    # Goal: assess normality per cohort to decide whether a t-test is appropriate.
+    expl_speed_distfit_fig = None
+    if 'expl_speed_distfit' in selected_plots:
+        try:
+            from scipy.stats import (norm as _norm_sd, probplot as _probplot_sd,
+                                     shapiro as _sw_sd, beta as _beta_sd)
+            from matplotlib.gridspec import GridSpec as _GridSpec_sd
+            import warnings as _warnings_sd
+
+            # ── One mean per mouse, grouped by starting_condition ─────────────
+            _sd_groups = {}
+            for _r in all_results:
+                _sv = pd.to_numeric(
+                    _r['df']['average_speed'], errors='coerce'
+                ).dropna().values
+                _sv = _sv[_sv > 0]
+                if len(_sv) > 0:
+                    _cond_sd = _r.get('starting_condition', 'Unknown')
+                    _sd_groups.setdefault(_cond_sd, []).append(float(np.mean(_sv)))
+
+            _sd_cond_names = sorted(_sd_groups.keys())
+            _n_cg_sd = len(_sd_cond_names)
+            if _n_cg_sd == 0:
+                raise ValueError('No valid speed data found')
+
+            # ── Shapiro-Wilk per cohort ────────────────────────────────────────
+            _sd_sw = {}
+            for _cn in _sd_cond_names:
+                _arr = np.array(_sd_groups[_cn])
+                if len(_arr) >= 3:
+                    _w, _p = _sw_sd(_arr)
+                    _sd_sw[_cn] = (float(_w), float(_p), len(_arr))
+                else:
+                    _sd_sw[_cn] = (np.nan, np.nan, len(_arr))
+
+            # ── Figure layout ─────────────────────────────────────────────────
+            # Row 0 (full width): overlaid histograms + Normal fit + rug marks
+            # Rows 1.._n_qq_rows: per-cohort Normal Q-Q plots (2-column grid)
+            # Last row (full width): summary normality table
+            _n_qq_rows_sd = (_n_cg_sd + 1) // 2
+            _n_rows_sd = 1 + 1 + _n_qq_rows_sd + 1  # +1 row for box plot
+            _coh_pal_sd = [plt.cm.tab10(i / max(_n_cg_sd - 1, 1))
+                           for i in range(_n_cg_sd)]
+
+            expl_speed_distfit_fig = plt.figure(figsize=(13, 4.5 * _n_rows_sd))
+            _gs_sd = _GridSpec_sd(_n_rows_sd, 2, figure=expl_speed_distfit_fig,
+                                  hspace=0.60, wspace=0.38)
+            ax_sdhist = expl_speed_distfit_fig.add_subplot(_gs_sd[0, :])
+
+            # [row 0] Overlaid histograms + Normal fit + rug marks
+            _sd_rng = np.random.default_rng(42)
+            for _ci, _cn in enumerate(_sd_cond_names):
+                _arr = np.array(_sd_groups[_cn])
+                _col_sd = _coh_pal_sd[_ci]
+                _sw_lbl = (f'SW p={_sd_sw[_cn][1]:.3f}'
+                           if not np.isnan(_sd_sw[_cn][1]) else 'SW: n<3')
+                _nbins_sd = max(4, len(_arr) // 2 + 1)
+                ax_sdhist.hist(_arr, bins=_nbins_sd, alpha=0.40, color=_col_sd,
+                               density=True, edgecolor='white', linewidth=0.5,
+                               label=f'{_cn}  (n={len(_arr)}, {_sw_lbl})')
+                if len(_arr) >= 3:
+                    _mn_sd = float(np.mean(_arr))
+                    _sdv_sd = float(np.std(_arr, ddof=1))
+                    _xfit_sd = np.linspace(_mn_sd - 4 * _sdv_sd,
+                                           _mn_sd + 4 * _sdv_sd, 300)
+                    ax_sdhist.plot(_xfit_sd, _norm_sd.pdf(_xfit_sd, _mn_sd, _sdv_sd),
+                                   color=_col_sd, linewidth=2.0, linestyle='--')
+                _jit_sd = _sd_rng.uniform(-0.003, 0.003, len(_arr))
+                ax_sdhist.plot(_arr, _jit_sd, '|', color=_col_sd,
+                               markersize=14, markeredgewidth=2.5, alpha=0.75)
+
+            ax_sdhist.set_xlabel('Per-mouse mean average speed (cm/s)', fontsize=10)
+            ax_sdhist.set_ylabel('Density', fontsize=10)
+            ax_sdhist.set_title(
+                'Per-mouse mean average speed — distribution by cohort\n'
+                '(each point = one mouse; dashed lines = Normal fit; '
+                'tick marks = individual mice)',
+                fontsize=10,
+            )
+            ax_sdhist.legend(fontsize=8)
+            ax_sdhist.spines['top'].set_visible(False)
+            ax_sdhist.spines['right'].set_visible(False)
+            ax_sdhist.tick_params(axis='both', direction='in')
+
+            # [row 1] Box-and-whisker with 1.5×IQR outlier highlighting
+            ax_sdbox = expl_speed_distfit_fig.add_subplot(_gs_sd[1, :])
+            _bp_data_sd = [np.array(_sd_groups[_cn]) for _cn in _sd_cond_names]
+            _bplot_sd = ax_sdbox.boxplot(
+                _bp_data_sd, labels=_sd_cond_names, patch_artist=True,
+                showfliers=False, widths=0.50,
+                boxprops=dict(linewidth=1.4),
+                whiskerprops=dict(linewidth=1.2, linestyle='--'),
+                capprops=dict(linewidth=1.4),
+                medianprops=dict(color='black', linewidth=2.0),
+            )
+            for _bi, _bpatch in enumerate(_bplot_sd['boxes']):
+                _bc = _coh_pal_sd[_bi]
+                _bpatch.set_facecolor([*_bc[:3], 0.35])
+                _bpatch.set_edgecolor(_bc)
+            _rng_box_sd = np.random.default_rng(1)
+            _outlier_legend_added_sd = False
+            for _bi, _cn in enumerate(_sd_cond_names):
+                _arr_bx = np.array(_sd_groups[_cn])
+                _q1_sd  = float(np.percentile(_arr_bx, 25))
+                _q3_sd  = float(np.percentile(_arr_bx, 75))
+                _iqr_sd = _q3_sd - _q1_sd
+                _lo_sd  = _q1_sd - 1.5 * _iqr_sd
+                _hi_sd  = _q3_sd + 1.5 * _iqr_sd
+                _out_sd = (_arr_bx < _lo_sd) | (_arr_bx > _hi_sd)
+                _jit_sd = _rng_box_sd.uniform(-0.15, 0.15, len(_arr_bx))
+                ax_sdbox.scatter(
+                    np.full(int(np.sum(~_out_sd)), _bi + 1) + _jit_sd[~_out_sd],
+                    _arr_bx[~_out_sd], color=_coh_pal_sd[_bi],
+                    s=40, alpha=0.70, zorder=3,
+                )
+                if _out_sd.any():
+                    ax_sdbox.scatter(
+                        np.full(int(np.sum(_out_sd)), _bi + 1) + _jit_sd[_out_sd],
+                        _arr_bx[_out_sd], color='red', s=80, alpha=0.90,
+                        zorder=4, edgecolors='darkred', linewidths=1.5, marker='D',
+                        label='Outlier (1.5\u00d7IQR)' if not _outlier_legend_added_sd else '',
+                    )
+                    _outlier_legend_added_sd = True
+                    for _ov in _arr_bx[_out_sd]:
+                        ax_sdbox.annotate(
+                            f'{_ov:.3g}', xy=(_bi + 1, _ov),
+                            xytext=(8, 0), textcoords='offset points',
+                            fontsize=7, color='darkred', va='center',
+                        )
+            ax_sdbox.set_xlabel('Cohort', fontsize=10)
+            ax_sdbox.set_ylabel('Per-mouse mean (cm/s)', fontsize=10)
+            ax_sdbox.set_title(
+                'Box-and-whisker \u2014 per-mouse mean average speed by cohort\n'
+                '(whiskers extend to 1.5\u00d7IQR; \u25c6 red diamonds = outliers beyond fence)',
+                fontsize=10,
+            )
+            _handles_sd, _labels_sd = ax_sdbox.get_legend_handles_labels()
+            if _handles_sd:
+                ax_sdbox.legend(fontsize=8)
+            ax_sdbox.spines['top'].set_visible(False)
+            ax_sdbox.spines['right'].set_visible(False)
+            ax_sdbox.tick_params(axis='both', direction='in')
+
+            # [rows 2+] Per-cohort Normal Q-Q with 95% CI
+            for _ci, _cn in enumerate(_sd_cond_names):
+                _arr = np.array(_sd_groups[_cn])
+                _row_qq = 2 + _ci // 2
+                _col_qq = _ci % 2
+                _ax_qq = expl_speed_distfit_fig.add_subplot(_gs_sd[_row_qq, _col_qq])
+                _col_sd = _coh_pal_sd[_ci]
+                if len(_arr) >= 3:
+                    (_osm_sd, _osr_sd), (_sl_sd, _int_sd, _) = _probplot_sd(
+                        _arr, dist='norm',
+                    )
+                    _n_qq_sd = len(_arr)
+                    with _warnings_sd.catch_warnings():
+                        _warnings_sd.simplefilter('ignore')
+                        _ci_lo_sd = np.array([
+                            _norm_sd.ppf(_beta_sd.ppf(0.025, _i + 1, _n_qq_sd - _i))
+                            for _i in range(_n_qq_sd)
+                        ])
+                        _ci_hi_sd = np.array([
+                            _norm_sd.ppf(_beta_sd.ppf(0.975, _i + 1, _n_qq_sd - _i))
+                            for _i in range(_n_qq_sd)
+                        ])
+                    _ax_qq.fill_between(
+                        _osm_sd,
+                        _sl_sd * _ci_lo_sd + _int_sd,
+                        _sl_sd * _ci_hi_sd + _int_sd,
+                        color=_col_sd, alpha=0.18, label='95% CI',
+                    )
+                    _ax_qq.plot(_osm_sd, _osr_sd, 'o', color=_col_sd,
+                                markersize=7, alpha=0.85, label='Mouse mean')
+                    _ax_qq.plot(
+                        [_osm_sd[0], _osm_sd[-1]],
+                        [_sl_sd * _osm_sd[0] + _int_sd,
+                         _sl_sd * _osm_sd[-1] + _int_sd],
+                        'k-', linewidth=1.4, label='Reference line',
+                    )
+                    _w_sd, _p_sd = _sd_sw[_cn][:2]
+                    _verdict_sd = ('Normal (p>0.05) — t-test OK \u2713'
+                                   if _p_sd > 0.05
+                                   else 'Non-normal (p\u22640.05) — consider Mann-Whitney')
+                    _ax_qq.text(
+                        0.04, 0.96,
+                        f'SW: W={_w_sd:.4f}, p={_p_sd:.4f}\n{_verdict_sd}',
+                        transform=_ax_qq.transAxes, fontsize=8, va='top',
+                        bbox=dict(boxstyle='round,pad=0.3',
+                                  facecolor='#e6ffe6' if _p_sd > 0.05 else '#ffe6e6',
+                                  edgecolor=_col_sd, alpha=0.90),
+                    )
+                else:
+                    _ax_qq.text(
+                        0.5, 0.5,
+                        f'n={len(_arr)} — need \u22653\nfor Shapiro-Wilk / Q-Q',
+                        transform=_ax_qq.transAxes,
+                        ha='center', va='center', fontsize=10,
+                    )
+                _ax_qq.set_title(f'{_cn} — Normal Q-Q  (n={len(_arr)} mice)', fontsize=9)
+                _ax_qq.set_xlabel('Theoretical quantiles (Normal)', fontsize=8)
+                _ax_qq.set_ylabel('Observed quantiles', fontsize=8)
+                _ax_qq.legend(fontsize=7)
+                _ax_qq.spines['top'].set_visible(False)
+                _ax_qq.spines['right'].set_visible(False)
+                _ax_qq.tick_params(axis='both', direction='in')
+
+            # Hide unused Q-Q cell when odd cohort count
+            if _n_cg_sd % 2 == 1:
+                _ax_empty_sd = expl_speed_distfit_fig.add_subplot(
+                    _gs_sd[2 + (_n_cg_sd - 1) // 2, 1])
+                _ax_empty_sd.axis('off')
+
+            # [last row] Summary table
+            ax_sdtbl = expl_speed_distfit_fig.add_subplot(_gs_sd[_n_rows_sd - 1, :])
+            ax_sdtbl.axis('off')
+            _tbl_cols_sd = ['Cohort', 'N mice', 'Mean (cm/s)', 'SD', 'SW W', 'SW p',
+                            'T-test normality OK?']
+            _tbl_rows_sd = []
+            for _cn in _sd_cond_names:
+                _arr = np.array(_sd_groups[_cn])
+                _w_sd, _p_sd, _nn_sd = _sd_sw[_cn]
+                _mn_sd = float(np.mean(_arr))
+                _sdv_str = (f'{np.std(_arr, ddof=1):.4g}'
+                            if _nn_sd >= 2 else 'n/a')
+                _ok_sd = ('Yes' if (not np.isnan(_p_sd) and _p_sd > 0.05)
+                          else ('Insufficient n (need \u22653)'
+                                if np.isnan(_p_sd)
+                                else 'No \u2014 consider Mann-Whitney U'))
+                _tbl_rows_sd.append([
+                    _cn, str(_nn_sd), f'{_mn_sd:.4g}', _sdv_str,
+                    f'{_w_sd:.4f}' if not np.isnan(_w_sd) else 'n/a',
+                    f'{_p_sd:.4f}' if not np.isnan(_p_sd) else 'n/a',
+                    _ok_sd,
+                ])
+            _tbl_sd = ax_sdtbl.table(
+                cellText=_tbl_rows_sd, colLabels=_tbl_cols_sd,
+                cellLoc='center', loc='center', bbox=[0, 0, 1, 1],
+            )
+            _tbl_sd.auto_set_font_size(False)
+            _tbl_sd.set_fontsize(9)
+            for (_ri, _ci2), _cell in _tbl_sd.get_celld().items():
+                if _ri == 0:
+                    _cell.set_facecolor('#d0d8e8')
+                    _cell.set_text_props(fontweight='bold')
+                elif _ci2 == 6 and _ri > 0:
+                    _txt2 = _tbl_rows_sd[_ri - 1][6]
+                    _cell.set_facecolor(
+                        '#e6ffe6' if 'Yes' in _txt2
+                        else '#ffe6e6' if 'No' in _txt2
+                        else '#fffff0'
+                    )
+            ax_sdtbl.set_title(
+                'Normality summary — one mean per mouse per cohort '
+                '(Shapiro-Wilk, \u03b1=0.05)',
+                fontsize=9, pad=6,
+            )
+
+            expl_speed_distfit_fig.suptitle(
+                'Average Speed — Per-Mouse Means by Cohort\n'
+                '(N=1 value per mouse = mean across all sessions; '
+                'goal: assess normality for between-cohort t-test)',
+                fontsize=11, y=1.01,
+            )
+            expl_speed_distfit_fig.tight_layout()
+
+            print('\n\u2500\u2500 Average Speed \u2014 Per-Mouse Means by Cohort \u2500\u2500')
+            for _cn in _sd_cond_names:
+                _arr = np.array(_sd_groups[_cn])
+                _w_sd, _p_sd, _nn_sd = _sd_sw[_cn]
+                _sdv_str = f'{np.std(_arr, ddof=1):.4g}' if _nn_sd >= 2 else 'n/a'
+                _w_str   = f'{_w_sd:.4f}' if not np.isnan(_w_sd) else 'n/a'
+                _p_str   = f'{_p_sd:.4f}' if not np.isnan(_p_sd) else 'n/a'
+                print(f'  {_cn}: n={_nn_sd}, mean={np.mean(_arr):.4g}, '
+                      f'SD={_sdv_str}, SW W={_w_str}, p={_p_str}')
+
+        except Exception as _e:
+            import traceback as _tb_sd
+            print(f'[expl_speed_distfit] Error: {_e}')
+            _tb_sd.print_exc()
+            expl_speed_distfit_fig = None
+
+    # ── Exploratory: speed box-and-whisker ────────────────────────────────────
+    expl_speed_boxplot_fig = None
+    if 'expl_speed_boxplot' in selected_plots:
+        # Collect per-mouse session speeds
+        _mouse_names_bx  = []
+        _mouse_speeds_bx = []
+        _all_speeds_bx   = []
+        for _r in all_results:
+            _ss = pd.to_numeric(_r['df']['average_speed'], errors='coerce').dropna()
+            _ss = _ss[_ss > 0].tolist()
+            if _ss:
+                _mouse_names_bx.append(_r['mouse'])
+                _mouse_speeds_bx.append(np.log(_ss).tolist())
+                _all_speeds_bx.extend(np.log(_ss).tolist())
+
+        n_mice_bx = len(_mouse_names_bx)
+        expl_speed_boxplot_fig, (ax_bx1, ax_bx2) = plt.subplots(
+            1, 2, figsize=(max(10, n_mice_bx * 0.8 + 3), 6),
+            gridspec_kw={'width_ratios': [max(3, n_mice_bx), 1]},
+        )
+
+        # Left: one box per mouse
+        ax_bx1.boxplot(_mouse_speeds_bx, labels=_mouse_names_bx,
+                       patch_artist=True,
+                       boxprops=dict(facecolor='steelblue', alpha=0.6),
+                       medianprops=dict(color='navy', linewidth=2),
+                       whiskerprops=dict(color='steelblue'),
+                       capprops=dict(color='steelblue'),
+                       flierprops=dict(marker='o', markerfacecolor='steelblue',
+                                       markersize=4, alpha=0.5, linestyle='none'))
+        ax_bx1.set_title('Log-speed distribution per mouse\n(each session = one data point)')
+        ax_bx1.set_xlabel('Mouse')
+        ax_bx1.set_ylabel('log(Average session speed)  [log cm/s]')
+        ax_bx1.tick_params(axis='x', rotation=45)
+        ax_bx1.tick_params(axis='both', direction='in')
+        ax_bx1.spines['top'].set_visible(False)
+        ax_bx1.spines['right'].set_visible(False)
+
+        # Right: overall single box (all sessions pooled)
+        ax_bx2.boxplot([_all_speeds_bx], labels=['All mice'],
+                       patch_artist=True,
+                       boxprops=dict(facecolor='coral', alpha=0.6),
+                       medianprops=dict(color='darkred', linewidth=2),
+                       whiskerprops=dict(color='coral'),
+                       capprops=dict(color='coral'),
+                       flierprops=dict(marker='o', markerfacecolor='coral',
+                                       markersize=4, alpha=0.5, linestyle='none'))
+        ax_bx2.set_title(f'Overall\n(n={len(_all_speeds_bx)} sessions)')
+        ax_bx2.set_ylabel('log(Average session speed)  [log cm/s]')
+        ax_bx2.tick_params(axis='both', direction='in')
+        ax_bx2.spines['top'].set_visible(False)
+        ax_bx2.spines['right'].set_visible(False)
+
+        expl_speed_boxplot_fig.suptitle('Log-Transformed Speed Box-and-Whisker — Exploratory', fontsize=11)
+        expl_speed_boxplot_fig.tight_layout()
+
+    # ── Exploratory: RM ANOVA residual diagnostics ────────────────────────────
+    expl_speed_rm_anova_resid_fig = None
+    if 'expl_speed_rm_anova_resid' in selected_plots:
+        import warnings as _warnings
+        try:
+            import statsmodels.formula.api as _smf
+            from statsmodels.stats.diagnostic import het_breuschpagan as _bp_test
+            from scipy.stats import shapiro as _shapiro, levene as _levene
+            from scipy.stats import probplot as _probplot
+
+            # ── Build long-format DataFrame (log-transformed speed) ───────────
+            _rows = []
+            for _r in all_results:
+                _df_r = _r['df'].copy()
+                _df_r = _df_r.reset_index(drop=True)
+                _df_r['session_num'] = np.arange(1, len(_df_r) + 1, dtype=float)
+                _df_r['mouse']       = _r['mouse']
+                _df_r['condition']   = _r['starting_condition']
+                _raw_spd = pd.to_numeric(_df_r['average_speed'], errors='coerce')
+                _df_r['speed']       = np.where(_raw_spd > 0, np.log(_raw_spd), np.nan)
+                _rows.append(_df_r[['mouse', 'condition', 'session_num', 'speed']])
+            _df_long = pd.concat(_rows, ignore_index=True).dropna(subset=['speed'])
+
+            # ── Fit OLS with mouse as fixed-effect blocking factor ────────────
+            # Including C(mouse) as a blocking factor gives within-subject
+            # residuals equivalent to RM ANOVA residuals.
+            # DV is log(speed) — appropriate for a lognormal response variable.
+            _formula = 'speed ~ C(condition) + session_num + C(condition):session_num + C(mouse)'
+            with _warnings.catch_warnings():
+                _warnings.simplefilter('ignore')
+                _ols_result = _smf.ols(_formula, data=_df_long).fit()
+
+            _resid  = _ols_result.resid.values
+            _fitted = _ols_result.fittedvalues.values
+            _conds  = _df_long['condition'].values
+            _resid_mean = float(np.mean(_resid))
+
+            # ── Additional error-term statistics ──────────────────────────────
+            # Var(ε): use model MSE (= SS_resid / df_resid) for unbiased estimate
+            _resid_var  = float(_ols_result.mse_resid)          # σ² = MSE
+            _resid_sd   = float(np.sqrt(_resid_var))            # σ  = RMSE
+            _r2         = float(_ols_result.rsquared)
+            _r2_adj     = float(_ols_result.rsquared_adj)
+            # Variance of response (log-speed) — total variance (needed by PRESS below)
+            _y_mean     = float(_df_long['speed'].mean())
+            _y_var      = float(_df_long['speed'].var(ddof=1))
+            _y_sd       = float(np.sqrt(_y_var))
+            # Predicted R²: uses PRESS statistic (leave-one-out cross-validation)
+            # PRESS = Σ (εᵢ / (1 − hᵢᵢ))²  where hᵢᵢ = leverage (hat matrix diagonal)
+            # Predicted R² = 1 − PRESS / SS_total
+            try:
+                _influence   = _ols_result.get_influence()
+                _hat         = _influence.hat_matrix_diag          # hᵢᵢ for each obs
+                _press_resid = _resid / (1.0 - np.clip(_hat, None, 0.9999))
+                _press       = float(np.sum(_press_resid ** 2))
+                _ss_total    = float(np.sum((_df_long['speed'].values - _y_mean) ** 2))
+                _r2_pred     = float(1.0 - _press / _ss_total) if _ss_total > 0 else np.nan
+            except Exception:
+                _press, _r2_pred = np.nan, np.nan
+            # Var(ε) / Var(Y) = unexplained fraction (= 1 − R²)
+            _unexplained = 1.0 - _r2
+            # Signal-to-noise: mean fitted value / residual SD
+            _snr        = float(np.mean(_fitted)) / _resid_sd if _resid_sd > 0 else np.nan
+
+            # ── Shapiro-Wilk on residuals ─────────────────────────────────────
+            _sw_stat, _sw_p = _shapiro(_resid) if len(_resid) >= 3 else (np.nan, np.nan)
+
+            # ── Levene's test across condition groups ─────────────────────────
+            _cond_groups = [_resid[_conds == c] for c in np.unique(_conds)
+                            if np.sum(_conds == c) >= 2]
+            if len(_cond_groups) >= 2:
+                _lev_stat, _lev_p = _levene(*_cond_groups)
+            else:
+                _lev_stat, _lev_p = np.nan, np.nan
+
+            # ── Also try pingouin for the ANOVA table (optional) ──────────────
+            _pg_table_text = ''
+            try:
+                import pingouin as _pg
+                _pg_result = _pg.mixed_anova(
+                    data=_df_long, dv='speed', within='session_num',
+                    between='condition', subject='mouse',
+                )  # dv='speed' is log(speed) at this point
+                # Format key rows
+                _pg_lines = ['Mixed ANOVA (pingouin):']
+                for _, _row in _pg_result.iterrows():
+                    _src   = _row.get('Source', '')
+                    _f     = _row.get('F', np.nan)
+                    _pval  = _row.get('p-unc', np.nan)
+                    _eta   = _row.get('np2', np.nan)
+                    _pg_lines.append(
+                        f"  {_src:<28} F={_f:.3f}  p={_pval:.4f}  \u03b7\u00b2={_eta:.3f}"
+                    )
+                _pg_table_text = '\n'.join(_pg_lines)
+            except Exception:
+                _pg_table_text = 'pingouin not available — ANOVA table omitted'
+
+            # ── Cook's D and leverage (already have _hat from PRESS block) ──────
+            try:
+                _cooks_d    = _influence.cooks_distance[0]          # shape (n,)
+                _lev_diag   = _hat.copy()                            # hᵢᵢ
+                _n_params   = len(_ols_result.params)
+                # Conventional thresholds
+                _cooks_thresh = 4.0 / max(len(_resid) - _n_params, 1)  # 4/(n-p)
+                _lev_thresh   = 2.0 * _n_params / max(len(_resid), 1)  # 2p/n
+                _high_cooks   = np.where(_cooks_d > _cooks_thresh)[0]
+                _high_lev     = np.where(_lev_diag > _lev_thresh)[0]
+                _obs_index    = np.arange(len(_resid))
+                _mice_labels  = _df_long['mouse'].values
+                _sess_nums_lbl = _df_long['session_num'].values.astype(int)
+                _obs_labels   = np.array([f'{m}\nS{s}' for m, s in
+                                          zip(_mice_labels, _sess_nums_lbl)])
+            except Exception:
+                _cooks_d = _lev_diag = None
+                _cooks_thresh = _lev_thresh = np.nan
+                _high_cooks = _high_lev = np.array([], dtype=int)
+                _obs_index = np.arange(len(_resid))
+                _mice_labels = _df_long['mouse'].values
+                _sess_nums_lbl = _df_long['session_num'].values.astype(int)
+                _obs_labels   = np.array([f'{m}\nS{s}' for m, s in
+                                          zip(_mice_labels, _sess_nums_lbl)])
+
+            # ── Build figure: 3 rows × 2 cols ─────────────────────────────────
+            expl_speed_rm_anova_resid_fig, _axes = plt.subplots(3, 2, figsize=(13, 15))
+            (ax_qq, ax_rh), (ax_rf, ax_rs), (ax_cd, ax_lv) = _axes
+
+            # ── Q-Q plot ──────────────────────────────────────────────────────
+            (_qq_osm, _qq_osr), (_qq_slope, _qq_intercept, _qq_r) = _probplot(_resid, dist='norm')
+            ax_qq.plot(_qq_osm, _qq_osr, 'o', color='steelblue',
+                       markersize=4, alpha=0.7, label='Residuals')
+            ax_qq.plot(
+                [_qq_osm[0], _qq_osm[-1]],
+                [_qq_slope * _qq_osm[0] + _qq_intercept,
+                 _qq_slope * _qq_osm[-1] + _qq_intercept],
+                'r-', linewidth=1.5, label='Normal line',
+            )
+            ax_qq.set_title('Normal Q-Q Plot of Residuals')
+            ax_qq.set_xlabel('Theoretical quantiles')
+            ax_qq.set_ylabel('Sample quantiles')
+            ax_qq.tick_params(axis='both', direction='in')
+            ax_qq.spines['top'].set_visible(False)
+            ax_qq.spines['right'].set_visible(False)
+            ax_qq.legend(fontsize=8)
+            _sw_label = (f'Shapiro-Wilk: W={_sw_stat:.3f}, p={_sw_p:.4f}\n'
+                         f'{"Normal (p>0.05)" if _sw_p > 0.05 else "Non-normal (p\u22640.05)"}')
+            ax_qq.text(0.03, 0.97, _sw_label, transform=ax_qq.transAxes,
+                       fontsize=8, va='top', ha='left',
+                       bbox=dict(boxstyle='round,pad=0.3', facecolor='lightyellow',
+                                 edgecolor='gray', alpha=0.8))
+            # Formula explanation box
+            _formula_label = (
+                'Error terms: \u03b5\u1d62 = y\u1d62 \u2212 \u0177\u1d62\n'
+                'y\u1d62 = log(avg speed, session i)\n'
+                '\u0177\u1d62 = model fitted value\n'
+                'Model: log(speed) ~ condition\n'
+                '       + session + condition\u00d7session\n'
+                '       + mouse  (blocking factor)'
+            )
+            ax_qq.text(0.97, 0.03, _formula_label, transform=ax_qq.transAxes,
+                       fontsize=7.5, va='bottom', ha='right', family='monospace',
+                       bbox=dict(boxstyle='round,pad=0.35', facecolor='#f5f5f5',
+                                 edgecolor='gray', alpha=0.88))
+
+            # ── Residual histogram ────────────────────────────────────────────
+            from scipy.stats import gaussian_kde as _gkde2
+            ax_rh.hist(_resid, bins='auto', color='steelblue', alpha=0.65,
+                       edgecolor='white', linewidth=0.5, density=True)
+            if len(_resid) >= 3:
+                _kde_x2 = np.linspace(_resid.min(), _resid.max(), 300)
+                try:
+                    _kde2 = _gkde2(_resid)
+                    ax_rh.plot(_kde_x2, _kde2(_kde_x2), color='navy',
+                               linewidth=2, label='KDE')
+                except Exception:
+                    pass
+            ax_rh.axvline(0, color='red', linewidth=1.5, linestyle='--', label='Zero')
+            ax_rh.axvline(_resid_mean, color='darkorange', linewidth=1.5,
+                          linestyle=':', label=f'Mean={_resid_mean:.3f}')
+            ax_rh.set_title('Histogram of Residuals')
+            ax_rh.set_xlabel('Residual \u03b5\u1d62  (log cm/s)')
+            ax_rh.set_ylabel('Density')
+            ax_rh.tick_params(axis='both', direction='in')
+            ax_rh.spines['top'].set_visible(False)
+            ax_rh.spines['right'].set_visible(False)
+            ax_rh.legend(fontsize=8)
+            # Extended error-term stats box
+            _r2_pred_str = f'{_r2_pred:.4f}' if not np.isnan(_r2_pred) else 'n/a'
+            _stats_box = (
+                f'E[\u03b5]         = {_resid_mean:+.5f}  (\u22480 by OLS)\n'
+                f'Var(\u03b5)  = MSE = {_resid_var:.5f}\n'
+                f'SD(\u03b5)   = RMSE = {_resid_sd:.5f}\n'
+                f'\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\n'
+                f'Var(Y)         = {_y_var:.5f}\n'
+                f'Var(\u03b5)/Var(Y) = {_unexplained:.4f}  (= 1\u2212R\u00b2)\n'
+                f'R\u00b2             = {_r2:.4f}\n'
+                f'R\u00b2 adj         = {_r2_adj:.4f}\n'
+                f'R\u00b2 pred (PRESS) = {_r2_pred_str}\n'
+                f'SNR (fitted/SD\u03b5) = {_snr:.3f}'
+            )
+            ax_rh.text(0.98, 0.98, _stats_box, transform=ax_rh.transAxes,
+                       fontsize=7.5, va='top', ha='right', family='monospace',
+                       bbox=dict(boxstyle='round,pad=0.35', facecolor='#f0f4ff',
+                                 edgecolor='steelblue', alpha=0.92))
+
+            # ── Residuals vs Fitted ───────────────────────────────────────────
+            _uniq_conds = np.unique(_conds)
+            _cond_color_rm = {c: _condition_to_color(c) for c in _uniq_conds}
+            for _c in _uniq_conds:
+                _mask = _conds == _c
+                ax_rf.scatter(_fitted[_mask], _resid[_mask],
+                              color=_cond_color_rm[_c], alpha=0.5,
+                              s=18, label=str(_c))
+            ax_rf.axhline(0, color='red', linewidth=1.5, linestyle='--')
+            # Lowess smoothing overlay
+            try:
+                from statsmodels.nonparametric.smoothers_lowess import lowess as _lowess
+                _lw = _lowess(_resid, _fitted, frac=0.4)
+                ax_rf.plot(_lw[:, 0], _lw[:, 1], color='black',
+                           linewidth=1.5, linestyle='-', label='Lowess')
+            except Exception:
+                pass
+            ax_rf.set_title('Residuals vs Fitted Values')
+            ax_rf.set_xlabel('Fitted values (log cm/s)')
+            ax_rf.set_ylabel('Residuals (log cm/s)')
+            ax_rf.tick_params(axis='both', direction='in')
+            ax_rf.spines['top'].set_visible(False)
+            ax_rf.spines['right'].set_visible(False)
+            ax_rf.legend(fontsize=8, title='Condition')
+
+            # ── Residuals vs session number ───────────────────────────────────
+            _sess_nums = _df_long['session_num'].values
+            ax_rs.scatter(_sess_nums, _resid,
+                          color='steelblue', alpha=0.4, s=18)
+            ax_rs.axhline(0, color='red', linewidth=1.5, linestyle='--')
+            try:
+                _lw2 = _lowess(_resid, _sess_nums, frac=0.4)
+                ax_rs.plot(_lw2[:, 0], _lw2[:, 1], color='black',
+                           linewidth=1.5, linestyle='-', label='Lowess')
+                ax_rs.legend(fontsize=8)
+            except Exception:
+                pass
+            ax_rs.set_title('Residuals vs Session Number\n(check for time-trend)')
+            ax_rs.set_xlabel('Session number')
+            ax_rs.set_ylabel('Residuals (log cm/s)')
+            ax_rs.tick_params(axis='both', direction='in')
+            ax_rs.spines['top'].set_visible(False)
+            ax_rs.spines['right'].set_visible(False)
+
+            # ── Cook's D bar chart ────────────────────────────────────────────
+            if _cooks_d is not None:
+                _cd_colors = np.where(_cooks_d > _cooks_thresh, 'crimson', 'steelblue')
+                ax_cd.bar(_obs_index, _cooks_d, color=_cd_colors, alpha=0.75, width=0.8)
+                ax_cd.axhline(_cooks_thresh, color='crimson', linewidth=1.5,
+                              linestyle='--',
+                              label=f'Threshold 4/(n\u2212p)={_cooks_thresh:.3f}')
+                # Label flagged observations with mouse ID + session
+                for _idx in _high_cooks:
+                    ax_cd.text(_idx, _cooks_d[_idx] * 1.04, _obs_labels[_idx],
+                               fontsize=6, ha='center', va='bottom', color='crimson',
+                               linespacing=1.2)
+                ax_cd.set_title(
+                    f"Cook's D per Observation\n"
+                    f"({len(_high_cooks)} flagged > threshold, shown in red)"
+                )
+                ax_cd.set_xlabel('Observation index')
+                ax_cd.set_ylabel("Cook's D")
+                ax_cd.tick_params(axis='both', direction='in')
+                ax_cd.spines['top'].set_visible(False)
+                ax_cd.spines['right'].set_visible(False)
+                ax_cd.legend(fontsize=8)
+            else:
+                ax_cd.text(0.5, 0.5, "Cook's D unavailable",
+                           transform=ax_cd.transAxes, ha='center', va='center')
+                ax_cd.axis('off')
+
+            # ── Leverage vs Cook's D (influence plot) ─────────────────────────
+            if _cooks_d is not None:
+                # Colour by condition
+                for _c in _uniq_conds:
+                    _mask = _conds == _c
+                    ax_lv.scatter(_lev_diag[_mask], _cooks_d[_mask],
+                                  color=_cond_color_rm[_c], alpha=0.6,
+                                  s=20, label=str(_c))
+                # Threshold lines
+                ax_lv.axvline(_lev_thresh, color='darkorange', linewidth=1.5,
+                              linestyle='--',
+                              label=f'Leverage 2p/n={_lev_thresh:.3f}')
+                ax_lv.axhline(_cooks_thresh, color='crimson', linewidth=1.5,
+                              linestyle='--',
+                              label=f"Cook's D 4/(n\u2212p)={_cooks_thresh:.3f}")
+                # Label points in the high-influence quadrant (both thresholds exceeded)
+                _both_flag = np.where((_cooks_d > _cooks_thresh) &
+                                      (_lev_diag > _lev_thresh))[0]
+                for _idx in _both_flag:
+                    ax_lv.annotate(_obs_labels[_idx],
+                                   (_lev_diag[_idx], _cooks_d[_idx]),
+                                   textcoords='offset points', xytext=(4, 4),
+                                   fontsize=6, color='crimson')
+                ax_lv.set_title(
+                    f'Leverage vs Cook\u2019s D (Influence Plot)\n'
+                    f'High-leverage: {len(_high_lev)} obs  |  '
+                    f'High-influence: {len(_high_cooks)} obs  |  '
+                    f'Both: {len(_both_flag)} obs'
+                )
+                ax_lv.set_xlabel('Leverage hᵢᵢ')
+                ax_lv.set_ylabel("Cook's D")
+                ax_lv.tick_params(axis='both', direction='in')
+                ax_lv.spines['top'].set_visible(False)
+                ax_lv.spines['right'].set_visible(False)
+                ax_lv.legend(fontsize=7, title='Condition', ncol=2)
+            else:
+                ax_lv.text(0.5, 0.5, 'Leverage unavailable',
+                           transform=ax_lv.transAxes, ha='center', va='center')
+                ax_lv.axis('off')
+
+            # ── Suptitle: summary stats ───────────────────────────────────────
+            _n_mice   = _df_long['mouse'].nunique()
+            _n_obs    = len(_df_long)
+            _lev_str  = (f'Levene (across conditions): F={_lev_stat:.3f}, p={_lev_p:.4f}'
+                         if not np.isnan(_lev_p)
+                         else 'Levene: insufficient groups')
+            _summary  = (
+                f'RM ANOVA residual diagnostics  |  '
+                f'n={_n_mice} mice, {_n_obs} obs  |  '
+                f'E[\u03b5]={_resid_mean:+.4f} (\u22480)  '
+                f'Var(\u03b5)={_resid_var:.4f}  SD(\u03b5)={_resid_sd:.4f}  '
+                f'Var(\u03b5)/Var(Y)={_unexplained:.3f} (=1\u2212R\u00b2)  '
+                f'R\u00b2={_r2:.3f}  |  {_lev_str}'
+            )
+            expl_speed_rm_anova_resid_fig.suptitle(_summary, fontsize=8.5, y=1.01, wrap=True)
+
+            # ── ANOVA table as figure text ────────────────────────────────────
+            if _pg_table_text:
+                expl_speed_rm_anova_resid_fig.text(
+                    0.01, -0.02, _pg_table_text,
+                    fontsize=7.5, family='monospace', va='top',
+                    transform=expl_speed_rm_anova_resid_fig.transFigure,
+                    bbox=dict(boxstyle='round,pad=0.4', facecolor='#f5f5f5',
+                              edgecolor='gray', alpha=0.9),
+                )
+
+            expl_speed_rm_anova_resid_fig.tight_layout()
+            print('\n── RM ANOVA Residual Diagnostics ──')
+            print(f'  Formula:          \u03b5\u1d62 = y\u1d62 \u2212 \u0177\u1d62  (observed \u2212 model fitted value)')
+            print(f'  Model DV:         log(average speed)  [log cm/s]')
+            print(f'  N mice:           {_n_mice}')
+            print(f'  N observations:   {_n_obs}')
+            print(f'  E[\u03b5]  (mean):    {_resid_mean:+.6f}  (\u22480 by OLS construction)')
+            print(f'  Var(\u03b5) (MSE):    {_resid_var:.6f}')
+            print(f'  SD(\u03b5)  (RMSE):   {_resid_sd:.6f}')
+            print(f'  Var(Y):           {_y_var:.6f}')
+            print(f'  Var(\u03b5)/Var(Y):   {_unexplained:.4f}  (= 1 \u2212 R\u00b2 = unexplained variance fraction)')
+            print(f'  R\u00b2:              {_r2:.4f}')
+            print(f'  R\u00b2 adj:          {_r2_adj:.4f}')
+            print(f'  R\u00b2 pred (PRESS): {_r2_pred_str}  (leave-one-out; gap vs R\u00b2 indicates overfitting)')
+            print(f'  SNR (\u0177\u0305/SD\u03b5):    {_snr:.4f}')
+            print(f'  Shapiro-Wilk:     W={_sw_stat:.4f}, p={_sw_p:.6f}')
+            print(f'  Levene test:      F={_lev_stat:.4f}, p={_lev_p:.6f}')
+            if _cooks_d is not None:
+                print(f'  Cook\'s D thresh:  {_cooks_thresh:.4f}  (4/(n\u2212p))')
+                print(f'  Leverage thresh:  {_lev_thresh:.4f}  (2p/n)')
+                _flag_strs = [f'{m}(S{s})' for m, s in
+                              zip(_mice_labels[_high_cooks], _sess_nums_lbl[_high_cooks])]
+                print(f'  High-influence obs (Cook\'s D > thresh): {len(_high_cooks)}'
+                      + (f'  [{", ".join(_flag_strs)}]' if len(_high_cooks) else ''))
+                _lev_strs = [f'{m}(S{s})' for m, s in
+                             zip(_mice_labels[_high_lev], _sess_nums_lbl[_high_lev])]
+                print(f'  High-leverage obs (h\u1d62\u1d62 > thresh):      {len(_high_lev)}'
+                      + (f'  [{", ".join(_lev_strs)}]' if len(_high_lev) else ''))
+            if _pg_table_text:
+                print(_pg_table_text)
+
+        except ImportError as _e:
+            print(f'[expl_speed_rm_anova_resid] Missing dependency: {_e}')
+            print('  Install statsmodels: conda install statsmodels')
+        except Exception as _e:
+            print(f'[expl_speed_rm_anova_resid] Error: {_e}')
+
+    # ── Exploratory: z-scored mean capacitive sensor value histogram ──────────
+    # DV = z-scored mean raw capacitive sensor value (avg_cap), globally
+    # z-scored across all sessions. Parallels the log(speed) exploratory histogram.
+    expl_cap_histogram_fig = None
+    if 'expl_cap_histogram' in selected_plots:
+        from scipy.stats import shapiro as _shapiro_cap
+        from scipy.stats import gaussian_kde as _gkde_cap
+
+        # Collect per-session mean raw capacitive sensor values (avg_cap column)
+        _cap_all_raw = []
+        _cap_per_mouse_raw = []
+        for _r in all_results:
+            _df_r = _r['df']
+            _cv = pd.to_numeric(_df_r.get('avg_cap', pd.Series(dtype=float)), errors='coerce')
+            _cv_valid = _cv.dropna().values
+            _cap_all_raw.extend(_cv_valid.tolist())
+            if len(_cv_valid) > 0:
+                _cap_per_mouse_raw.append(float(np.mean(_cv_valid)))
+
+        # Global z-score
+        _cap_all_raw = np.array(_cap_all_raw, dtype=float)
+        _cap_per_m   = np.array(_cap_per_mouse_raw, dtype=float)
+        _glb_mu, _glb_sd = float(np.mean(_cap_all_raw)), float(np.std(_cap_all_raw, ddof=1))
+        if _glb_sd > 0:
+            _cap_all_z = (_cap_all_raw - _glb_mu) / _glb_sd
+            _cap_per_z = (_cap_per_m   - _glb_mu) / _glb_sd
+        else:
+            _cap_all_z = _cap_all_raw - _glb_mu
+            _cap_per_z = _cap_per_m  - _glb_mu
+
+        expl_cap_histogram_fig, (ax_ch1, ax_ch2) = plt.subplots(1, 2, figsize=(14, 5))
+        for ax_ch, data_z, panel_title in [
+            (ax_ch1, _cap_all_z,
+             f'All session values (n={len(_cap_all_z)} sessions)'),
+            (ax_ch2, _cap_per_z,
+             f'Per-mouse mean (n={len(_cap_per_z)} mice)'),
+        ]:
+            ax_ch.hist(data_z, bins='auto', color='teal', alpha=0.65,
+                       edgecolor='white', linewidth=0.5, density=True)
+            if len(data_z) >= 3:
+                _kde_xc = np.linspace(data_z.min(), data_z.max(), 300)
+                try:
+                    _kdec = _gkde_cap(data_z)
+                    ax_ch.plot(_kde_xc, _kdec(_kde_xc), color='darkslategray',
+                               linewidth=2, label='KDE')
+                except Exception:
+                    pass
+            if len(data_z) >= 3:
+                _swc_stat, _swc_p = _shapiro_cap(data_z)
+                _swc_text = (f'Shapiro-Wilk: W={_swc_stat:.3f}, p={_swc_p:.4f}\n'
+                             f'{"Normal (p>0.05)" if _swc_p > 0.05 else "Non-normal (p\u22640.05)"}')
+                ax_ch.text(0.97, 0.97, _swc_text, transform=ax_ch.transAxes,
+                           fontsize=8, va='top', ha='right',
+                           bbox=dict(boxstyle='round,pad=0.3', facecolor='lightyellow',
+                                     edgecolor='gray', alpha=0.8))
+            ax_ch.set_title(panel_title)
+            ax_ch.set_xlabel('Z-scored mean capacitive value  [z(raw cap units)]')
+            ax_ch.set_ylabel('Density')
+            ax_ch.tick_params(axis='both', direction='in')
+            ax_ch.spines['top'].set_visible(False)
+            ax_ch.spines['right'].set_visible(False)
+
+        expl_cap_histogram_fig.suptitle(
+            'Z-Scored Mean Capacitive Sensor Value Distribution — Exploratory\n'
+            'Left: one value per session per mouse (raw repeated-measures data)  |  '
+            'Right: one mean per mouse\n'
+            f'Global z-score: \u03bc={_glb_mu:.4f} (raw cap units), \u03c3={_glb_sd:.4f}',
+            fontsize=10,
+        )
+        expl_cap_histogram_fig.tight_layout()
+
+    # ── Exploratory: z-scored mean capacitive value box-and-whisker ──────────
+    expl_cap_boxplot_fig = None
+    if 'expl_cap_boxplot' in selected_plots:
+        _cap_bx_names = []
+        _cap_bx_vals  = []
+        _cap_bx_all   = []
+        # Recompute global z-score parameters if histogram block was skipped
+        _all_cv_tmp = []
+        for _r in all_results:
+            _df_r = _r['df']
+            _cv = pd.to_numeric(_df_r.get('avg_cap', pd.Series(dtype=float)), errors='coerce')
+            _all_cv_tmp.extend(_cv.dropna().values.tolist())
+        _all_cv_tmp = np.array(_all_cv_tmp, dtype=float)
+        _bx_mu  = float(np.mean(_all_cv_tmp)) if len(_all_cv_tmp) else 0.0
+        _bx_sd  = float(np.std(_all_cv_tmp, ddof=1)) if len(_all_cv_tmp) > 1 else 1.0
+        if _bx_sd == 0:
+            _bx_sd = 1.0
+
+        for _r in all_results:
+            _df_r = _r['df']
+            _cv = pd.to_numeric(_df_r.get('avg_cap', pd.Series(dtype=float)), errors='coerce')
+            _cv_valid = _cv.dropna().values
+            if len(_cv_valid) > 0:
+                _z = (_cv_valid - _bx_mu) / _bx_sd
+                _cap_bx_names.append(_r['mouse'])
+                _cap_bx_vals.append(_z.tolist())
+                _cap_bx_all.extend(_z.tolist())
+
+        n_mice_cbx = len(_cap_bx_names)
+        expl_cap_boxplot_fig, (ax_cbx1, ax_cbx2) = plt.subplots(
+            1, 2, figsize=(max(10, n_mice_cbx * 0.8 + 3), 6),
+            gridspec_kw={'width_ratios': [max(3, n_mice_cbx), 1]},
+        )
+        ax_cbx1.boxplot(_cap_bx_vals, labels=_cap_bx_names,
+                        patch_artist=True,
+                        boxprops=dict(facecolor='teal', alpha=0.6),
+                        medianprops=dict(color='darkslategray', linewidth=2),
+                        whiskerprops=dict(color='teal'),
+                        capprops=dict(color='teal'),
+                        flierprops=dict(marker='o', markerfacecolor='teal',
+                                        markersize=4, alpha=0.5, linestyle='none'))
+        ax_cbx1.set_title('Z-scored mean capacitive value per mouse\n(each session = one data point)')
+        ax_cbx1.set_xlabel('Mouse')
+        ax_cbx1.set_ylabel('Z-scored mean capacitive value  [z(raw cap)]')
+        ax_cbx1.tick_params(axis='x', rotation=45)
+        ax_cbx1.tick_params(axis='both', direction='in')
+        ax_cbx1.spines['top'].set_visible(False)
+        ax_cbx1.spines['right'].set_visible(False)
+
+        ax_cbx2.boxplot([_cap_bx_all], labels=['All mice'],
+                        patch_artist=True,
+                        boxprops=dict(facecolor='mediumaquamarine', alpha=0.6),
+                        medianprops=dict(color='darkgreen', linewidth=2),
+                        whiskerprops=dict(color='mediumaquamarine'),
+                        capprops=dict(color='mediumaquamarine'),
+                        flierprops=dict(marker='o', markerfacecolor='mediumaquamarine',
+                                        markersize=4, alpha=0.5, linestyle='none'))
+        ax_cbx2.set_title(f'Overall\n(n={len(_cap_bx_all)} sessions)')
+        ax_cbx2.set_ylabel('Z-scored mean capacitive value  [z(raw cap)]')
+        ax_cbx2.tick_params(axis='both', direction='in')
+        ax_cbx2.spines['top'].set_visible(False)
+        ax_cbx2.spines['right'].set_visible(False)
+
+        expl_cap_boxplot_fig.suptitle('Z-Scored Mean Capacitive Sensor Value Box-and-Whisker — Exploratory', fontsize=11)
+        expl_cap_boxplot_fig.tight_layout()
+
+    # ── Exploratory: capacitive RM ANOVA residual diagnostics ─────────────────
+    expl_cap_rm_anova_resid_fig = None
+    if 'expl_cap_rm_anova_resid' in selected_plots:
+        import warnings as _warnings_cap
+        try:
+            import statsmodels.formula.api as _smf_cap
+            from scipy.stats import shapiro as _shapiro_c, levene as _levene_c
+            from scipy.stats import probplot as _probplot_c
+
+            # ── Build long-format DataFrame (z-scored log-transformed mean cap value) ──
+            # Log transform first (lognormal fit), then z-score.
+            # First pass: collect log(avg_cap) values to compute global z-score params
+            _c_all_cv = []
+            for _r in all_results:
+                _df_r = _r['df']
+                _cv = pd.to_numeric(_df_r.get('avg_cap', pd.Series(dtype=float)), errors='coerce')
+                _cv_pos = _cv.dropna()
+                _cv_pos = _cv_pos[_cv_pos > 0]
+                _c_all_cv.extend(np.log(_cv_pos.values).tolist())
+            _c_all_cv = np.array(_c_all_cv, dtype=float)
+            _c_mu = float(np.mean(_c_all_cv)) if len(_c_all_cv) else 0.0
+            _c_sd = float(np.std(_c_all_cv, ddof=1)) if len(_c_all_cv) > 1 else 1.0
+            if _c_sd == 0:
+                _c_sd = 1.0
+
+            # Second pass: build long-format df with z-scored log(avg_cap)
+            _c_rows = []
+            for _r in all_results:
+                _df_r = _r['df'].copy()
+                _df_r = _df_r.reset_index(drop=True)
+                _df_r['session_num'] = np.arange(1, len(_df_r) + 1, dtype=float)
+                _df_r['mouse']       = _r['mouse']
+                _df_r['condition']   = _r['starting_condition']
+                _cv = pd.to_numeric(_df_r.get('avg_cap', pd.Series(dtype=float)), errors='coerce')
+                _df_r['z_avg_cap'] = np.where(
+                    _cv.notna() & (_cv > 0),
+                    (np.log(_cv.clip(lower=1e-9)) - _c_mu) / _c_sd,
+                    np.nan,
+                )
+                _c_rows.append(_df_r[['mouse', 'condition', 'session_num', 'z_avg_cap']])
+            _df_c_long = pd.concat(_c_rows, ignore_index=True).dropna(subset=['z_avg_cap'])
+
+            # ── Fit OLS with mouse as fixed-effect blocking factor ────────────
+            _c_formula = 'z_avg_cap ~ C(condition) + session_num + C(condition):session_num + C(mouse)'
+            with _warnings_cap.catch_warnings():
+                _warnings_cap.simplefilter('ignore')
+                _c_ols = _smf_cap.ols(_c_formula, data=_df_c_long).fit()
+
+            _c_resid  = _c_ols.resid.values
+            _c_fitted = _c_ols.fittedvalues.values
+            _c_conds  = _df_c_long['condition'].values
+            _c_resid_mean = float(np.mean(_c_resid))
+            _c_resid_var  = float(_c_ols.mse_resid)
+            _c_resid_sd   = float(np.sqrt(_c_resid_var))
+            _c_r2         = float(_c_ols.rsquared)
+            _c_r2_adj     = float(_c_ols.rsquared_adj)
+            _c_y_var      = float(_df_c_long['z_avg_cap'].var(ddof=1))
+            _c_y_mean     = float(_df_c_long['z_avg_cap'].mean())
+            _c_unexplained = 1.0 - _c_r2
+            _c_snr         = float(np.mean(_c_fitted)) / _c_resid_sd if _c_resid_sd > 0 else np.nan
+
+            # PRESS / predicted R²
+            try:
+                _c_influence = _c_ols.get_influence()
+                _c_hat       = _c_influence.hat_matrix_diag
+                _c_press_r   = _c_resid / (1.0 - np.clip(_c_hat, None, 0.9999))
+                _c_press     = float(np.sum(_c_press_r ** 2))
+                _c_ss_total  = float(np.sum((_df_c_long['z_avg_cap'].values - _c_y_mean) ** 2))
+                _c_r2_pred   = float(1.0 - _c_press / _c_ss_total) if _c_ss_total > 0 else np.nan
+            except Exception:
+                _c_press, _c_r2_pred, _c_hat = np.nan, np.nan, None
+                _c_influence = None
+
+            # ── Shapiro-Wilk on residuals ─────────────────────────────────────
+            _c_sw_stat, _c_sw_p = _shapiro_c(_c_resid) if len(_c_resid) >= 3 else (np.nan, np.nan)
+
+            # ── Levene's test across condition groups ─────────────────────────
+            _c_cond_groups = [_c_resid[_c_conds == c] for c in np.unique(_c_conds)
+                              if np.sum(_c_conds == c) >= 2]
+            if len(_c_cond_groups) >= 2:
+                _c_lev_stat, _c_lev_p = _levene_c(*_c_cond_groups)
+            else:
+                _c_lev_stat, _c_lev_p = np.nan, np.nan
+
+            # ── pingouin mixed ANOVA table (optional) ─────────────────────────
+            _c_pg_text = ''
+            try:
+                import pingouin as _pg_c
+                _c_pg_result = _pg_c.mixed_anova(
+                    data=_df_c_long, dv='z_avg_cap', within='session_num',
+                    between='condition', subject='mouse',
+                )
+                _c_pg_lines = ['Mixed ANOVA (pingouin):']
+                for _, _row in _c_pg_result.iterrows():
+                    _src  = _row.get('Source', '')
+                    _f    = _row.get('F', np.nan)
+                    _pval = _row.get('p-unc', np.nan)
+                    _eta  = _row.get('np2', np.nan)
+                    _c_pg_lines.append(
+                        f"  {_src:<28} F={_f:.3f}  p={_pval:.4f}  \u03b7\u00b2={_eta:.3f}"
+                    )
+                _c_pg_text = '\n'.join(_c_pg_lines)
+            except Exception:
+                _c_pg_text = 'pingouin not available \u2014 ANOVA table omitted'
+
+            # ── Cook's D and leverage ─────────────────────────────────────────
+            _c_mice_labels   = _df_c_long['mouse'].values
+            _c_sess_nums_lbl = _df_c_long['session_num'].values.astype(int)
+            _c_obs_labels    = np.array([f'{m}\nS{s}' for m, s in
+                                         zip(_c_mice_labels, _c_sess_nums_lbl)])
+            _c_obs_index     = np.arange(len(_c_resid))
+            try:
+                _c_cooks_d  = _c_influence.cooks_distance[0]
+                _c_lev_diag = _c_hat.copy()
+                _c_n_params = len(_c_ols.params)
+                _c_cooks_thresh = 4.0 / max(len(_c_resid) - _c_n_params, 1)
+                _c_lev_thresh   = 2.0 * _c_n_params / max(len(_c_resid), 1)
+                _c_high_cooks   = np.where(_c_cooks_d > _c_cooks_thresh)[0]
+                _c_high_lev     = np.where(_c_lev_diag > _c_lev_thresh)[0]
+            except Exception:
+                _c_cooks_d = _c_lev_diag = None
+                _c_cooks_thresh = _c_lev_thresh = np.nan
+                _c_high_cooks = _c_high_lev = np.array([], dtype=int)
+
+            # ── Build figure: 3 rows × 2 cols ────────────────────────────────
+            expl_cap_rm_anova_resid_fig, _c_axes = plt.subplots(3, 2, figsize=(13, 15))
+            (ax_cqq, ax_crh), (ax_crf, ax_crs), (ax_ccd, ax_clv) = _c_axes
+
+            # ── Q-Q plot ──────────────────────────────────────────────────────
+            (_c_qq_osm, _c_qq_osr), (_c_qq_slope, _c_qq_int, _) = _probplot_c(_c_resid, dist='norm')
+            ax_cqq.plot(_c_qq_osm, _c_qq_osr, 'o', color='teal',
+                        markersize=4, alpha=0.7, label='Residuals')
+            ax_cqq.plot(
+                [_c_qq_osm[0], _c_qq_osm[-1]],
+                [_c_qq_slope * _c_qq_osm[0] + _c_qq_int,
+                 _c_qq_slope * _c_qq_osm[-1] + _c_qq_int],
+                'r-', linewidth=1.5, label='Normal line',
+            )
+            ax_cqq.set_title('Normal Q-Q Plot of Residuals')
+            ax_cqq.set_xlabel('Theoretical quantiles')
+            ax_cqq.set_ylabel('Sample quantiles')
+            ax_cqq.tick_params(axis='both', direction='in')
+            ax_cqq.spines['top'].set_visible(False)
+            ax_cqq.spines['right'].set_visible(False)
+            ax_cqq.legend(fontsize=8)
+            _c_sw_label = (f'Shapiro-Wilk: W={_c_sw_stat:.3f}, p={_c_sw_p:.4f}\n'
+                           f'{"Normal (p>0.05)" if _c_sw_p > 0.05 else "Non-normal (p\u22640.05)"}')
+            ax_cqq.text(0.03, 0.97, _c_sw_label, transform=ax_cqq.transAxes,
+                        fontsize=8, va='top', ha='left',
+                        bbox=dict(boxstyle='round,pad=0.3', facecolor='lightyellow',
+                                  edgecolor='gray', alpha=0.8))
+            _c_formula_label = (
+                'Error terms: \u03b5\u1d62 = y\u1d62 \u2212 \u0177\u1d62\n'
+                'y\u1d62 = z-score(log(mean cap value), session i)\n'
+                '\u0177\u1d62 = model fitted value\n'
+                'Model: z(log(avg_cap)) ~ condition\n'
+                '       + session + condition\u00d7session\n'
+                '       + mouse  (blocking factor)'
+            )
+            ax_cqq.text(0.97, 0.03, _c_formula_label, transform=ax_cqq.transAxes,
+                        fontsize=7.5, va='bottom', ha='right', family='monospace',
+                        bbox=dict(boxstyle='round,pad=0.35', facecolor='#f5f5f5',
+                                  edgecolor='gray', alpha=0.88))
+
+            # ── Residual histogram ────────────────────────────────────────────
+            from scipy.stats import gaussian_kde as _gkde_cr
+            ax_crh.hist(_c_resid, bins='auto', color='teal', alpha=0.65,
+                        edgecolor='white', linewidth=0.5, density=True)
+            if len(_c_resid) >= 3:
+                _c_kde_x = np.linspace(_c_resid.min(), _c_resid.max(), 300)
+                try:
+                    _c_kde2 = _gkde_cr(_c_resid)
+                    ax_crh.plot(_c_kde_x, _c_kde2(_c_kde_x), color='darkslategray',
+                                linewidth=2, label='KDE')
+                except Exception:
+                    pass
+            ax_crh.axvline(0, color='red', linewidth=1.5, linestyle='--', label='Zero')
+            ax_crh.axvline(_c_resid_mean, color='darkorange', linewidth=1.5,
+                           linestyle=':', label=f'Mean={_c_resid_mean:.3f}')
+            ax_crh.set_title('Histogram of Residuals')
+            ax_crh.set_xlabel('Residual \u03b5\u1d62  [z-score units — z(mean cap value)]')
+            ax_crh.set_ylabel('Density')
+            ax_crh.tick_params(axis='both', direction='in')
+            ax_crh.spines['top'].set_visible(False)
+            ax_crh.spines['right'].set_visible(False)
+            ax_crh.legend(fontsize=8)
+            _c_r2_pred_str = f'{_c_r2_pred:.4f}' if not np.isnan(_c_r2_pred) else 'n/a'
+            _c_stats_box = (
+                f'E[\u03b5]         = {_c_resid_mean:+.5f}  (\u22480 by OLS)\n'
+                f'Var(\u03b5)  = MSE = {_c_resid_var:.5f}\n'
+                f'SD(\u03b5)   = RMSE = {_c_resid_sd:.5f}\n'
+                f'\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\n'
+                f'Var(Y)         = {_c_y_var:.5f}\n'
+                f'Var(\u03b5)/Var(Y) = {_c_unexplained:.4f}  (= 1\u2212R\u00b2)\n'
+                f'R\u00b2             = {_c_r2:.4f}\n'
+                f'R\u00b2 adj         = {_c_r2_adj:.4f}\n'
+                f'R\u00b2 pred (PRESS) = {_c_r2_pred_str}\n'
+                f'SNR (fitted/SD\u03b5) = {_c_snr:.3f}'
+            )
+            ax_crh.text(0.98, 0.98, _c_stats_box, transform=ax_crh.transAxes,
+                        fontsize=7.5, va='top', ha='right', family='monospace',
+                        bbox=dict(boxstyle='round,pad=0.35', facecolor='#f0f4ff',
+                                  edgecolor='steelblue', alpha=0.92))
+
+            # ── Residuals vs Fitted ───────────────────────────────────────────
+            _c_uniq_conds = np.unique(_c_conds)
+            _c_cond_color = {c: _condition_to_color(c) for c in _c_uniq_conds}
+            for _cc in _c_uniq_conds:
+                _cmask = _c_conds == _cc
+                ax_crf.scatter(_c_fitted[_cmask], _c_resid[_cmask],
+                               color=_c_cond_color[_cc], alpha=0.5, s=18, label=str(_cc))
+            ax_crf.axhline(0, color='red', linewidth=1.5, linestyle='--')
+            try:
+                from statsmodels.nonparametric.smoothers_lowess import lowess as _c_lowess
+                _c_lw = _c_lowess(_c_resid, _c_fitted, frac=0.4)
+                ax_crf.plot(_c_lw[:, 0], _c_lw[:, 1], color='black',
+                            linewidth=1.5, linestyle='-', label='Lowess')
+            except Exception:
+                pass
+            ax_crf.set_title('Residuals vs Fitted Values')
+            ax_crf.set_xlabel('Fitted values [z(log(mean cap))]')
+            ax_crf.set_ylabel('Residuals [z(log(mean cap))]')
+            ax_crf.tick_params(axis='both', direction='in')
+            ax_crf.spines['top'].set_visible(False)
+            ax_crf.spines['right'].set_visible(False)
+            ax_crf.legend(fontsize=8, title='Condition')
+
+            # ── Residuals vs session number ───────────────────────────────────
+            _c_sess_nums = _df_c_long['session_num'].values
+            ax_crs.scatter(_c_sess_nums, _c_resid,
+                           color='teal', alpha=0.4, s=18)
+            ax_crs.axhline(0, color='red', linewidth=1.5, linestyle='--')
+            try:
+                _c_lw2 = _c_lowess(_c_resid, _c_sess_nums, frac=0.4)
+                ax_crs.plot(_c_lw2[:, 0], _c_lw2[:, 1], color='black',
+                            linewidth=1.5, linestyle='-', label='Lowess')
+                ax_crs.legend(fontsize=8)
+            except Exception:
+                pass
+            ax_crs.set_title('Residuals vs Session Number\n(check for time-trend)')
+            ax_crs.set_xlabel('Session number')
+            ax_crs.set_ylabel('Residuals [z(log(mean cap))]')
+            ax_crs.tick_params(axis='both', direction='in')
+            ax_crs.spines['top'].set_visible(False)
+            ax_crs.spines['right'].set_visible(False)
+
+            # ── Cook's D bar chart ────────────────────────────────────────────
+            if _c_cooks_d is not None:
+                _c_cd_colors = np.where(_c_cooks_d > _c_cooks_thresh, 'crimson', 'teal')
+                ax_ccd.bar(_c_obs_index, _c_cooks_d, color=_c_cd_colors, alpha=0.75, width=0.8)
+                ax_ccd.axhline(_c_cooks_thresh, color='crimson', linewidth=1.5,
+                               linestyle='--',
+                               label=f'Threshold 4/(n\u2212p)={_c_cooks_thresh:.3f}')
+                for _idx in _c_high_cooks:
+                    ax_ccd.text(_idx, _c_cooks_d[_idx] * 1.04, _c_obs_labels[_idx],
+                                fontsize=6, ha='center', va='bottom', color='crimson',
+                                linespacing=1.2)
+                ax_ccd.set_title(
+                    f"Cook's D per Observation\n"
+                    f"({len(_c_high_cooks)} flagged > threshold, shown in red)"
+                )
+                ax_ccd.set_xlabel('Observation index')
+                ax_ccd.set_ylabel("Cook's D")
+                ax_ccd.tick_params(axis='both', direction='in')
+                ax_ccd.spines['top'].set_visible(False)
+                ax_ccd.spines['right'].set_visible(False)
+                ax_ccd.legend(fontsize=8)
+            else:
+                ax_ccd.text(0.5, 0.5, "Cook's D unavailable",
+                            transform=ax_ccd.transAxes, ha='center', va='center')
+                ax_ccd.axis('off')
+
+            # ── Leverage vs Cook's D (influence plot) ─────────────────────────
+            if _c_cooks_d is not None:
+                for _cc in _c_uniq_conds:
+                    _cmask = _c_conds == _cc
+                    ax_clv.scatter(_c_lev_diag[_cmask], _c_cooks_d[_cmask],
+                                   color=_c_cond_color[_cc], alpha=0.6,
+                                   s=20, label=str(_cc))
+                ax_clv.axvline(_c_lev_thresh, color='darkorange', linewidth=1.5,
+                               linestyle='--',
+                               label=f'Leverage 2p/n={_c_lev_thresh:.3f}')
+                ax_clv.axhline(_c_cooks_thresh, color='crimson', linewidth=1.5,
+                               linestyle='--',
+                               label=f"Cook's D 4/(n\u2212p)={_c_cooks_thresh:.3f}")
+                _c_both_flag = np.where((_c_cooks_d > _c_cooks_thresh) &
+                                        (_c_lev_diag > _c_lev_thresh))[0]
+                for _idx in _c_both_flag:
+                    ax_clv.annotate(_c_obs_labels[_idx],
+                                    (_c_lev_diag[_idx], _c_cooks_d[_idx]),
+                                    textcoords='offset points', xytext=(4, 4),
+                                    fontsize=6, color='crimson')
+                ax_clv.set_title(
+                    f'Leverage vs Cook\u2019s D (Influence Plot)\n'
+                    f'High-leverage: {len(_c_high_lev)} obs  |  '
+                    f'High-influence: {len(_c_high_cooks)} obs  |  '
+                    f'Both: {len(_c_both_flag)} obs'
+                )
+                ax_clv.set_xlabel('Leverage h\u1d62\u1d62')
+                ax_clv.set_ylabel("Cook's D")
+                ax_clv.tick_params(axis='both', direction='in')
+                ax_clv.spines['top'].set_visible(False)
+                ax_clv.spines['right'].set_visible(False)
+                ax_clv.legend(fontsize=7, title='Condition', ncol=2)
+            else:
+                ax_clv.text(0.5, 0.5, 'Leverage unavailable',
+                            transform=ax_clv.transAxes, ha='center', va='center')
+                ax_clv.axis('off')
+
+            # ── Suptitle: summary stats ───────────────────────────────────────
+            _c_n_mice   = _df_c_long['mouse'].nunique()
+            _c_n_obs    = len(_df_c_long)
+            _c_lev_str  = (f'Levene (across conditions): F={_c_lev_stat:.3f}, p={_c_lev_p:.4f}'
+                           if not np.isnan(_c_lev_p)
+                           else 'Levene: insufficient groups')
+            _c_summary  = (
+                f'Capacitive RM ANOVA residual diagnostics (DV = z(log(mean cap value)))  |  '
+                f'n={_c_n_mice} mice, {_c_n_obs} obs  |  '
+                f'E[\u03b5]={_c_resid_mean:+.4f} (\u22480)  '
+                f'Var(\u03b5)={_c_resid_var:.4f}  SD(\u03b5)={_c_resid_sd:.4f}  '
+                f'Var(\u03b5)/Var(Y)={_c_unexplained:.3f} (=1\u2212R\u00b2)  '
+                f'R\u00b2={_c_r2:.3f}  |  {_c_lev_str}'
+            )
+            expl_cap_rm_anova_resid_fig.suptitle(_c_summary, fontsize=8.5, y=1.01, wrap=True)
+
+            if _c_pg_text:
+                expl_cap_rm_anova_resid_fig.text(
+                    0.01, -0.02, _c_pg_text,
+                    fontsize=7.5, family='monospace', va='top',
+                    transform=expl_cap_rm_anova_resid_fig.transFigure,
+                    bbox=dict(boxstyle='round,pad=0.4', facecolor='#f5f5f5',
+                              edgecolor='gray', alpha=0.9),
+                )
+
+            expl_cap_rm_anova_resid_fig.tight_layout()
+            print('\n\u2500\u2500 Capacitive RM ANOVA Residual Diagnostics \u2500\u2500')
+            print(f'  Formula:          \u03b5\u1d62 = y\u1d62 \u2212 \u0177\u1d62  (observed \u2212 model fitted value)')
+            print(f'  Model DV:         z-score(log(mean capacitive value))  [z(log(cap units))]')
+            print(f'  Global z-score:   \u03bc={_c_mu:.4f} log(cap units), \u03c3={_c_sd:.4f}  (computed on log scale)')
+            print(f'  N mice:           {_c_n_mice}')
+            print(f'  N observations:   {_c_n_obs}')
+            print(f'  E[\u03b5]  (mean):    {_c_resid_mean:+.6f}  (\u22480 by OLS construction)')
+            print(f'  Var(\u03b5) (MSE):    {_c_resid_var:.6f}')
+            print(f'  SD(\u03b5)  (RMSE):   {_c_resid_sd:.6f}')
+            print(f'  Var(Y):           {_c_y_var:.6f}')
+            print(f'  Var(\u03b5)/Var(Y):   {_c_unexplained:.4f}  (= 1 \u2212 R\u00b2 = unexplained variance fraction)')
+            print(f'  R\u00b2:              {_c_r2:.4f}')
+            print(f'  R\u00b2 adj:          {_c_r2_adj:.4f}')
+            print(f'  R\u00b2 pred (PRESS): {_c_r2_pred_str}  (leave-one-out; gap vs R\u00b2 indicates overfitting)')
+            print(f'  SNR (\u0177\u0305/SD\u03b5):    {_c_snr:.4f}')
+            print(f'  Shapiro-Wilk:     W={_c_sw_stat:.4f}, p={_c_sw_p:.6f}')
+            print(f'  Levene test:      F={_c_lev_stat:.4f}, p={_c_lev_p:.6f}')
+            if _c_cooks_d is not None:
+                print(f'  Cook\'s D thresh:  {_c_cooks_thresh:.4f}  (4/(n\u2212p))')
+                print(f'  Leverage thresh:  {_c_lev_thresh:.4f}  (2p/n)')
+                _c_flag_strs = [f'{m}(S{s})' for m, s in
+                                zip(_c_mice_labels[_c_high_cooks], _c_sess_nums_lbl[_c_high_cooks])]
+                print(f'  High-influence obs (Cook\'s D > thresh): {len(_c_high_cooks)}'
+                      + (f'  [{", ".join(_c_flag_strs)}]' if len(_c_high_cooks) else ''))
+                _c_lev_strs = [f'{m}(S{s})' for m, s in
+                               zip(_c_mice_labels[_c_high_lev], _c_sess_nums_lbl[_c_high_lev])]
+                print(f'  High-leverage obs (h\u1d62\u1d62 > thresh):      {len(_c_high_lev)}'
+                      + (f'  [{", ".join(_c_lev_strs)}]' if len(_c_high_lev) else ''))
+            if _c_pg_text:
+                print(_c_pg_text)
+
+        except ImportError as _e:
+            print(f'[expl_cap_rm_anova_resid] Missing dependency: {_e}')
+            print('  Install statsmodels: conda install statsmodels')
+        except Exception as _e:
+            print(f'[expl_cap_rm_anova_resid] Error: {_e}')
+
+    # ── Exploratory: capacitive sensor value distribution fit ─────────────────
+    # DV = per-session mean raw capacitive value (avg_cap, pooled across all mice).
+    # Tests Normal, Log-normal, and Gamma families via MLE + AIC.
+    # Figure layout: 3 rows × 2 cols
+    #   [0, :] Histogram of raw avg_cap values with fitted PDFs + KDE
+    #   [1, 0] Normal Q-Q  |  [1, 1] Log-normal Q-Q
+    #   [2, 0] Gamma Q-Q   |  [2, 1] AIC / fit-statistic comparison bar chart
+    expl_cap_distfit_fig = None
+    if 'expl_cap_distfit' in selected_plots:
+        try:
+            from scipy.stats import (norm as _norm_cd, probplot as _probplot_cd,
+                                     shapiro as _sw_cd, beta as _beta_cd)
+            from matplotlib.gridspec import GridSpec as _GridSpec_cd
+            import warnings as _warnings_cd
+
+            # ── One mean per mouse, grouped by starting_condition ─────────────
+            _cd_groups = {}
+            for _r in all_results:
+                _cv = pd.to_numeric(
+                    _r['df'].get('avg_cap', pd.Series(dtype=float)), errors='coerce'
+                ).dropna().values
+                if len(_cv) > 0:
+                    _cond_cd = _r.get('starting_condition', 'Unknown')
+                    _cd_groups.setdefault(_cond_cd, []).append(float(np.mean(_cv)))
+
+            _cd_cond_names = sorted(_cd_groups.keys())
+            _n_cg_cd = len(_cd_cond_names)
+            if _n_cg_cd == 0:
+                raise ValueError('No valid capacitance data found')
+
+            # ── Shapiro-Wilk per cohort ────────────────────────────────────────
+            _cd_sw = {}
+            for _cn in _cd_cond_names:
+                _arr = np.array(_cd_groups[_cn])
+                if len(_arr) >= 3:
+                    _w, _p = _sw_cd(_arr)
+                    _cd_sw[_cn] = (float(_w), float(_p), len(_arr))
+                else:
+                    _cd_sw[_cn] = (np.nan, np.nan, len(_arr))
+
+            # ── Figure layout ─────────────────────────────────────────────────
+            # Row 0 (full width): overlaid histograms + Normal fit + rug marks
+            # Rows 1.._n_qq_rows: per-cohort Normal Q-Q plots (2-column grid)
+            # Last row (full width): summary normality table
+            _n_qq_rows_cd = (_n_cg_cd + 1) // 2
+            _n_rows_cd = 1 + 1 + _n_qq_rows_cd + 1  # +1 row for box plot
+            _coh_pal_cd = [plt.cm.tab10(i / max(_n_cg_cd - 1, 1))
+                           for i in range(_n_cg_cd)]
+
+            expl_cap_distfit_fig = plt.figure(figsize=(13, 4.5 * _n_rows_cd))
+            _gs_cd = _GridSpec_cd(_n_rows_cd, 2, figure=expl_cap_distfit_fig,
+                                  hspace=0.60, wspace=0.38)
+            ax_cdhist = expl_cap_distfit_fig.add_subplot(_gs_cd[0, :])
+
+            # [row 0] Overlaid histograms + Normal fit + rug marks
+            _cd_rng = np.random.default_rng(42)
+            for _ci, _cn in enumerate(_cd_cond_names):
+                _arr = np.array(_cd_groups[_cn])
+                _col_cd = _coh_pal_cd[_ci]
+                _sw_lbl = (f'SW p={_cd_sw[_cn][1]:.3f}'
+                           if not np.isnan(_cd_sw[_cn][1]) else 'SW: n<3')
+                _nbins_cd = max(4, len(_arr) // 2 + 1)
+                ax_cdhist.hist(_arr, bins=_nbins_cd, alpha=0.40, color=_col_cd,
+                               density=True, edgecolor='white', linewidth=0.5,
+                               label=f'{_cn}  (n={len(_arr)}, {_sw_lbl})')
+                if len(_arr) >= 3:
+                    _mn_cd = float(np.mean(_arr))
+                    _sdv_cd = float(np.std(_arr, ddof=1))
+                    _xfit_cd = np.linspace(_mn_cd - 4 * _sdv_cd,
+                                           _mn_cd + 4 * _sdv_cd, 300)
+                    ax_cdhist.plot(_xfit_cd, _norm_cd.pdf(_xfit_cd, _mn_cd, _sdv_cd),
+                                   color=_col_cd, linewidth=2.0, linestyle='--')
+                _jit_cd = _cd_rng.uniform(-0.003, 0.003, len(_arr))
+                ax_cdhist.plot(_arr, _jit_cd, '|', color=_col_cd,
+                               markersize=14, markeredgewidth=2.5, alpha=0.75)
+
+            ax_cdhist.set_xlabel('Per-mouse mean z-scored capacitive sensor value', fontsize=10)
+            ax_cdhist.set_ylabel('Density', fontsize=10)
+            ax_cdhist.set_title(
+                'Per-mouse mean capacitive sensor value — distribution by cohort\n'
+                '(each point = one mouse; dashed lines = Normal fit; '
+                'tick marks = individual mice)',
+                fontsize=10,
+            )
+            ax_cdhist.legend(fontsize=8)
+            ax_cdhist.spines['top'].set_visible(False)
+            ax_cdhist.spines['right'].set_visible(False)
+            ax_cdhist.tick_params(axis='both', direction='in')
+
+            # [row 1] Box-and-whisker with 1.5×IQR outlier highlighting
+            ax_cdbox = expl_cap_distfit_fig.add_subplot(_gs_cd[1, :])
+            _bp_data_cd = [np.array(_cd_groups[_cn]) for _cn in _cd_cond_names]
+            _bplot_cd = ax_cdbox.boxplot(
+                _bp_data_cd, labels=_cd_cond_names, patch_artist=True,
+                showfliers=False, widths=0.50,
+                boxprops=dict(linewidth=1.4),
+                whiskerprops=dict(linewidth=1.2, linestyle='--'),
+                capprops=dict(linewidth=1.4),
+                medianprops=dict(color='black', linewidth=2.0),
+            )
+            for _bi, _bpatch in enumerate(_bplot_cd['boxes']):
+                _bc = _coh_pal_cd[_bi]
+                _bpatch.set_facecolor([*_bc[:3], 0.35])
+                _bpatch.set_edgecolor(_bc)
+            _rng_box_cd = np.random.default_rng(1)
+            _outlier_legend_added_cd = False
+            for _bi, _cn in enumerate(_cd_cond_names):
+                _arr_bx = np.array(_cd_groups[_cn])
+                _q1_cd  = float(np.percentile(_arr_bx, 25))
+                _q3_cd  = float(np.percentile(_arr_bx, 75))
+                _iqr_cd = _q3_cd - _q1_cd
+                _lo_cd  = _q1_cd - 1.5 * _iqr_cd
+                _hi_cd  = _q3_cd + 1.5 * _iqr_cd
+                _out_cd = (_arr_bx < _lo_cd) | (_arr_bx > _hi_cd)
+                _jit_cd = _rng_box_cd.uniform(-0.15, 0.15, len(_arr_bx))
+                ax_cdbox.scatter(
+                    np.full(int(np.sum(~_out_cd)), _bi + 1) + _jit_cd[~_out_cd],
+                    _arr_bx[~_out_cd], color=_coh_pal_cd[_bi],
+                    s=40, alpha=0.70, zorder=3,
+                )
+                if _out_cd.any():
+                    ax_cdbox.scatter(
+                        np.full(int(np.sum(_out_cd)), _bi + 1) + _jit_cd[_out_cd],
+                        _arr_bx[_out_cd], color='red', s=80, alpha=0.90,
+                        zorder=4, edgecolors='darkred', linewidths=1.5, marker='D',
+                        label='Outlier (1.5\u00d7IQR)' if not _outlier_legend_added_cd else '',
+                    )
+                    _outlier_legend_added_cd = True
+                    for _ov in _arr_bx[_out_cd]:
+                        ax_cdbox.annotate(
+                            f'{_ov:.3g}', xy=(_bi + 1, _ov),
+                            xytext=(8, 0), textcoords='offset points',
+                            fontsize=7, color='darkred', va='center',
+                        )
+            ax_cdbox.set_xlabel('Cohort', fontsize=10)
+            ax_cdbox.set_ylabel('Per-mouse mean (z-score)', fontsize=10)
+            ax_cdbox.set_title(
+                'Box-and-whisker \u2014 per-mouse mean z-scored capacitive value by cohort\n'
+                '(whiskers extend to 1.5\u00d7IQR; \u25c6 red diamonds = outliers beyond fence)',
+                fontsize=10,
+            )
+            _handles_cd, _labels_cd = ax_cdbox.get_legend_handles_labels()
+            if _handles_cd:
+                ax_cdbox.legend(fontsize=8)
+            ax_cdbox.spines['top'].set_visible(False)
+            ax_cdbox.spines['right'].set_visible(False)
+            ax_cdbox.tick_params(axis='both', direction='in')
+
+            # [rows 2+] Per-cohort Normal Q-Q with 95% CI
+            for _ci, _cn in enumerate(_cd_cond_names):
+                _arr = np.array(_cd_groups[_cn])
+                _row_qq = 2 + _ci // 2
+                _col_qq = _ci % 2
+                _ax_qq = expl_cap_distfit_fig.add_subplot(_gs_cd[_row_qq, _col_qq])
+                _col_cd = _coh_pal_cd[_ci]
+                if len(_arr) >= 3:
+                    (_osm_cd, _osr_cd), (_sl_cd, _int_cd, _) = _probplot_cd(
+                        _arr, dist='norm',
+                    )
+                    _n_qq_cd = len(_arr)
+                    with _warnings_cd.catch_warnings():
+                        _warnings_cd.simplefilter('ignore')
+                        _ci_lo_cd = np.array([
+                            _norm_cd.ppf(_beta_cd.ppf(0.025, _i + 1, _n_qq_cd - _i))
+                            for _i in range(_n_qq_cd)
+                        ])
+                        _ci_hi_cd = np.array([
+                            _norm_cd.ppf(_beta_cd.ppf(0.975, _i + 1, _n_qq_cd - _i))
+                            for _i in range(_n_qq_cd)
+                        ])
+                    _ax_qq.fill_between(
+                        _osm_cd,
+                        _sl_cd * _ci_lo_cd + _int_cd,
+                        _sl_cd * _ci_hi_cd + _int_cd,
+                        color=_col_cd, alpha=0.18, label='95% CI',
+                    )
+                    _ax_qq.plot(_osm_cd, _osr_cd, 'o', color=_col_cd,
+                                markersize=7, alpha=0.85, label='Mouse mean')
+                    _ax_qq.plot(
+                        [_osm_cd[0], _osm_cd[-1]],
+                        [_sl_cd * _osm_cd[0] + _int_cd,
+                         _sl_cd * _osm_cd[-1] + _int_cd],
+                        'k-', linewidth=1.4, label='Reference line',
+                    )
+                    _w_cd, _p_cd = _cd_sw[_cn][:2]
+                    _verdict_cd = ('Normal (p>0.05) \u2014 t-test OK \u2713'
+                                   if _p_cd > 0.05
+                                   else 'Non-normal (p\u22640.05) \u2014 consider Mann-Whitney')
+                    _ax_qq.text(
+                        0.04, 0.96,
+                        f'SW: W={_w_cd:.4f}, p={_p_cd:.4f}\n{_verdict_cd}',
+                        transform=_ax_qq.transAxes, fontsize=8, va='top',
+                        bbox=dict(boxstyle='round,pad=0.3',
+                                  facecolor='#e6ffe6' if _p_cd > 0.05 else '#ffe6e6',
+                                  edgecolor=_col_cd, alpha=0.90),
+                    )
+                else:
+                    _ax_qq.text(
+                        0.5, 0.5,
+                        f'n={len(_arr)} \u2014 need \u22653\nfor Shapiro-Wilk / Q-Q',
+                        transform=_ax_qq.transAxes,
+                        ha='center', va='center', fontsize=10,
+                    )
+                _ax_qq.set_title(f'{_cn} \u2014 Normal Q-Q  (n={len(_arr)} mice)', fontsize=9)
+                _ax_qq.set_xlabel('Theoretical quantiles (Normal)', fontsize=8)
+                _ax_qq.set_ylabel('Observed quantiles', fontsize=8)
+                _ax_qq.legend(fontsize=7)
+                _ax_qq.spines['top'].set_visible(False)
+                _ax_qq.spines['right'].set_visible(False)
+                _ax_qq.tick_params(axis='both', direction='in')
+
+            # Hide unused Q-Q cell when odd cohort count
+            if _n_cg_cd % 2 == 1:
+                _ax_empty_cd = expl_cap_distfit_fig.add_subplot(
+                    _gs_cd[2 + (_n_cg_cd - 1) // 2, 1])
+                _ax_empty_cd.axis('off')
+
+            # [last row] Summary table
+            ax_cdtbl = expl_cap_distfit_fig.add_subplot(_gs_cd[_n_rows_cd - 1, :])
+            ax_cdtbl.axis('off')
+            _tbl_cols_cd = ['Cohort', 'N mice', 'Mean (z-score)', 'SD',
+                            'SW W', 'SW p', 'T-test normality OK?']
+            _tbl_rows_cd = []
+            for _cn in _cd_cond_names:
+                _arr = np.array(_cd_groups[_cn])
+                _w_cd, _p_cd, _nn_cd = _cd_sw[_cn]
+                _mn_cd = float(np.mean(_arr))
+                _sdv_str = (f'{np.std(_arr, ddof=1):.4g}'
+                            if _nn_cd >= 2 else 'n/a')
+                _ok_cd = ('Yes' if (not np.isnan(_p_cd) and _p_cd > 0.05)
+                          else ('Insufficient n (need \u22653)'
+                                if np.isnan(_p_cd)
+                                else 'No \u2014 consider Mann-Whitney U'))
+                _tbl_rows_cd.append([
+                    _cn, str(_nn_cd), f'{_mn_cd:.4g}', _sdv_str,
+                    f'{_w_cd:.4f}' if not np.isnan(_w_cd) else 'n/a',
+                    f'{_p_cd:.4f}' if not np.isnan(_p_cd) else 'n/a',
+                    _ok_cd,
+                ])
+            _tbl_cd = ax_cdtbl.table(
+                cellText=_tbl_rows_cd, colLabels=_tbl_cols_cd,
+                cellLoc='center', loc='center', bbox=[0, 0, 1, 1],
+            )
+            _tbl_cd.auto_set_font_size(False)
+            _tbl_cd.set_fontsize(9)
+            for (_ri, _ci2), _cell in _tbl_cd.get_celld().items():
+                if _ri == 0:
+                    _cell.set_facecolor('#d0d8e8')
+                    _cell.set_text_props(fontweight='bold')
+                elif _ci2 == 6 and _ri > 0:
+                    _txt2 = _tbl_rows_cd[_ri - 1][6]
+                    _cell.set_facecolor(
+                        '#e6ffe6' if 'Yes' in _txt2
+                        else '#ffe6e6' if 'No' in _txt2
+                        else '#fffff0'
+                    )
+            ax_cdtbl.set_title(
+                'Normality summary \u2014 one mean per mouse per cohort '
+                '(Shapiro-Wilk, \u03b1=0.05)',
+                fontsize=9, pad=6,
+            )
+
+            expl_cap_distfit_fig.suptitle(
+                'Z-Scored Capacitive Sensor Value \u2014 Per-Mouse Means by Cohort\n'
+                '(N=1 value per mouse = mean across all sessions; '
+                'goal: assess normality for between-cohort t-test)',
+                fontsize=11, y=1.01,
+            )
+            expl_cap_distfit_fig.tight_layout()
+
+            print('\n\u2500\u2500 Capacitive Sensor Value \u2014 Per-Mouse Means by Cohort \u2500\u2500')
+            for _cn in _cd_cond_names:
+                _arr = np.array(_cd_groups[_cn])
+                _w_cd, _p_cd, _nn_cd = _cd_sw[_cn]
+                _sdv_str = f'{np.std(_arr, ddof=1):.4g}' if _nn_cd >= 2 else 'n/a'
+                _w_str   = f'{_w_cd:.4f}' if not np.isnan(_w_cd) else 'n/a'
+                _p_str   = f'{_p_cd:.4f}' if not np.isnan(_p_cd) else 'n/a'
+                print(f'  {_cn}: n={_nn_cd}, mean={np.mean(_arr):.4g}, '
+                      f'SD={_sdv_str}, SW W={_w_str}, p={_p_str}')
+
+        except Exception as _e:
+            import traceback as _tb_cd
+            print(f'[expl_cap_distfit] Error: {_e}')
+            _tb_cd.print_exc()
+            expl_cap_distfit_fig = None
+
+    # ── Exploratory: lick count Poisson vs Negative Binomial distribution fit ──
+    # Step 1 before any ANOVA: determine whether the count DV is Poisson-
+    # distributed (mean ≈ variance) or overdispersed (variance >> mean, → NB).
+    # The figure contains four panels:
+    #   [0,0] Hanging rootogram — Poisson fit overlaid on count histogram
+    #   [0,1] Hanging rootogram — NB fit overlaid on count histogram
+    #   [1,0] Mean–variance plot (per-mouse means vs per-mouse variances)
+    #   [1,1] Q-Q plot of counts against Poisson quantiles (pooled data)
+    # Summary text reports: mean, variance, dispersion index (V/M), p-value
+    # from a chi-squared goodness-of-fit for both Poisson and NB, and AIC.
+    expl_lick_distfit_fig = None
+    if 'expl_lick_distfit' in selected_plots:
+        try:
+            from scipy.stats import poisson as _poisson_dist, chi2 as _chi2_dist
+            from scipy.stats import nbinom as _nbinom_dist
+            import warnings as _warnings_df
+
+            # ── Collect integer lick counts ───────────────────────────────────
+            _df_lk_counts = []
+            _df_per_mouse_means = []
+            _df_per_mouse_vars  = []
+            for _r in all_results:
+                _lc = pd.to_numeric(_r['df']['lick_count'], errors='coerce').dropna()
+                _lc_int = _lc[_lc >= 0].values.astype(float)
+                _df_lk_counts.extend(_lc_int.tolist())
+                if len(_lc_int) >= 2:
+                    _df_per_mouse_means.append(float(np.mean(_lc_int)))
+                    _df_per_mouse_vars.append(float(np.var(_lc_int, ddof=1)))
+
+            _df_counts = np.array(_df_lk_counts, dtype=float)
+            _df_n      = len(_df_counts)
+            _df_mean   = float(np.mean(_df_counts))
+            _df_var    = float(np.var(_df_counts, ddof=1))
+            _df_disp   = _df_var / _df_mean if _df_mean > 0 else np.nan  # dispersion index
+
+            # ── MLE for Poisson: λ = sample mean ─────────────────────────────
+            _pois_lam = _df_mean
+
+            # ── MLE for Negative Binomial via statsmodels ─────────────────────
+            # NB parameterisation: mean=μ, dispersion=α → var = μ + α·μ²
+            # statsmodels NB2 gives (params['const'], alpha)
+            _nb_mu    = np.nan
+            _nb_alpha = np.nan
+            _nb_r     = np.nan   # r = 1/alpha  (scipy nbinom uses n=r, p=r/(r+mu))
+            _nb_p_sc  = np.nan
+            try:
+                import statsmodels.api as _sm_nb
+                _nb_endog = _df_counts.astype(int)
+                _nb_exog  = np.ones(len(_nb_endog))
+                with _warnings_df.catch_warnings():
+                    _warnings_df.simplefilter('ignore')
+                    _nb_res = _sm_nb.NegativeBinomial(_nb_endog, _nb_exog).fit(
+                        disp=False, method='nm', maxiter=500,
+                    )
+                _nb_mu    = float(np.exp(_nb_res.params[0]))
+                _nb_alpha = float(_nb_res.params[-1])         # overdispersion α
+                _nb_r     = float(1.0 / _nb_alpha) if _nb_alpha > 0 else np.inf
+                _nb_p_sc  = float(_nb_r / (_nb_r + _nb_mu))  # scipy p parameter
+            except Exception:
+                pass  # NB fit unavailable; panels will show Poisson only
+
+            # ── Bin counts for rootogram & chi-squared GoF ────────────────────
+            _max_bin  = int(np.percentile(_df_counts, 99)) + 1
+            _bins     = np.arange(0, _max_bin + 2)
+            _obs_freq, _ = np.histogram(_df_counts, bins=_bins)
+            _bin_vals    = _bins[:-1]   # 0, 1, 2, …, _max_bin
+
+            # Expected frequencies — Poisson
+            _pois_pmf  = _poisson_dist.pmf(_bin_vals, _pois_lam)
+            _pois_pmf[-1] += (1.0 - _poisson_dist.cdf(_max_bin, _pois_lam))  # right tail
+            _pois_exp  = _pois_pmf * _df_n
+
+            # Expected frequencies — NB
+            if not np.isnan(_nb_r):
+                _nb_pmf    = _nbinom_dist.pmf(_bin_vals, _nb_r, _nb_p_sc)
+                _nb_pmf[-1] += (1.0 - _nbinom_dist.cdf(_max_bin, _nb_r, _nb_p_sc))
+                _nb_exp    = _nb_pmf * _df_n
+            else:
+                _nb_exp = None
+
+            # ── Chi-squared GoF (pool bins with expected < 5) ─────────────────
+            def _chisq_gof(obs, exp):
+                """Pool tail bins until all expected >= 5, return (chi2, df, p)."""
+                obs, exp = np.array(obs, dtype=float), np.array(exp, dtype=float)
+                # Pool from right
+                while len(obs) > 1 and exp[-1] < 5:
+                    obs[-2] += obs[-1];  exp[-2] += exp[-1]
+                    obs = obs[:-1];      exp = exp[:-1]
+                # Pool from left
+                while len(obs) > 1 and exp[0] < 5:
+                    obs[1] += obs[0];   exp[1] += exp[0]
+                    obs = obs[1:];      exp = exp[1:]
+                if len(obs) < 2:
+                    return np.nan, np.nan, np.nan
+                stat = float(np.sum((obs - exp) ** 2 / np.where(exp > 0, exp, np.nan)))
+                df   = len(obs) - 2   # -1 for constraint, -1 for estimated param
+                df   = max(df, 1)
+                p    = float(1.0 - _chi2_dist.cdf(stat, df))
+                return stat, df, p
+
+            _pois_chi2, _pois_df, _pois_p = _chisq_gof(_obs_freq, _pois_exp)
+            if _nb_exp is not None:
+                _nb_chi2, _nb_df, _nb_p = _chisq_gof(_obs_freq, _nb_exp)
+            else:
+                _nb_chi2 = _nb_df = _nb_p = np.nan
+
+            # ── AIC (log-likelihood based) ────────────────────────────────────
+            # Poisson log-likelihood
+            _pois_ll = float(np.sum(_poisson_dist.logpmf(_df_counts.astype(int), _pois_lam)))
+            _pois_aic = 2 * 1 - 2 * _pois_ll   # 1 free param (λ)
+            # NB log-likelihood
+            if not np.isnan(_nb_r):
+                _nb_ll  = float(np.sum(_nbinom_dist.logpmf(
+                    _df_counts.astype(int), _nb_r, _nb_p_sc)))
+                _nb_aic = 2 * 2 - 2 * _nb_ll   # 2 free params (μ, α)
+                _delta_aic = _nb_aic - _pois_aic  # negative = NB preferred
+            else:
+                _nb_ll = _nb_aic = _delta_aic = np.nan
+
+            # ── Build figure: 3 rows × 2 cols (top row = histogram, spans both cols) ──
+            from matplotlib.gridspec import GridSpec as _GridSpec
+            expl_lick_distfit_fig = plt.figure(figsize=(14, 16))
+            _gs = _GridSpec(3, 2, figure=expl_lick_distfit_fig,
+                            hspace=0.42, wspace=0.35)
+            ax_dfhist = expl_lick_distfit_fig.add_subplot(_gs[0, :])   # row 0, both cols
+            ax_dfp    = expl_lick_distfit_fig.add_subplot(_gs[1, 0])   # row 1, col 0
+            ax_dfn    = expl_lick_distfit_fig.add_subplot(_gs[1, 1])   # row 1, col 1
+            ax_dfmv   = expl_lick_distfit_fig.add_subplot(_gs[2, 0])   # row 2, col 0
+            ax_dfqq   = expl_lick_distfit_fig.add_subplot(_gs[2, 1])   # row 2, col 1
+
+            # ── [0, :] Raw lick count histogram with PMF overlays ────────────
+            from scipy.stats import gaussian_kde as _gkde_df
+            ax_dfhist.hist(_df_counts, bins='auto', color='mediumpurple', alpha=0.55,
+                           edgecolor='white', linewidth=0.5, density=True,
+                           label='Observed (density)')
+            # KDE of raw data
+            if len(_df_counts) >= 3:
+                try:
+                    _hist_kde = _gkde_df(_df_counts)
+                    _hist_x = np.linspace(max(0, _df_counts.min()), _df_counts.max(), 500)
+                    ax_dfhist.plot(_hist_x, _hist_kde(_hist_x), color='indigo',
+                                   linewidth=2, label='KDE (observed)')
+                except Exception:
+                    pass
+            # Poisson PMF as stem plot (scaled to density)
+            _hist_pmf_x = np.arange(0, _max_bin + 2)
+            _hist_pois_pmf = _poisson_dist.pmf(_hist_pmf_x, _pois_lam)
+            ax_dfhist.vlines(_hist_pmf_x, 0, _hist_pois_pmf,
+                             color='navy', linewidth=0.8, alpha=0.6)
+            ax_dfhist.plot(_hist_pmf_x, _hist_pois_pmf, 'o', color='navy',
+                           markersize=3, alpha=0.7, label=f'Poisson PMF (λ={_pois_lam:.1f})')
+            # NB PMF
+            if not np.isnan(_nb_r):
+                _hist_nb_pmf = _nbinom_dist.pmf(_hist_pmf_x, _nb_r, _nb_p_sc)
+                ax_dfhist.vlines(_hist_pmf_x, 0, _hist_nb_pmf,
+                                 color='darkgreen', linewidth=0.8, alpha=0.6)
+                ax_dfhist.plot(_hist_pmf_x, _hist_nb_pmf, '^', color='darkgreen',
+                               markersize=3, alpha=0.7,
+                               label=f'NB PMF (μ={_nb_mu:.1f}, α={_nb_alpha:.3f})')
+            ax_dfhist.set_title(
+                f'Raw Lick Count Histogram — all sessions (n={_df_n})  |  '
+                f'mean={_df_mean:.1f}  var={_df_var:.1f}  V/M={_df_disp:.2f}',
+                fontsize=9,
+            )
+            ax_dfhist.set_xlabel('Lick count per session')
+            ax_dfhist.set_ylabel('Density')
+            ax_dfhist.legend(fontsize=8)
+            ax_dfhist.tick_params(axis='both', direction='in')
+            ax_dfhist.spines['top'].set_visible(False)
+            ax_dfhist.spines['right'].set_visible(False)
+
+            # ── [1,0] Hanging rootogram — Poisson ─────────────────────────────
+            # Rootogram: bars show sqrt(observed); curve shows sqrt(expected);
+            # bars are "hung" from the curve so deviations are visible at the base.
+            _bw = 0.8
+            _sqrt_obs_p = np.sqrt(_obs_freq.astype(float))
+            _sqrt_exp_p = np.sqrt(_pois_exp)
+            for _i, (_xv, _so, _se) in enumerate(zip(_bin_vals, _sqrt_obs_p, _sqrt_exp_p)):
+                _bottom = _se - _so
+                _color  = 'crimson' if _bottom < -0.5 else ('gold' if abs(_bottom) < 0.5 else 'steelblue')
+                ax_dfp.bar(_xv, _so, bottom=_bottom, width=_bw,
+                           color=_color, alpha=0.75, edgecolor='white', linewidth=0.4)
+            ax_dfp.axhline(0, color='black', linewidth=1.0, linestyle='-')
+            ax_dfp.step(np.append(_bin_vals, _bin_vals[-1] + 1) - 0.5,
+                        np.append(_sqrt_exp_p, _sqrt_exp_p[-1]),
+                        where='post', color='navy', linewidth=1.8,
+                        label=f'Poisson(\u03bb={_pois_lam:.1f})')
+            _pois_label = (f'\u03c7\u00b2({_pois_df})={_pois_chi2:.2f}, p={_pois_p:.4f}\n'
+                           f'AIC={_pois_aic:.1f}')
+            ax_dfp.text(0.97, 0.97, _pois_label, transform=ax_dfp.transAxes,
+                        fontsize=8, va='top', ha='right',
+                        bbox=dict(boxstyle='round,pad=0.3', facecolor='lightyellow',
+                                  edgecolor='gray', alpha=0.85))
+            ax_dfp.set_title('Hanging Rootogram — Poisson fit\n'
+                             '(crimson=underpredicted, blue=overpredicted, gold=close)')
+            ax_dfp.set_xlabel('Lick count per session')
+            ax_dfp.set_ylabel('\u221aObserved  (hung from \u221aExpected)')
+            ax_dfp.legend(fontsize=8)
+            ax_dfp.tick_params(axis='both', direction='in')
+            ax_dfp.spines['top'].set_visible(False)
+            ax_dfp.spines['right'].set_visible(False)
+
+            # ── [1,1] Hanging rootogram — Negative Binomial ───────────────────
+            if _nb_exp is not None:
+                _sqrt_obs_n = np.sqrt(_obs_freq.astype(float))
+                _sqrt_exp_n = np.sqrt(_nb_exp)
+                for _i, (_xv, _so, _se) in enumerate(zip(_bin_vals, _sqrt_obs_n, _sqrt_exp_n)):
+                    _bottom = _se - _so
+                    _color  = 'crimson' if _bottom < -0.5 else ('gold' if abs(_bottom) < 0.5 else 'steelblue')
+                    ax_dfn.bar(_xv, _so, bottom=_bottom, width=_bw,
+                               color=_color, alpha=0.75, edgecolor='white', linewidth=0.4)
+                ax_dfn.axhline(0, color='black', linewidth=1.0, linestyle='-')
+                ax_dfn.step(np.append(_bin_vals, _bin_vals[-1] + 1) - 0.5,
+                            np.append(_sqrt_exp_n, _sqrt_exp_n[-1]),
+                            where='post', color='darkgreen', linewidth=1.8,
+                            label=f'NB(\u03bc={_nb_mu:.1f}, \u03b1={_nb_alpha:.3f})')
+                _nb_label = (f'\u03c7\u00b2({_nb_df})={_nb_chi2:.2f}, p={_nb_p:.4f}\n'
+                             f'AIC={_nb_aic:.1f}  (\u0394AIC vs Poisson={_delta_aic:+.1f})')
+                ax_dfn.text(0.97, 0.97, _nb_label, transform=ax_dfn.transAxes,
+                            fontsize=8, va='top', ha='right',
+                            bbox=dict(boxstyle='round,pad=0.3', facecolor='lightyellow',
+                                      edgecolor='gray', alpha=0.85))
+                ax_dfn.set_title('Hanging Rootogram — Negative Binomial fit\n'
+                                 '(\u0394AIC < 0 = NB preferred over Poisson)')
+                ax_dfn.set_xlabel('Lick count per session')
+                ax_dfn.set_ylabel('\u221aObserved  (hung from \u221aExpected)')
+                ax_dfn.legend(fontsize=8)
+                ax_dfn.tick_params(axis='both', direction='in')
+                ax_dfn.spines['top'].set_visible(False)
+                ax_dfn.spines['right'].set_visible(False)
+            else:
+                ax_dfn.text(0.5, 0.5, 'NB fit unavailable\n(install statsmodels)',
+                            transform=ax_dfn.transAxes, ha='center', va='center', fontsize=10)
+                ax_dfn.axis('off')
+
+            # ── [2,0] Mean–variance plot ──────────────────────────────────────
+            # Each point = one mouse; Poisson expectation: var = mean (slope 1 line).
+            # NB expectation: var = mean + α·mean² (quadratic curve).
+            _mv_means = np.array(_df_per_mouse_means, dtype=float)
+            _mv_vars  = np.array(_df_per_mouse_vars,  dtype=float)
+            if len(_mv_means) > 0:
+                ax_dfmv.scatter(_mv_means, _mv_vars, color='mediumpurple', s=50,
+                                alpha=0.8, zorder=3, label='Per-mouse')
+                _mv_x = np.linspace(0, max(_mv_means) * 1.1 + 1, 200)
+                ax_dfmv.plot(_mv_x, _mv_x, 'b--', linewidth=1.5,
+                             label='Poisson (var = mean)')
+                if not np.isnan(_nb_alpha):
+                    ax_dfmv.plot(_mv_x, _mv_x + _nb_alpha * _mv_x ** 2, 'g-',
+                                 linewidth=1.5,
+                                 label=f'NB (var = mean + {_nb_alpha:.3f}\u00b7mean\u00b2)')
+                ax_dfmv.set_title('Mean\u2013Variance Relationship\n(per-mouse; Poisson: var=mean)')
+                ax_dfmv.set_xlabel('Per-mouse mean lick count')
+                ax_dfmv.set_ylabel('Per-mouse variance (lick count)')
+                ax_dfmv.legend(fontsize=8)
+                ax_dfmv.tick_params(axis='both', direction='in')
+                ax_dfmv.spines['top'].set_visible(False)
+                ax_dfmv.spines['right'].set_visible(False)
+                # Annotate with dispersion index
+                _disp_text = (f'Dispersion index (pooled)\n'
+                              f'V/M = {_df_disp:.3f}  '
+                              f'(=1 Poisson; >1 overdispersed)')
+                ax_dfmv.text(0.03, 0.97, _disp_text, transform=ax_dfmv.transAxes,
+                             fontsize=8, va='top', ha='left',
+                             bbox=dict(boxstyle='round,pad=0.3', facecolor='#f0f4ff',
+                                       edgecolor='steelblue', alpha=0.88))
+            else:
+                ax_dfmv.text(0.5, 0.5, 'Insufficient data',
+                             transform=ax_dfmv.transAxes, ha='center', va='center')
+                ax_dfmv.axis('off')
+
+            # ── [2,1] Poisson Q-Q plot (pooled counts) ────────────────────────
+            # Sort observed counts; compare to quantiles of fitted Poisson.
+            _qq_obs_sorted = np.sort(_df_counts)
+            _n_pts = len(_qq_obs_sorted)
+            _probs  = (np.arange(1, _n_pts + 1) - 0.5) / _n_pts
+            _pois_qq_theoretical = _poisson_dist.ppf(_probs, _pois_lam)
+            ax_dfqq.scatter(_pois_qq_theoretical, _qq_obs_sorted,
+                            color='steelblue', s=10, alpha=0.5,
+                            label='Poisson Q-Q')
+            if not np.isnan(_nb_r):
+                _nb_qq_theoretical = _nbinom_dist.ppf(_probs, _nb_r, _nb_p_sc)
+                ax_dfqq.scatter(_nb_qq_theoretical, _qq_obs_sorted,
+                                color='darkgreen', s=10, alpha=0.5,
+                                marker='^', label='NB Q-Q')
+            _diag_max = max(float(_pois_qq_theoretical.max()), float(_qq_obs_sorted.max())) * 1.05
+            ax_dfqq.plot([0, _diag_max], [0, _diag_max], 'k--',
+                         linewidth=1.5, label='Perfect fit')
+            ax_dfqq.set_title('Count Q-Q Plot\n(Poisson = blue circles, NB = green triangles)')
+            ax_dfqq.set_xlabel('Theoretical quantiles')
+            ax_dfqq.set_ylabel('Observed quantiles')
+            ax_dfqq.legend(fontsize=8)
+            ax_dfqq.tick_params(axis='both', direction='in')
+            ax_dfqq.spines['top'].set_visible(False)
+            ax_dfqq.spines['right'].set_visible(False)
+
+            # ── Suptitle with key statistics ──────────────────────────────────
+            _preferred = ('Negative Binomial' if (not np.isnan(_delta_aic) and _delta_aic < -2)
+                          else ('Poisson' if (not np.isnan(_delta_aic) and _delta_aic > 2)
+                                else 'Inconclusive (|ΔAIC| ≤ 2)'))
+            _df_summary = (
+                f'Lick Count Distribution Fit  |  n={_df_n} sessions, '
+                f'{len(_mv_means)} mice  |  '
+                f'Mean={_df_mean:.1f}  Var={_df_var:.1f}  '
+                f'Dispersion V/M={_df_disp:.3f}  |  '
+                f'Poisson AIC={_pois_aic:.1f}  '
+                f'NB AIC={_nb_aic:.1f}  \u0394AIC={_delta_aic:+.1f}  '
+                f'\u2192 Preferred: {_preferred}'
+            )
+            expl_lick_distfit_fig.suptitle(_df_summary, fontsize=9, y=1.01, wrap=True)
+
+            # ── Console summary ───────────────────────────────────────────────
+            print('\n\u2500\u2500 Lick Count Distribution Fit \u2500\u2500')
+            print(f'  N sessions:        {_df_n}')
+            print(f'  N mice:            {len(_mv_means)}')
+            print(f'  Mean:              {_df_mean:.4f}')
+            print(f'  Variance:          {_df_var:.4f}')
+            print(f'  Dispersion (V/M):  {_df_disp:.4f}  (1 = Poisson; >1 = overdispersed)')
+            print(f'  Poisson  \u03bb={_pois_lam:.4f}  \u03c7\u00b2({_pois_df})={_pois_chi2:.4f}  p={_pois_p:.6f}  AIC={_pois_aic:.2f}')
+            if not np.isnan(_nb_r):
+                print(f'  NB       \u03bc={_nb_mu:.4f}  \u03b1={_nb_alpha:.4f}  r={_nb_r:.4f}  '
+                      f'\u03c7\u00b2({_nb_df})={_nb_chi2:.4f}  p={_nb_p:.6f}  AIC={_nb_aic:.2f}')
+                print(f'  \u0394AIC (NB \u2212 Poisson) = {_delta_aic:+.4f}  '
+                      f'\u2192 Preferred: {_preferred}')
+            else:
+                print('  NB fit unavailable')
+
+        except ImportError as _e:
+            print(f'[expl_lick_distfit] Missing dependency: {_e}')
+            print('  Install statsmodels: conda install statsmodels')
+        except Exception as _e:
+            import traceback as _tb
+            print(f'[expl_lick_distfit] Error: {_e}')
+            _tb.print_exc()
+
+    # ── Exploratory: raw lick count box-and-whisker ───────────────────────────
+    expl_lick_boxplot_fig = None
+    if 'expl_lick_boxplot' in selected_plots:
+        _lkbx_names = []
+        _lkbx_vals  = []
+        _lkbx_all   = []
+        for _r in all_results:
+            _lc = pd.to_numeric(_r['df']['lick_count'], errors='coerce').dropna()
+            _lc_valid = _lc[_lc >= 0].values.tolist()
+            if _lc_valid:
+                _lkbx_names.append(_r['mouse'])
+                _lkbx_vals.append(_lc_valid)
+                _lkbx_all.extend(_lc_valid)
+
+        n_mice_lkbx = len(_lkbx_names)
+        expl_lick_boxplot_fig, (ax_lkbx1, ax_lkbx2) = plt.subplots(
+            1, 2, figsize=(max(10, n_mice_lkbx * 0.8 + 3), 6),
+            gridspec_kw={'width_ratios': [max(3, n_mice_lkbx), 1]},
+        )
+        ax_lkbx1.boxplot(_lkbx_vals, labels=_lkbx_names,
+                         patch_artist=True,
+                         boxprops=dict(facecolor='mediumpurple', alpha=0.6),
+                         medianprops=dict(color='indigo', linewidth=2),
+                         whiskerprops=dict(color='mediumpurple'),
+                         capprops=dict(color='mediumpurple'),
+                         flierprops=dict(marker='o', markerfacecolor='mediumpurple',
+                                         markersize=4, alpha=0.5, linestyle='none'))
+        ax_lkbx1.set_title('Raw lick count distribution per mouse\n(each session = one data point)')
+        ax_lkbx1.set_xlabel('Mouse')
+        ax_lkbx1.set_ylabel('Raw lick count per session')
+        ax_lkbx1.tick_params(axis='x', rotation=45)
+        ax_lkbx1.tick_params(axis='both', direction='in')
+        ax_lkbx1.spines['top'].set_visible(False)
+        ax_lkbx1.spines['right'].set_visible(False)
+
+        ax_lkbx2.boxplot([_lkbx_all], labels=['All mice'],
+                         patch_artist=True,
+                         boxprops=dict(facecolor='plum', alpha=0.6),
+                         medianprops=dict(color='purple', linewidth=2),
+                         whiskerprops=dict(color='plum'),
+                         capprops=dict(color='plum'),
+                         flierprops=dict(marker='o', markerfacecolor='plum',
+                                         markersize=4, alpha=0.5, linestyle='none'))
+        ax_lkbx2.set_title(f'Overall\n(n={len(_lkbx_all)} sessions)')
+        ax_lkbx2.set_ylabel('Raw lick count per session')
+        ax_lkbx2.tick_params(axis='both', direction='in')
+        ax_lkbx2.spines['top'].set_visible(False)
+        ax_lkbx2.spines['right'].set_visible(False)
+
+        expl_lick_boxplot_fig.suptitle('Raw Lick Count Box-and-Whisker — Exploratory', fontsize=11)
+        expl_lick_boxplot_fig.tight_layout()
+
+    # ── Exploratory: raw lick count RM ANOVA residual diagnostics ─────────────
+    # DV = log(1 + lick_count) — log(1+x) linearises count data for OLS.
+    # The +1 offset avoids log(0) on sessions with zero licks.
+    expl_lick_rm_anova_resid_fig = None
+    if 'expl_lick_rm_anova_resid' in selected_plots:
+        import warnings as _warnings_lk
+        try:
+            import statsmodels.formula.api as _smf_lk
+            from scipy.stats import shapiro as _shapiro_lkr, levene as _levene_lkr
+            from scipy.stats import probplot as _probplot_lkr
+
+            # ── Build long-format DataFrame (log(1+lick_count)) ──────────────
+            _lk_rows = []
+            for _r in all_results:
+                _df_r = _r['df'].copy()
+                _df_r = _df_r.reset_index(drop=True)
+                _df_r['session_num'] = np.arange(1, len(_df_r) + 1, dtype=float)
+                _df_r['mouse']       = _r['mouse']
+                _df_r['condition']   = _r['starting_condition']
+                _raw_lk = pd.to_numeric(_df_r['lick_count'], errors='coerce')
+                # log(1+x): defined for x >= 0; negative / NaN → NaN
+                _df_r['log1p_lick'] = np.where(
+                    (_raw_lk >= 0) & _raw_lk.notna(),
+                    np.log1p(_raw_lk.values.astype(float)),
+                    np.nan,
+                )
+                _lk_rows.append(_df_r[['mouse', 'condition', 'session_num', 'log1p_lick']])
+            _df_lk_long = pd.concat(_lk_rows, ignore_index=True).dropna(subset=['log1p_lick'])
+
+            # ── Fit OLS with mouse as fixed-effect blocking factor ────────────
+            _lk_formula = 'log1p_lick ~ C(condition) + session_num + C(condition):session_num + C(mouse)'
+            with _warnings_lk.catch_warnings():
+                _warnings_lk.simplefilter('ignore')
+                _lk_ols = _smf_lk.ols(_lk_formula, data=_df_lk_long).fit()
+
+            _lk_resid  = _lk_ols.resid.values
+            _lk_fitted = _lk_ols.fittedvalues.values
+            _lk_conds  = _df_lk_long['condition'].values
+            _lk_resid_mean = float(np.mean(_lk_resid))
+            _lk_resid_var  = float(_lk_ols.mse_resid)
+            _lk_resid_sd   = float(np.sqrt(_lk_resid_var))
+            _lk_r2         = float(_lk_ols.rsquared)
+            _lk_r2_adj     = float(_lk_ols.rsquared_adj)
+            _lk_y_var      = float(_df_lk_long['log1p_lick'].var(ddof=1))
+            _lk_y_mean     = float(_df_lk_long['log1p_lick'].mean())
+            _lk_unexplained = 1.0 - _lk_r2
+            _lk_snr         = float(np.mean(_lk_fitted)) / _lk_resid_sd if _lk_resid_sd > 0 else np.nan
+
+            # PRESS / predicted R²
+            try:
+                _lk_influence = _lk_ols.get_influence()
+                _lk_hat       = _lk_influence.hat_matrix_diag
+                _lk_press_r   = _lk_resid / (1.0 - np.clip(_lk_hat, None, 0.9999))
+                _lk_press     = float(np.sum(_lk_press_r ** 2))
+                _lk_ss_total  = float(np.sum((_df_lk_long['log1p_lick'].values - _lk_y_mean) ** 2))
+                _lk_r2_pred   = float(1.0 - _lk_press / _lk_ss_total) if _lk_ss_total > 0 else np.nan
+            except Exception:
+                _lk_press, _lk_r2_pred, _lk_hat = np.nan, np.nan, None
+                _lk_influence = None
+
+            # ── Shapiro-Wilk on residuals ─────────────────────────────────────
+            _lk_sw_stat, _lk_sw_p = (_shapiro_lkr(_lk_resid)
+                                      if len(_lk_resid) >= 3 else (np.nan, np.nan))
+
+            # ── Levene's test across condition groups ─────────────────────────
+            _lk_cond_groups = [_lk_resid[_lk_conds == c] for c in np.unique(_lk_conds)
+                               if np.sum(_lk_conds == c) >= 2]
+            if len(_lk_cond_groups) >= 2:
+                _lk_lev_stat, _lk_lev_p = _levene_lkr(*_lk_cond_groups)
+            else:
+                _lk_lev_stat, _lk_lev_p = np.nan, np.nan
+
+            # ── pingouin mixed ANOVA table (optional) ─────────────────────────
+            _lk_pg_text = ''
+            try:
+                import pingouin as _pg_lk
+                _lk_pg_result = _pg_lk.mixed_anova(
+                    data=_df_lk_long, dv='log1p_lick', within='session_num',
+                    between='condition', subject='mouse',
+                )
+                _lk_pg_lines = ['Mixed ANOVA (pingouin):']
+                for _, _row in _lk_pg_result.iterrows():
+                    _src  = _row.get('Source', '')
+                    _f    = _row.get('F', np.nan)
+                    _pval = _row.get('p-unc', np.nan)
+                    _eta  = _row.get('np2', np.nan)
+                    _lk_pg_lines.append(
+                        f"  {_src:<28} F={_f:.3f}  p={_pval:.4f}  \u03b7\u00b2={_eta:.3f}"
+                    )
+                _lk_pg_text = '\n'.join(_lk_pg_lines)
+            except Exception:
+                _lk_pg_text = 'pingouin not available \u2014 ANOVA table omitted'
+
+            # ── Cook's D and leverage ─────────────────────────────────────────
+            _lk_mice_labels   = _df_lk_long['mouse'].values
+            _lk_sess_nums_lbl = _df_lk_long['session_num'].values.astype(int)
+            _lk_obs_labels    = np.array([f'{m}\nS{s}' for m, s in
+                                          zip(_lk_mice_labels, _lk_sess_nums_lbl)])
+            _lk_obs_index     = np.arange(len(_lk_resid))
+            try:
+                _lk_cooks_d  = _lk_influence.cooks_distance[0]
+                _lk_lev_diag = _lk_hat.copy()
+                _lk_n_params = len(_lk_ols.params)
+                _lk_cooks_thresh = 4.0 / max(len(_lk_resid) - _lk_n_params, 1)
+                _lk_lev_thresh   = 2.0 * _lk_n_params / max(len(_lk_resid), 1)
+                _lk_high_cooks   = np.where(_lk_cooks_d > _lk_cooks_thresh)[0]
+                _lk_high_lev     = np.where(_lk_lev_diag > _lk_lev_thresh)[0]
+            except Exception:
+                _lk_cooks_d = _lk_lev_diag = None
+                _lk_cooks_thresh = _lk_lev_thresh = np.nan
+                _lk_high_cooks = _lk_high_lev = np.array([], dtype=int)
+
+            # ── Build figure: 3 rows × 2 cols ────────────────────────────────
+            expl_lick_rm_anova_resid_fig, _lk_axes = plt.subplots(3, 2, figsize=(13, 15))
+            (ax_lkqq, ax_lkrh), (ax_lkrf, ax_lkrs), (ax_lkcd, ax_lklv) = _lk_axes
+
+            # ── Q-Q plot ──────────────────────────────────────────────────────
+            (_lk_qq_osm, _lk_qq_osr), (_lk_qq_slope, _lk_qq_int, _) = _probplot_lkr(_lk_resid, dist='norm')
+            ax_lkqq.plot(_lk_qq_osm, _lk_qq_osr, 'o', color='mediumpurple',
+                         markersize=4, alpha=0.7, label='Residuals')
+            ax_lkqq.plot(
+                [_lk_qq_osm[0], _lk_qq_osm[-1]],
+                [_lk_qq_slope * _lk_qq_osm[0] + _lk_qq_int,
+                 _lk_qq_slope * _lk_qq_osm[-1] + _lk_qq_int],
+                'r-', linewidth=1.5, label='Normal line',
+            )
+            ax_lkqq.set_title('Normal Q-Q Plot of Residuals')
+            ax_lkqq.set_xlabel('Theoretical quantiles')
+            ax_lkqq.set_ylabel('Sample quantiles')
+            ax_lkqq.tick_params(axis='both', direction='in')
+            ax_lkqq.spines['top'].set_visible(False)
+            ax_lkqq.spines['right'].set_visible(False)
+            ax_lkqq.legend(fontsize=8)
+            _lk_sw_label = (f'Shapiro-Wilk: W={_lk_sw_stat:.3f}, p={_lk_sw_p:.4f}\n'
+                            f'{"Normal (p>0.05)" if _lk_sw_p > 0.05 else "Non-normal (p\u22640.05)"}')
+            ax_lkqq.text(0.03, 0.97, _lk_sw_label, transform=ax_lkqq.transAxes,
+                         fontsize=8, va='top', ha='left',
+                         bbox=dict(boxstyle='round,pad=0.3', facecolor='lightyellow',
+                                   edgecolor='gray', alpha=0.8))
+            _lk_formula_label = (
+                'Error terms: \u03b5\u1d62 = y\u1d62 \u2212 \u0177\u1d62\n'
+                'y\u1d62 = log(1 + lick_count, session i)\n'
+                '\u0177\u1d62 = model fitted value\n'
+                'Model: log(1+lick) ~ condition\n'
+                '       + session + condition\u00d7session\n'
+                '       + mouse  (blocking factor)'
+            )
+            ax_lkqq.text(0.97, 0.03, _lk_formula_label, transform=ax_lkqq.transAxes,
+                         fontsize=7.5, va='bottom', ha='right', family='monospace',
+                         bbox=dict(boxstyle='round,pad=0.35', facecolor='#f5f5f5',
+                                   edgecolor='gray', alpha=0.88))
+
+            # ── Residual histogram ────────────────────────────────────────────
+            from scipy.stats import gaussian_kde as _gkde_lkr
+            ax_lkrh.hist(_lk_resid, bins='auto', color='mediumpurple', alpha=0.65,
+                         edgecolor='white', linewidth=0.5, density=True)
+            if len(_lk_resid) >= 3:
+                _lk_kde_x = np.linspace(_lk_resid.min(), _lk_resid.max(), 300)
+                try:
+                    _lk_kde2 = _gkde_lkr(_lk_resid)
+                    ax_lkrh.plot(_lk_kde_x, _lk_kde2(_lk_kde_x), color='indigo',
+                                 linewidth=2, label='KDE')
+                except Exception:
+                    pass
+            ax_lkrh.axvline(0, color='red', linewidth=1.5, linestyle='--', label='Zero')
+            ax_lkrh.axvline(_lk_resid_mean, color='darkorange', linewidth=1.5,
+                            linestyle=':', label=f'Mean={_lk_resid_mean:.3f}')
+            ax_lkrh.set_title('Histogram of Residuals')
+            ax_lkrh.set_xlabel('Residual \u03b5\u1d62  [log(1+count) units]')
+            ax_lkrh.set_ylabel('Density')
+            ax_lkrh.tick_params(axis='both', direction='in')
+            ax_lkrh.spines['top'].set_visible(False)
+            ax_lkrh.spines['right'].set_visible(False)
+            ax_lkrh.legend(fontsize=8)
+            _lk_r2_pred_str = f'{_lk_r2_pred:.4f}' if not np.isnan(_lk_r2_pred) else 'n/a'
+            _lk_stats_box = (
+                f'E[\u03b5]         = {_lk_resid_mean:+.5f}  (\u22480 by OLS)\n'
+                f'Var(\u03b5)  = MSE = {_lk_resid_var:.5f}\n'
+                f'SD(\u03b5)   = RMSE = {_lk_resid_sd:.5f}\n'
+                f'\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\u2015\n'
+                f'Var(Y)         = {_lk_y_var:.5f}\n'
+                f'Var(\u03b5)/Var(Y) = {_lk_unexplained:.4f}  (= 1\u2212R\u00b2)\n'
+                f'R\u00b2             = {_lk_r2:.4f}\n'
+                f'R\u00b2 adj         = {_lk_r2_adj:.4f}\n'
+                f'R\u00b2 pred (PRESS) = {_lk_r2_pred_str}\n'
+                f'SNR (fitted/SD\u03b5) = {_lk_snr:.3f}'
+            )
+            ax_lkrh.text(0.98, 0.98, _lk_stats_box, transform=ax_lkrh.transAxes,
+                         fontsize=7.5, va='top', ha='right', family='monospace',
+                         bbox=dict(boxstyle='round,pad=0.35', facecolor='#f0f4ff',
+                                   edgecolor='steelblue', alpha=0.92))
+
+            # ── Residuals vs Fitted ───────────────────────────────────────────
+            _lk_uniq_conds = np.unique(_lk_conds)
+            _lk_cond_color = {c: _condition_to_color(c) for c in _lk_uniq_conds}
+            for _lkc in _lk_uniq_conds:
+                _lkmask = _lk_conds == _lkc
+                ax_lkrf.scatter(_lk_fitted[_lkmask], _lk_resid[_lkmask],
+                                color=_lk_cond_color[_lkc], alpha=0.5, s=18, label=str(_lkc))
+            ax_lkrf.axhline(0, color='red', linewidth=1.5, linestyle='--')
+            try:
+                from statsmodels.nonparametric.smoothers_lowess import lowess as _lk_lowess
+                _lk_lw = _lk_lowess(_lk_resid, _lk_fitted, frac=0.4)
+                ax_lkrf.plot(_lk_lw[:, 0], _lk_lw[:, 1], color='black',
+                             linewidth=1.5, linestyle='-', label='Lowess')
+            except Exception:
+                pass
+            ax_lkrf.set_title('Residuals vs Fitted Values')
+            ax_lkrf.set_xlabel('Fitted values [log(1+count) units]')
+            ax_lkrf.set_ylabel('Residuals [log(1+count) units]')
+            ax_lkrf.tick_params(axis='both', direction='in')
+            ax_lkrf.spines['top'].set_visible(False)
+            ax_lkrf.spines['right'].set_visible(False)
+            ax_lkrf.legend(fontsize=8, title='Condition')
+
+            # ── Residuals vs session number ───────────────────────────────────
+            _lk_sess_nums = _df_lk_long['session_num'].values
+            ax_lkrs.scatter(_lk_sess_nums, _lk_resid,
+                            color='mediumpurple', alpha=0.4, s=18)
+            ax_lkrs.axhline(0, color='red', linewidth=1.5, linestyle='--')
+            try:
+                _lk_lw2 = _lk_lowess(_lk_resid, _lk_sess_nums, frac=0.4)
+                ax_lkrs.plot(_lk_lw2[:, 0], _lk_lw2[:, 1], color='black',
+                             linewidth=1.5, linestyle='-', label='Lowess')
+                ax_lkrs.legend(fontsize=8)
+            except Exception:
+                pass
+            ax_lkrs.set_title('Residuals vs Session Number\n(check for time-trend)')
+            ax_lkrs.set_xlabel('Session number')
+            ax_lkrs.set_ylabel('Residuals [log(1+count) units]')
+            ax_lkrs.tick_params(axis='both', direction='in')
+            ax_lkrs.spines['top'].set_visible(False)
+            ax_lkrs.spines['right'].set_visible(False)
+
+            # ── Cook's D bar chart ────────────────────────────────────────────
+            if _lk_cooks_d is not None:
+                _lk_cd_colors = np.where(_lk_cooks_d > _lk_cooks_thresh, 'crimson', 'mediumpurple')
+                ax_lkcd.bar(_lk_obs_index, _lk_cooks_d, color=_lk_cd_colors, alpha=0.75, width=0.8)
+                ax_lkcd.axhline(_lk_cooks_thresh, color='crimson', linewidth=1.5,
+                                linestyle='--',
+                                label=f'Threshold 4/(n\u2212p)={_lk_cooks_thresh:.3f}')
+                for _idx in _lk_high_cooks:
+                    ax_lkcd.text(_idx, _lk_cooks_d[_idx] * 1.04, _lk_obs_labels[_idx],
+                                 fontsize=6, ha='center', va='bottom', color='crimson',
+                                 linespacing=1.2)
+                ax_lkcd.set_title(
+                    f"Cook's D per Observation\n"
+                    f"({len(_lk_high_cooks)} flagged > threshold, shown in red)"
+                )
+                ax_lkcd.set_xlabel('Observation index')
+                ax_lkcd.set_ylabel("Cook's D")
+                ax_lkcd.tick_params(axis='both', direction='in')
+                ax_lkcd.spines['top'].set_visible(False)
+                ax_lkcd.spines['right'].set_visible(False)
+                ax_lkcd.legend(fontsize=8)
+            else:
+                ax_lkcd.text(0.5, 0.5, "Cook's D unavailable",
+                             transform=ax_lkcd.transAxes, ha='center', va='center')
+                ax_lkcd.axis('off')
+
+            # ── Leverage vs Cook's D (influence plot) ─────────────────────────
+            if _lk_cooks_d is not None:
+                for _lkc in _lk_uniq_conds:
+                    _lkmask = _lk_conds == _lkc
+                    ax_lklv.scatter(_lk_lev_diag[_lkmask], _lk_cooks_d[_lkmask],
+                                    color=_lk_cond_color[_lkc], alpha=0.6,
+                                    s=20, label=str(_lkc))
+                ax_lklv.axvline(_lk_lev_thresh, color='darkorange', linewidth=1.5,
+                                linestyle='--',
+                                label=f'Leverage 2p/n={_lk_lev_thresh:.3f}')
+                ax_lklv.axhline(_lk_cooks_thresh, color='crimson', linewidth=1.5,
+                                linestyle='--',
+                                label=f"Cook's D 4/(n\u2212p)={_lk_cooks_thresh:.3f}")
+                _lk_both_flag = np.where((_lk_cooks_d > _lk_cooks_thresh) &
+                                         (_lk_lev_diag > _lk_lev_thresh))[0]
+                for _idx in _lk_both_flag:
+                    ax_lklv.annotate(_lk_obs_labels[_idx],
+                                     (_lk_lev_diag[_idx], _lk_cooks_d[_idx]),
+                                     textcoords='offset points', xytext=(4, 4),
+                                     fontsize=6, color='crimson')
+                ax_lklv.set_title(
+                    f'Leverage vs Cook\u2019s D (Influence Plot)\n'
+                    f'High-leverage: {len(_lk_high_lev)} obs  |  '
+                    f'High-influence: {len(_lk_high_cooks)} obs  |  '
+                    f'Both: {len(_lk_both_flag)} obs'
+                )
+                ax_lklv.set_xlabel('Leverage h\u1d62\u1d62')
+                ax_lklv.set_ylabel("Cook's D")
+                ax_lklv.tick_params(axis='both', direction='in')
+                ax_lklv.spines['top'].set_visible(False)
+                ax_lklv.spines['right'].set_visible(False)
+                ax_lklv.legend(fontsize=7, title='Condition', ncol=2)
+            else:
+                ax_lklv.text(0.5, 0.5, 'Leverage unavailable',
+                             transform=ax_lklv.transAxes, ha='center', va='center')
+                ax_lklv.axis('off')
+
+            # ── Suptitle: summary stats ───────────────────────────────────────
+            _lk_n_mice   = _df_lk_long['mouse'].nunique()
+            _lk_n_obs    = len(_df_lk_long)
+            _lk_lev_str  = (f'Levene (across conditions): F={_lk_lev_stat:.3f}, p={_lk_lev_p:.4f}'
+                            if not np.isnan(_lk_lev_p)
+                            else 'Levene: insufficient groups')
+            _lk_summary  = (
+                f'Raw Lick Count RM ANOVA residual diagnostics  |  '
+                f'DV = log(1+lick_count)  |  '
+                f'n={_lk_n_mice} mice, {_lk_n_obs} obs  |  '
+                f'E[\u03b5]={_lk_resid_mean:+.4f} (\u22480)  '
+                f'Var(\u03b5)={_lk_resid_var:.4f}  SD(\u03b5)={_lk_resid_sd:.4f}  '
+                f'Var(\u03b5)/Var(Y)={_lk_unexplained:.3f} (=1\u2212R\u00b2)  '
+                f'R\u00b2={_lk_r2:.3f}  |  {_lk_lev_str}'
+            )
+            expl_lick_rm_anova_resid_fig.suptitle(_lk_summary, fontsize=8.5, y=1.01, wrap=True)
+
+            if _lk_pg_text:
+                expl_lick_rm_anova_resid_fig.text(
+                    0.01, -0.02, _lk_pg_text,
+                    fontsize=7.5, family='monospace', va='top',
+                    transform=expl_lick_rm_anova_resid_fig.transFigure,
+                    bbox=dict(boxstyle='round,pad=0.4', facecolor='#f5f5f5',
+                              edgecolor='gray', alpha=0.9),
+                )
+
+            expl_lick_rm_anova_resid_fig.tight_layout()
+            print('\n\u2500\u2500 Raw Lick Count RM ANOVA Residual Diagnostics \u2500\u2500')
+            print(f'  Formula:          \u03b5\u1d62 = y\u1d62 \u2212 \u0177\u1d62  (observed \u2212 model fitted value)')
+            print(f'  Model DV:         log(1 + lick_count)  [log(1+count) units]')
+            print(f'  N mice:           {_lk_n_mice}')
+            print(f'  N observations:   {_lk_n_obs}')
+            print(f'  E[\u03b5]  (mean):    {_lk_resid_mean:+.6f}  (\u22480 by OLS construction)')
+            print(f'  Var(\u03b5) (MSE):    {_lk_resid_var:.6f}')
+            print(f'  SD(\u03b5)  (RMSE):   {_lk_resid_sd:.6f}')
+            print(f'  Var(Y):           {_lk_y_var:.6f}')
+            print(f'  Var(\u03b5)/Var(Y):   {_lk_unexplained:.4f}  (= 1 \u2212 R\u00b2 = unexplained variance fraction)')
+            print(f'  R\u00b2:              {_lk_r2:.4f}')
+            print(f'  R\u00b2 adj:          {_lk_r2_adj:.4f}')
+            print(f'  R\u00b2 pred (PRESS): {_lk_r2_pred_str}  (leave-one-out; gap vs R\u00b2 indicates overfitting)')
+            print(f'  SNR (\u0177\u0305/SD\u03b5):    {_lk_snr:.4f}')
+            print(f'  Shapiro-Wilk:     W={_lk_sw_stat:.4f}, p={_lk_sw_p:.6f}')
+            print(f'  Levene test:      F={_lk_lev_stat:.4f}, p={_lk_lev_p:.6f}')
+            if _lk_cooks_d is not None:
+                print(f'  Cook\'s D thresh:  {_lk_cooks_thresh:.4f}  (4/(n\u2212p))')
+                print(f'  Leverage thresh:  {_lk_lev_thresh:.4f}  (2p/n)')
+                _lk_flag_strs = [f'{m}(S{s})' for m, s in
+                                 zip(_lk_mice_labels[_lk_high_cooks], _lk_sess_nums_lbl[_lk_high_cooks])]
+                print(f'  High-influence obs (Cook\'s D > thresh): {len(_lk_high_cooks)}'
+                      + (f'  [{", ".join(_lk_flag_strs)}]' if len(_lk_high_cooks) else ''))
+                _lk_lev_strs = [f'{m}(S{s})' for m, s in
+                                zip(_lk_mice_labels[_lk_high_lev], _lk_sess_nums_lbl[_lk_high_lev])]
+                print(f'  High-leverage obs (h\u1d62\u1d62 > thresh):      {len(_lk_high_lev)}'
+                      + (f'  [{", ".join(_lk_lev_strs)}]' if len(_lk_high_lev) else ''))
+            if _lk_pg_text:
+                print(_lk_pg_text)
+
+        except ImportError as _e:
+            print(f'[expl_lick_rm_anova_resid] Missing dependency: {_e}')
+            print('  Install statsmodels: conda install statsmodels')
+        except Exception as _e:
+            print(f'[expl_lick_rm_anova_resid] Error: {_e}')
+
+    # ── Exploratory: average lick rate distribution fit (per-mouse means by cohort) ─
+    # One mean per mouse; grouped by starting_condition.
+    # Goal: assess normality per cohort to decide whether a t-test is appropriate.
+    expl_lick_rate_distfit_fig = None
+    if 'expl_lick_rate_distfit' in selected_plots:
+        try:
+            from scipy.stats import (norm as _norm_lr, probplot as _probplot_lr,
+                                     shapiro as _sw_lr, beta as _beta_lr)
+            from matplotlib.gridspec import GridSpec as _GridSpec_lr
+            import warnings as _warnings_lr
+
+            # ── One mean per mouse, grouped by starting_condition ─────────────
+            _lr_groups = {}
+            for _r in all_results:
+                _df_lr = _r['df']
+                _lc = pd.to_numeric(_df_lr['lick_count'], errors='coerce')
+                _sl = pd.to_numeric(_df_lr['session_length'], errors='coerce')
+                _valid_lr = (_lc >= 0) & (_sl > 0) & _lc.notna() & _sl.notna()
+                _lrv = (_lc[_valid_lr] / _sl[_valid_lr]).values
+                if len(_lrv) > 0:
+                    _cond_lr = _r.get('starting_condition', 'Unknown')
+                    _lr_groups.setdefault(_cond_lr, []).append(float(np.mean(_lrv)))
+
+            _lr_cond_names = sorted(_lr_groups.keys())
+            _n_cg_lr = len(_lr_cond_names)
+            if _n_cg_lr == 0:
+                raise ValueError('No valid lick rate data found')
+
+            # ── Shapiro-Wilk per cohort ────────────────────────────────────────
+            _lr_sw = {}
+            for _cn in _lr_cond_names:
+                _arr = np.array(_lr_groups[_cn])
+                if len(_arr) >= 3:
+                    _w, _p = _sw_lr(_arr)
+                    _lr_sw[_cn] = (float(_w), float(_p), len(_arr))
+                else:
+                    _lr_sw[_cn] = (np.nan, np.nan, len(_arr))
+
+            # ── Figure layout ─────────────────────────────────────────────────
+            _n_qq_rows_lr = (_n_cg_lr + 1) // 2
+            _n_rows_lr = 1 + 1 + _n_qq_rows_lr + 1  # +1 row for box plot
+            _coh_pal_lr = [plt.cm.tab10(i / max(_n_cg_lr - 1, 1))
+                           for i in range(_n_cg_lr)]
+
+            expl_lick_rate_distfit_fig = plt.figure(figsize=(13, 4.5 * _n_rows_lr))
+            _gs_lr = _GridSpec_lr(_n_rows_lr, 2, figure=expl_lick_rate_distfit_fig,
+                                  hspace=0.60, wspace=0.38)
+            ax_lrhist = expl_lick_rate_distfit_fig.add_subplot(_gs_lr[0, :])
+
+            # [row 0] Overlaid histograms + Normal fit + rug marks
+            _lr_rng = np.random.default_rng(42)
+            for _ci, _cn in enumerate(_lr_cond_names):
+                _arr = np.array(_lr_groups[_cn])
+                _col_lr = _coh_pal_lr[_ci]
+                _sw_lbl_lr = (f'SW p={_lr_sw[_cn][1]:.3f}'
+                              if not np.isnan(_lr_sw[_cn][1]) else 'SW: n<3')
+                _nbins_lr = max(4, len(_arr) // 2 + 1)
+                ax_lrhist.hist(_arr, bins=_nbins_lr, alpha=0.40, color=_col_lr,
+                               density=True, edgecolor='white', linewidth=0.5,
+                               label=f'{_cn}  (n={len(_arr)}, {_sw_lbl_lr})')
+                if len(_arr) >= 3:
+                    _mn_lr = float(np.mean(_arr))
+                    _sdv_lr = float(np.std(_arr, ddof=1))
+                    _xfit_lr = np.linspace(_mn_lr - 4 * _sdv_lr,
+                                           _mn_lr + 4 * _sdv_lr, 300)
+                    ax_lrhist.plot(_xfit_lr, _norm_lr.pdf(_xfit_lr, _mn_lr, _sdv_lr),
+                                   color=_col_lr, linewidth=2.0, linestyle='--')
+                _jit_lr = _lr_rng.uniform(-0.003, 0.003, len(_arr))
+                ax_lrhist.plot(_arr, _jit_lr, '|', color=_col_lr,
+                               markersize=14, markeredgewidth=2.5, alpha=0.75)
+
+            ax_lrhist.set_xlabel('Per-mouse mean lick rate (licks/min)', fontsize=10)
+            ax_lrhist.set_ylabel('Density', fontsize=10)
+            ax_lrhist.set_title(
+                'Per-mouse mean lick rate — distribution by cohort\n'
+                '(each point = one mouse; dashed lines = Normal fit; '
+                'tick marks = individual mice)',
+                fontsize=10,
+            )
+            ax_lrhist.legend(fontsize=8)
+            ax_lrhist.spines['top'].set_visible(False)
+            ax_lrhist.spines['right'].set_visible(False)
+            ax_lrhist.tick_params(axis='both', direction='in')
+
+            # [row 1] Box-and-whisker with 1.5×IQR outlier highlighting
+            ax_lrbox = expl_lick_rate_distfit_fig.add_subplot(_gs_lr[1, :])
+            _bp_data_lr = [np.array(_lr_groups[_cn]) for _cn in _lr_cond_names]
+            _bplot_lr = ax_lrbox.boxplot(
+                _bp_data_lr, labels=_lr_cond_names, patch_artist=True,
+                showfliers=False, widths=0.50,
+                boxprops=dict(linewidth=1.4),
+                whiskerprops=dict(linewidth=1.2, linestyle='--'),
+                capprops=dict(linewidth=1.4),
+                medianprops=dict(color='black', linewidth=2.0),
+            )
+            for _bi, _bpatch in enumerate(_bplot_lr['boxes']):
+                _bc = _coh_pal_lr[_bi]
+                _bpatch.set_facecolor([*_bc[:3], 0.35])
+                _bpatch.set_edgecolor(_bc)
+            _rng_box_lr = np.random.default_rng(1)
+            _outlier_legend_added_lr = False
+            for _bi, _cn in enumerate(_lr_cond_names):
+                _arr_bx = np.array(_lr_groups[_cn])
+                _q1_lr  = float(np.percentile(_arr_bx, 25))
+                _q3_lr  = float(np.percentile(_arr_bx, 75))
+                _iqr_lr = _q3_lr - _q1_lr
+                _lo_lr  = _q1_lr - 1.5 * _iqr_lr
+                _hi_lr  = _q3_lr + 1.5 * _iqr_lr
+                _out_lr = (_arr_bx < _lo_lr) | (_arr_bx > _hi_lr)
+                _jit_lr = _rng_box_lr.uniform(-0.15, 0.15, len(_arr_bx))
+                ax_lrbox.scatter(
+                    np.full(int(np.sum(~_out_lr)), _bi + 1) + _jit_lr[~_out_lr],
+                    _arr_bx[~_out_lr], color=_coh_pal_lr[_bi],
+                    s=40, alpha=0.70, zorder=3,
+                )
+                if _out_lr.any():
+                    ax_lrbox.scatter(
+                        np.full(int(np.sum(_out_lr)), _bi + 1) + _jit_lr[_out_lr],
+                        _arr_bx[_out_lr], color='red', s=80, alpha=0.90,
+                        zorder=4, edgecolors='darkred', linewidths=1.5, marker='D',
+                        label='Outlier (1.5\u00d7IQR)' if not _outlier_legend_added_lr else '',
+                    )
+                    _outlier_legend_added_lr = True
+                    for _ov in _arr_bx[_out_lr]:
+                        ax_lrbox.annotate(
+                            f'{_ov:.3g}', xy=(_bi + 1, _ov),
+                            xytext=(8, 0), textcoords='offset points',
+                            fontsize=7, color='darkred', va='center',
+                        )
+            ax_lrbox.set_xlabel('Cohort', fontsize=10)
+            ax_lrbox.set_ylabel('Per-mouse mean (licks/min)', fontsize=10)
+            ax_lrbox.set_title(
+                'Box-and-whisker \u2014 per-mouse mean lick rate by cohort\n'
+                '(whiskers extend to 1.5\u00d7IQR; \u25c6 red diamonds = outliers beyond fence)',
+                fontsize=10,
+            )
+            _handles_lr, _labels_lr = ax_lrbox.get_legend_handles_labels()
+            if _handles_lr:
+                ax_lrbox.legend(fontsize=8)
+            ax_lrbox.spines['top'].set_visible(False)
+            ax_lrbox.spines['right'].set_visible(False)
+            ax_lrbox.tick_params(axis='both', direction='in')
+
+            # [rows 2+] Per-cohort Normal Q-Q with 95% CI
+            for _ci, _cn in enumerate(_lr_cond_names):
+                _arr = np.array(_lr_groups[_cn])
+                _row_qq_lr = 2 + _ci // 2
+                _col_qq_lr = _ci % 2
+                _ax_qq_lr = expl_lick_rate_distfit_fig.add_subplot(
+                    _gs_lr[_row_qq_lr, _col_qq_lr])
+                _col_lr = _coh_pal_lr[_ci]
+                if len(_arr) >= 3:
+                    (_osm_lr, _osr_lr), (_sl_lr, _int_lr, _) = _probplot_lr(
+                        _arr, dist='norm',
+                    )
+                    _n_qq_lr = len(_arr)
+                    with _warnings_lr.catch_warnings():
+                        _warnings_lr.simplefilter('ignore')
+                        _ci_lo_lr = np.array([
+                            _norm_lr.ppf(_beta_lr.ppf(0.025, _i + 1, _n_qq_lr - _i))
+                            for _i in range(_n_qq_lr)
+                        ])
+                        _ci_hi_lr = np.array([
+                            _norm_lr.ppf(_beta_lr.ppf(0.975, _i + 1, _n_qq_lr - _i))
+                            for _i in range(_n_qq_lr)
+                        ])
+                    _ax_qq_lr.fill_between(
+                        _osm_lr,
+                        _sl_lr * _ci_lo_lr + _int_lr,
+                        _sl_lr * _ci_hi_lr + _int_lr,
+                        color=_col_lr, alpha=0.18, label='95% CI',
+                    )
+                    _ax_qq_lr.plot(_osm_lr, _osr_lr, 'o', color=_col_lr,
+                                   markersize=7, alpha=0.85, label='Mouse mean')
+                    _ax_qq_lr.plot(
+                        [_osm_lr[0], _osm_lr[-1]],
+                        [_sl_lr * _osm_lr[0] + _int_lr,
+                         _sl_lr * _osm_lr[-1] + _int_lr],
+                        'k-', linewidth=1.4, label='Reference line',
+                    )
+                    _w_lr, _p_lr = _lr_sw[_cn][:2]
+                    _verdict_lr = ('Normal (p>0.05) — t-test OK \u2713'
+                                   if _p_lr > 0.05
+                                   else 'Non-normal (p\u22640.05) — consider Mann-Whitney')
+                    _ax_qq_lr.text(
+                        0.04, 0.96,
+                        f'SW: W={_w_lr:.4f}, p={_p_lr:.4f}\n{_verdict_lr}',
+                        transform=_ax_qq_lr.transAxes, fontsize=8, va='top',
+                        bbox=dict(boxstyle='round,pad=0.3',
+                                  facecolor='#e6ffe6' if _p_lr > 0.05 else '#ffe6e6',
+                                  edgecolor=_col_lr, alpha=0.90),
+                    )
+                else:
+                    _ax_qq_lr.text(
+                        0.5, 0.5,
+                        f'n={len(_arr)} — need \u22653\nfor Shapiro-Wilk / Q-Q',
+                        transform=_ax_qq_lr.transAxes,
+                        ha='center', va='center', fontsize=10,
+                    )
+                _ax_qq_lr.set_title(f'{_cn} — Normal Q-Q  (n={len(_arr)} mice)', fontsize=9)
+                _ax_qq_lr.set_xlabel('Theoretical quantiles (Normal)', fontsize=8)
+                _ax_qq_lr.set_ylabel('Observed quantiles', fontsize=8)
+                _ax_qq_lr.legend(fontsize=7)
+                _ax_qq_lr.spines['top'].set_visible(False)
+                _ax_qq_lr.spines['right'].set_visible(False)
+                _ax_qq_lr.tick_params(axis='both', direction='in')
+
+            # Hide unused Q-Q cell when odd cohort count
+            if _n_cg_lr % 2 == 1:
+                _ax_empty_lr = expl_lick_rate_distfit_fig.add_subplot(
+                    _gs_lr[2 + (_n_cg_lr - 1) // 2, 1])
+                _ax_empty_lr.axis('off')
+
+            # [last row] Summary table
+            ax_lrtbl = expl_lick_rate_distfit_fig.add_subplot(_gs_lr[_n_rows_lr - 1, :])
+            ax_lrtbl.axis('off')
+            _tbl_cols_lr = ['Cohort', 'N mice', 'Mean (licks/min)', 'SD', 'SW W', 'SW p',
+                            'T-test normality OK?']
+            _tbl_rows_lr = []
+            for _cn in _lr_cond_names:
+                _arr = np.array(_lr_groups[_cn])
+                _w_lr, _p_lr, _nn_lr = _lr_sw[_cn]
+                _mn_lr = float(np.mean(_arr))
+                _sdv_str_lr = (f'{np.std(_arr, ddof=1):.4g}'
+                               if _nn_lr >= 2 else 'n/a')
+                _ok_lr = ('Yes' if (not np.isnan(_p_lr) and _p_lr > 0.05)
+                          else ('Insufficient n (need \u22653)'
+                                if np.isnan(_p_lr)
+                                else 'No \u2014 consider Mann-Whitney U'))
+                _tbl_rows_lr.append([
+                    _cn, str(_nn_lr), f'{_mn_lr:.4g}', _sdv_str_lr,
+                    f'{_w_lr:.4f}' if not np.isnan(_w_lr) else 'n/a',
+                    f'{_p_lr:.4f}' if not np.isnan(_p_lr) else 'n/a',
+                    _ok_lr,
+                ])
+            _tbl_lr = ax_lrtbl.table(
+                cellText=_tbl_rows_lr, colLabels=_tbl_cols_lr,
+                cellLoc='center', loc='center', bbox=[0, 0, 1, 1],
+            )
+            _tbl_lr.auto_set_font_size(False)
+            _tbl_lr.set_fontsize(9)
+            for (_ri, _ci2), _cell in _tbl_lr.get_celld().items():
+                if _ri == 0:
+                    _cell.set_facecolor('#d0d8e8')
+                    _cell.set_text_props(fontweight='bold')
+                elif _ci2 == 6 and _ri > 0:
+                    _txt2 = _tbl_rows_lr[_ri - 1][6]
+                    _cell.set_facecolor(
+                        '#e6ffe6' if 'Yes' in _txt2
+                        else '#ffe6e6' if 'No' in _txt2
+                        else '#fffff0'
+                    )
+            ax_lrtbl.set_title(
+                'Normality summary — one mean per mouse per cohort '
+                '(Shapiro-Wilk, \u03b1=0.05)',
+                fontsize=9, pad=6,
+            )
+
+            expl_lick_rate_distfit_fig.suptitle(
+                'Average Lick Rate — Per-Mouse Means by Cohort\n'
+                '(N=1 value per mouse = mean across all sessions; '
+                'goal: assess normality for between-cohort t-test)',
+                fontsize=11, y=1.01,
+            )
+            expl_lick_rate_distfit_fig.tight_layout()
+
+            print('\n\u2500\u2500 Average Lick Rate \u2014 Per-Mouse Means by Cohort \u2500\u2500')
+            for _cn in _lr_cond_names:
+                _arr = np.array(_lr_groups[_cn])
+                _w_lr, _p_lr, _nn_lr = _lr_sw[_cn]
+                _sdv_str_lr = f'{np.std(_arr, ddof=1):.4g}' if _nn_lr >= 2 else 'n/a'
+                _w_str_lr   = f'{_w_lr:.4f}' if not np.isnan(_w_lr) else 'n/a'
+                _p_str_lr   = f'{_p_lr:.4f}' if not np.isnan(_p_lr) else 'n/a'
+                print(f'  {_cn}: n={_nn_lr}, mean={np.mean(_arr):.4g}, '
+                      f'SD={_sdv_str_lr}, SW W={_w_str_lr}, p={_p_str_lr}')
+
+        except Exception as _e:
+            import traceback as _tb_lr
+            print(f'[expl_lick_rate_distfit] Error: {_e}')
+            _tb_lr.print_exc()
+            expl_lick_rate_distfit_fig = None
+
+    # ── Exploratory: lick/reward ratio distribution — KDE + normality ────────
+    expl_lick_reward_ratio_distfit_fig = None
+    if 'expl_lick_reward_ratio_distfit' in selected_plots:
+        try:
+            from scipy.stats import (norm as _norm_lrr, probplot as _probplot_lrr,
+                                     shapiro as _sw_lrr, beta as _beta_lrr)
+            from matplotlib.gridspec import GridSpec as _GridSpec_lrr
+            import warnings as _warnings_lrr
+
+            # ── One mean per mouse, grouped by starting_condition ─────────────
+            _lrr_groups = {}
+            for _r in all_results:
+                _df_r = _r['df']
+                _sess_ratios = []
+                for _, _row in _df_r.iterrows():
+                    _h = pd.to_numeric(_row.get('hits_gap_aware', np.nan), errors='coerce')
+                    _l = pd.to_numeric(_row.get('lick_count',      np.nan), errors='coerce')
+                    if pd.notna(_h) and _h > 0 and pd.notna(_l):
+                        _sess_ratios.append(_l / _h)
+                if _sess_ratios:
+                    _cond_lrr = _r.get('starting_condition', 'Unknown')
+                    _lrr_groups.setdefault(_cond_lrr, []).append(float(np.mean(_sess_ratios)))
+
+            _lrr_cond_names = sorted(_lrr_groups.keys())
+            _n_cg_lrr = len(_lrr_cond_names)
+            if _n_cg_lrr == 0:
+                raise ValueError('No valid lick/reward ratio data found')
+
+            # ── Shapiro-Wilk per cohort ────────────────────────────────────────
+            _lrr_sw = {}
+            for _cn in _lrr_cond_names:
+                _arr = np.array(_lrr_groups[_cn])
+                if len(_arr) >= 3:
+                    _w, _p = _sw_lrr(_arr)
+                    _lrr_sw[_cn] = (float(_w), float(_p), len(_arr))
+                else:
+                    _lrr_sw[_cn] = (np.nan, np.nan, len(_arr))
+
+            # ── Figure layout ─────────────────────────────────────────────────
+            # Row 0 (full width): overlaid histograms + Normal fit + rug marks
+            # Rows 1.._n_qq_rows: per-cohort Normal Q-Q plots (2-column grid)
+            # Last row (full width): summary normality table
+            _n_qq_rows_lrr = (_n_cg_lrr + 1) // 2
+            _n_rows_lrr = 1 + 1 + _n_qq_rows_lrr + 1  # +1 row for box plot
+            _coh_pal_lrr = [plt.cm.tab10(i / max(_n_cg_lrr - 1, 1))
+                            for i in range(_n_cg_lrr)]
+
+            expl_lick_reward_ratio_distfit_fig = plt.figure(figsize=(13, 4.5 * _n_rows_lrr))
+            _gs_lrr = _GridSpec_lrr(_n_rows_lrr, 2, figure=expl_lick_reward_ratio_distfit_fig,
+                                    hspace=0.60, wspace=0.38)
+            ax_lrrhist = expl_lick_reward_ratio_distfit_fig.add_subplot(_gs_lrr[0, :])
+
+            # [row 0] Overlaid histograms + Normal fit + rug marks
+            _lrr_rng = np.random.default_rng(42)
+            for _ci, _cn in enumerate(_lrr_cond_names):
+                _arr = np.array(_lrr_groups[_cn])
+                _col_lrr = _coh_pal_lrr[_ci]
+                _sw_lbl_lrr = (f'SW p={_lrr_sw[_cn][1]:.3f}'
+                               if not np.isnan(_lrr_sw[_cn][1]) else 'SW: n<3')
+                _nbins_lrr = max(4, len(_arr) // 2 + 1)
+                ax_lrrhist.hist(_arr, bins=_nbins_lrr, alpha=0.40, color=_col_lrr,
+                                density=True, edgecolor='white', linewidth=0.5,
+                                label=f'{_cn}  (n={len(_arr)}, {_sw_lbl_lrr})')
+                if len(_arr) >= 3:
+                    _mn_lrr = float(np.mean(_arr))
+                    _sdv_lrr = float(np.std(_arr, ddof=1))
+                    _xfit_lrr = np.linspace(_mn_lrr - 4 * _sdv_lrr,
+                                            _mn_lrr + 4 * _sdv_lrr, 300)
+                    ax_lrrhist.plot(_xfit_lrr, _norm_lrr.pdf(_xfit_lrr, _mn_lrr, _sdv_lrr),
+                                    color=_col_lrr, linewidth=2.0, linestyle='--')
+                _jit_lrr = _lrr_rng.uniform(-0.003, 0.003, len(_arr))
+                ax_lrrhist.plot(_arr, _jit_lrr, '|', color=_col_lrr,
+                                markersize=14, markeredgewidth=2.5, alpha=0.75)
+
+            ax_lrrhist.set_xlabel('Per-mouse mean lick / reward ratio', fontsize=10)
+            ax_lrrhist.set_ylabel('Density', fontsize=10)
+            ax_lrrhist.set_title(
+                'Per-mouse mean lick/reward ratio — distribution by cohort\n'
+                '(each point = one mouse; dashed lines = Normal fit; '
+                'tick marks = individual mice)',
+                fontsize=10,
+            )
+            ax_lrrhist.legend(fontsize=8)
+            ax_lrrhist.spines['top'].set_visible(False)
+            ax_lrrhist.spines['right'].set_visible(False)
+            ax_lrrhist.tick_params(axis='both', direction='in')
+
+            # [row 1] Box-and-whisker with 1.5×IQR outlier highlighting
+            ax_lrrbox = expl_lick_reward_ratio_distfit_fig.add_subplot(_gs_lrr[1, :])
+            _bp_data_lrr = [np.array(_lrr_groups[_cn]) for _cn in _lrr_cond_names]
+            _bplot_lrr = ax_lrrbox.boxplot(
+                _bp_data_lrr, labels=_lrr_cond_names, patch_artist=True,
+                showfliers=False, widths=0.50,
+                boxprops=dict(linewidth=1.4),
+                whiskerprops=dict(linewidth=1.2, linestyle='--'),
+                capprops=dict(linewidth=1.4),
+                medianprops=dict(color='black', linewidth=2.0),
+            )
+            for _bi, _bpatch in enumerate(_bplot_lrr['boxes']):
+                _bc = _coh_pal_lrr[_bi]
+                _bpatch.set_facecolor([*_bc[:3], 0.35])
+                _bpatch.set_edgecolor(_bc)
+            _rng_box_lrr = np.random.default_rng(1)
+            _outlier_legend_added_lrr = False
+            for _bi, _cn in enumerate(_lrr_cond_names):
+                _arr_bx = np.array(_lrr_groups[_cn])
+                _q1_lrr  = float(np.percentile(_arr_bx, 25))
+                _q3_lrr  = float(np.percentile(_arr_bx, 75))
+                _iqr_lrr = _q3_lrr - _q1_lrr
+                _lo_lrr  = _q1_lrr - 1.5 * _iqr_lrr
+                _hi_lrr  = _q3_lrr + 1.5 * _iqr_lrr
+                _out_lrr = (_arr_bx < _lo_lrr) | (_arr_bx > _hi_lrr)
+                _jit_lrr = _rng_box_lrr.uniform(-0.15, 0.15, len(_arr_bx))
+                ax_lrrbox.scatter(
+                    np.full(int(np.sum(~_out_lrr)), _bi + 1) + _jit_lrr[~_out_lrr],
+                    _arr_bx[~_out_lrr], color=_coh_pal_lrr[_bi],
+                    s=40, alpha=0.70, zorder=3,
+                )
+                if _out_lrr.any():
+                    ax_lrrbox.scatter(
+                        np.full(int(np.sum(_out_lrr)), _bi + 1) + _jit_lrr[_out_lrr],
+                        _arr_bx[_out_lrr], color='red', s=80, alpha=0.90,
+                        zorder=4, edgecolors='darkred', linewidths=1.5, marker='D',
+                        label='Outlier (1.5\u00d7IQR)' if not _outlier_legend_added_lrr else '',
+                    )
+                    _outlier_legend_added_lrr = True
+                    for _ov in _arr_bx[_out_lrr]:
+                        ax_lrrbox.annotate(
+                            f'{_ov:.3g}', xy=(_bi + 1, _ov),
+                            xytext=(8, 0), textcoords='offset points',
+                            fontsize=7, color='darkred', va='center',
+                        )
+            ax_lrrbox.set_xlabel('Cohort', fontsize=10)
+            ax_lrrbox.set_ylabel('Per-mouse mean (licks/reward)', fontsize=10)
+            ax_lrrbox.set_title(
+                'Box-and-whisker \u2014 per-mouse mean lick/reward ratio by cohort\n'
+                '(whiskers extend to 1.5\u00d7IQR; \u25c6 red diamonds = outliers beyond fence)',
+                fontsize=10,
+            )
+            _handles_lrr, _labels_lrr = ax_lrrbox.get_legend_handles_labels()
+            if _handles_lrr:
+                ax_lrrbox.legend(fontsize=8)
+            ax_lrrbox.spines['top'].set_visible(False)
+            ax_lrrbox.spines['right'].set_visible(False)
+            ax_lrrbox.tick_params(axis='both', direction='in')
+
+            # [rows 2+] Per-cohort Normal Q-Q with 95% CI
+            for _ci, _cn in enumerate(_lrr_cond_names):
+                _arr = np.array(_lrr_groups[_cn])
+                _row_qq = 2 + _ci // 2
+                _col_qq = _ci % 2
+                _ax_qq = expl_lick_reward_ratio_distfit_fig.add_subplot(_gs_lrr[_row_qq, _col_qq])
+                _col_lrr = _coh_pal_lrr[_ci]
+                if len(_arr) >= 3:
+                    (_osm_lrr, _osr_lrr), (_sl_lrr, _int_lrr, _) = _probplot_lrr(
+                        _arr, dist='norm',
+                    )
+                    _n_qq_lrr = len(_arr)
+                    with _warnings_lrr.catch_warnings():
+                        _warnings_lrr.simplefilter('ignore')
+                        _ci_lo_lrr = np.array([
+                            _norm_lrr.ppf(_beta_lrr.ppf(0.025, _i + 1, _n_qq_lrr - _i))
+                            for _i in range(_n_qq_lrr)
+                        ])
+                        _ci_hi_lrr = np.array([
+                            _norm_lrr.ppf(_beta_lrr.ppf(0.975, _i + 1, _n_qq_lrr - _i))
+                            for _i in range(_n_qq_lrr)
+                        ])
+                    _ax_qq.fill_between(
+                        _osm_lrr,
+                        _sl_lrr * _ci_lo_lrr + _int_lrr,
+                        _sl_lrr * _ci_hi_lrr + _int_lrr,
+                        color=_col_lrr, alpha=0.18, label='95% CI',
+                    )
+                    _ax_qq.plot(_osm_lrr, _osr_lrr, 'o', color=_col_lrr,
+                                markersize=7, alpha=0.85, label='Mouse mean')
+                    _ax_qq.plot(
+                        [_osm_lrr[0], _osm_lrr[-1]],
+                        [_sl_lrr * _osm_lrr[0] + _int_lrr,
+                         _sl_lrr * _osm_lrr[-1] + _int_lrr],
+                        'k-', linewidth=1.4, label='Reference line',
+                    )
+                    _w_lrr, _p_lrr = _lrr_sw[_cn][:2]
+                    _verdict_lrr = ('Normal (p>0.05) \u2014 t-test OK \u2713'
+                                    if _p_lrr > 0.05
+                                    else 'Non-normal (p\u22640.05) \u2014 consider Mann-Whitney')
+                    _ax_qq.text(
+                        0.04, 0.96,
+                        f'SW: W={_w_lrr:.4f}, p={_p_lrr:.4f}\n{_verdict_lrr}',
+                        transform=_ax_qq.transAxes, fontsize=8, va='top',
+                        bbox=dict(boxstyle='round,pad=0.3',
+                                  facecolor='#e6ffe6' if _p_lrr > 0.05 else '#ffe6e6',
+                                  edgecolor=_col_lrr, alpha=0.90),
+                    )
+                else:
+                    _ax_qq.text(
+                        0.5, 0.5,
+                        f'n={len(_arr)} \u2014 need \u22653\nfor Shapiro-Wilk / Q-Q',
+                        transform=_ax_qq.transAxes,
+                        ha='center', va='center', fontsize=10,
+                    )
+                _ax_qq.set_title(f'{_cn} \u2014 Normal Q-Q  (n={len(_arr)} mice)', fontsize=9)
+                _ax_qq.set_xlabel('Theoretical quantiles (Normal)', fontsize=8)
+                _ax_qq.set_ylabel('Observed quantiles', fontsize=8)
+                _ax_qq.legend(fontsize=7)
+                _ax_qq.spines['top'].set_visible(False)
+                _ax_qq.spines['right'].set_visible(False)
+                _ax_qq.tick_params(axis='both', direction='in')
+
+            # Hide unused Q-Q cell when odd cohort count
+            if _n_cg_lrr % 2 == 1:
+                _ax_empty_lrr = expl_lick_reward_ratio_distfit_fig.add_subplot(
+                    _gs_lrr[2 + (_n_cg_lrr - 1) // 2, 1])
+                _ax_empty_lrr.axis('off')
+
+            # [last row] Summary table
+            ax_lrrtbl = expl_lick_reward_ratio_distfit_fig.add_subplot(_gs_lrr[_n_rows_lrr - 1, :])
+            ax_lrrtbl.axis('off')
+            _tbl_cols_lrr = ['Cohort', 'N mice', 'Mean (licks/reward)', 'SD',
+                             'SW W', 'SW p', 'T-test normality OK?']
+            _tbl_rows_lrr = []
+            for _cn in _lrr_cond_names:
+                _arr = np.array(_lrr_groups[_cn])
+                _w_lrr, _p_lrr, _nn_lrr = _lrr_sw[_cn]
+                _mn_lrr = float(np.mean(_arr))
+                _sdv_str = (f'{np.std(_arr, ddof=1):.4g}'
+                            if _nn_lrr >= 2 else 'n/a')
+                _ok_lrr = ('Yes' if (not np.isnan(_p_lrr) and _p_lrr > 0.05)
+                           else ('Insufficient n (need \u22653)'
+                                 if np.isnan(_p_lrr)
+                                 else 'No \u2014 consider Mann-Whitney U'))
+                _tbl_rows_lrr.append([
+                    _cn, str(_nn_lrr), f'{_mn_lrr:.4g}', _sdv_str,
+                    f'{_w_lrr:.4f}' if not np.isnan(_w_lrr) else 'n/a',
+                    f'{_p_lrr:.4f}' if not np.isnan(_p_lrr) else 'n/a',
+                    _ok_lrr,
+                ])
+            _tbl_lrr = ax_lrrtbl.table(
+                cellText=_tbl_rows_lrr, colLabels=_tbl_cols_lrr,
+                cellLoc='center', loc='center', bbox=[0, 0, 1, 1],
+            )
+            _tbl_lrr.auto_set_font_size(False)
+            _tbl_lrr.set_fontsize(9)
+            for (_ri, _ci2), _cell in _tbl_lrr.get_celld().items():
+                if _ri == 0:
+                    _cell.set_facecolor('#d0d8e8')
+                    _cell.set_text_props(fontweight='bold')
+                elif _ci2 == 6 and _ri > 0:
+                    _txt2 = _tbl_rows_lrr[_ri - 1][6]
+                    _cell.set_facecolor(
+                        '#e6ffe6' if 'Yes' in _txt2
+                        else '#ffe6e6' if 'No' in _txt2
+                        else '#fffff0'
+                    )
+            ax_lrrtbl.set_title(
+                'Normality summary \u2014 one mean per mouse per cohort '
+                '(Shapiro-Wilk, \u03b1=0.05)',
+                fontsize=9, pad=6,
+            )
+
+            expl_lick_reward_ratio_distfit_fig.suptitle(
+                'Lick / Reward Ratio \u2014 Per-Mouse Means by Cohort\n'
+                '(N=1 value per mouse = mean across all sessions with rewards > 0; '
+                'goal: assess normality for between-cohort t-test)',
+                fontsize=11, y=1.01,
+            )
+            expl_lick_reward_ratio_distfit_fig.tight_layout()
+
+            print('\n\u2500\u2500 Lick/Reward Ratio \u2014 Per-Mouse Means by Cohort \u2500\u2500')
+            for _cn in _lrr_cond_names:
+                _arr = np.array(_lrr_groups[_cn])
+                _w_lrr, _p_lrr, _nn_lrr = _lrr_sw[_cn]
+                _sdv_str = f'{np.std(_arr, ddof=1):.4g}' if _nn_lrr >= 2 else 'n/a'
+                _w_str   = f'{_w_lrr:.4f}' if not np.isnan(_w_lrr) else 'n/a'
+                _p_str   = f'{_p_lrr:.4f}' if not np.isnan(_p_lrr) else 'n/a'
+                print(f'  {_cn}: n={_nn_lrr}, mean={np.mean(_arr):.4g}, '
+                      f'SD={_sdv_str}, SW W={_w_str}, p={_p_str}')
+
+        except Exception as _e:
+            import traceback as _tb_lrr
+            print(f'[expl_lick_reward_ratio_distfit] Error: {_e}')
+            _tb_lrr.print_exc()
+            expl_lick_reward_ratio_distfit_fig = None
 
     # Create collapsed condition bar plot for bout count
     condition_bout_count_bar_fig = None
@@ -4025,13 +11255,12 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             mean_bc = float(np.mean(mouse_bcs))
             sem_bc  = float(np.std(mouse_bcs, ddof=1) / np.sqrt(len(mouse_bcs))) if len(mouse_bcs) > 1 else 0.0
             color = condition_color_map[condition]
-            ax_bcbar.bar(ci, mean_bc, width=0.5, color=color, alpha=0.8,
-                         yerr=sem_bc, capsize=7, error_kw={'elinewidth': 1.5, 'capthick': 1.5})
+            ax_bcbar.bar(ci, mean_bc, width=0.5, color=color, alpha=0.7,
+                         yerr=sem_bc, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
             jitter = (rng_bcbar.random(len(mouse_bcs)) - 0.5) * 0.22
-            for j, (_, bc_val) in enumerate(entries):
-                ax_bcbar.plot(ci + jitter[j], bc_val, 'o',
-                              color='white', markeredgecolor=color,
-                              markeredgewidth=1.8, markersize=7, zorder=3)
+            ax_bcbar.scatter(ci + jitter, mouse_bcs,
+                             color=color, edgecolors='black',
+                             linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
 
         ax_bcbar.set_xticks(x_pos_bcbar)
         ax_bcbar.set_xticklabels(conditions_sorted_bcbar)
@@ -4068,13 +11297,12 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             mean_v = float(np.mean(mouse_vals))
             sem_v  = float(np.std(mouse_vals, ddof=1) / np.sqrt(len(mouse_vals))) if len(mouse_vals) > 1 else 0.0
             color = condition_color_map[condition]
-            ax_basbar.bar(ci, mean_v, width=0.5, color=color, alpha=0.8,
-                          yerr=sem_v, capsize=7, error_kw={'elinewidth': 1.5, 'capthick': 1.5})
+            ax_basbar.bar(ci, mean_v, width=0.5, color=color, alpha=0.7,
+                          yerr=sem_v, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
             jitter = (rng_basbar.random(len(mouse_vals)) - 0.5) * 0.22
-            for j, (_, val) in enumerate(entries):
-                ax_basbar.plot(ci + jitter[j], val, 'o',
-                               color='white', markeredgecolor=color,
-                               markeredgewidth=1.8, markersize=7, zorder=3)
+            ax_basbar.scatter(ci + jitter, mouse_vals,
+                              color=color, edgecolors='black',
+                              linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
         ax_basbar.set_xticks(x_pos_basbar)
         ax_basbar.set_xticklabels(conditions_sorted_basbar)
         ax_basbar.set_title('Average Speed per Locomotion Bout by Starting Condition\n(collapsed across all sessions)')
@@ -4089,7 +11317,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     # Create collapsed condition bar plot for average distance per bout
     condition_bout_avg_dist_bar_fig = None
     if 'condition_bout_avg_dist_bar' in selected_plots:
-        condition_bout_avg_dist_bar_fig, ax_badbar = plt.subplots(figsize=(8, 6))
+        condition_bout_avg_dist_bar_fig, ax_badbar = plt.subplots(figsize=(plt.rcParams['figure.figsize']))
 
         condition_mouse_bad: dict[str, list] = {}
         for result in all_results:
@@ -4111,13 +11339,12 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             mean_v = float(np.mean(mouse_vals))
             sem_v  = float(np.std(mouse_vals, ddof=1) / np.sqrt(len(mouse_vals))) if len(mouse_vals) > 1 else 0.0
             color = condition_color_map[condition]
-            ax_badbar.bar(ci, mean_v, width=0.5, color=color, alpha=0.8,
-                          yerr=sem_v, capsize=7, error_kw={'elinewidth': 1.5, 'capthick': 1.5})
+            ax_badbar.bar(ci, mean_v, width=0.5, color=color, alpha=0.7,
+                          yerr=sem_v, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
             jitter = (rng_badbar.random(len(mouse_vals)) - 0.5) * 0.22
-            for j, (_, val) in enumerate(entries):
-                ax_badbar.plot(ci + jitter[j], val, 'o',
-                               color='white', markeredgecolor=color,
-                               markeredgewidth=1.8, markersize=7, zorder=3)
+            ax_badbar.scatter(ci + jitter, mouse_vals,
+                              color=color, edgecolors='black',
+                              linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
         ax_badbar.set_xticks(x_pos_badbar)
         ax_badbar.set_xticklabels(conditions_sorted_badbar)
         ax_badbar.set_title('Average Distance per Locomotion Bout by Starting Condition\n(collapsed across all sessions)')
@@ -4140,8 +11367,8 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             df_r = result['df']
             session_lpms = []
             for _, row in df_r.iterrows():
-                if pd.notna(row['session_length']) and row['session_length'] > 0 and pd.notna(row['lick_count']):
-                    session_lpms.append(row['lick_count'] / row['session_length'])
+                if pd.notna(row['valid_session_length']) and row['valid_session_length'] > 0 and pd.notna(row['lick_count']):
+                    session_lpms.append(row['lick_count'] / row['valid_session_length'])
             if session_lpms:
                 if condition not in condition_mouse_lpms:
                     condition_mouse_lpms[condition] = []
@@ -4157,13 +11384,12 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             mean_lpm = float(np.mean(mouse_lpms))
             sem_lpm  = float(np.std(mouse_lpms, ddof=1) / np.sqrt(len(mouse_lpms))) if len(mouse_lpms) > 1 else 0.0
             color = condition_color_map[condition]
-            ax_lbar.bar(ci, mean_lpm, width=0.5, color=color, alpha=0.8,
-                        yerr=sem_lpm, capsize=7, error_kw={'elinewidth': 1.5, 'capthick': 1.5})
+            ax_lbar.bar(ci, mean_lpm, width=0.5, color=color, alpha=0.7,
+                        yerr=sem_lpm, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
             jitter = (rng_lbar.random(len(mouse_lpms)) - 0.5) * 0.22
-            for j, (mouse_name_lbar, lpm_val) in enumerate(entries):
-                ax_lbar.plot(ci + jitter[j], lpm_val, 'o',
-                             color='white', markeredgecolor=color,
-                             markeredgewidth=1.8, markersize=7, zorder=3)
+            ax_lbar.scatter(ci + jitter, mouse_lpms,
+                            color=color, edgecolors='black',
+                            linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
 
         ax_lbar.set_xticks(x_pos_lbar)
         ax_lbar.set_xticklabels(conditions_sorted_lbar)
@@ -4179,7 +11405,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     # Create collapsed condition bar plot for average distance per session (mm → m)
     condition_distance_bar_fig = None
     if 'condition_distance_bar' in selected_plots:
-        condition_distance_bar_fig, ax_dbar = plt.subplots(figsize=(8, 6))
+        condition_distance_bar_fig, ax_dbar = plt.subplots(figsize=(plt.rcParams['figure.figsize']))
 
         condition_mouse_dist_avg: dict[str, list] = {}
         for result in all_results:
@@ -4202,24 +11428,68 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             mean_d = float(np.mean(mouse_dists))
             sem_d  = float(np.std(mouse_dists, ddof=1) / np.sqrt(len(mouse_dists))) if len(mouse_dists) > 1 else 0.0
             color = condition_color_map[condition]
-            ax_dbar.bar(ci, mean_d, width=0.5, color=color, alpha=0.8,
-                        yerr=sem_d, capsize=7, error_kw={'elinewidth': 1.5, 'capthick': 1.5})
+            ax_dbar.bar(ci, mean_d, width=0.5, color=color, alpha=0.7,
+                        yerr=sem_d, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
             jitter = (rng_dbar.random(len(mouse_dists)) - 0.5) * 0.22
-            for j, (_, dist_val) in enumerate(entries):
-                ax_dbar.plot(ci + jitter[j], dist_val, 'o',
-                             color='white', markeredgecolor=color,
-                             markeredgewidth=1.8, markersize=7, zorder=3)
+            ax_dbar.scatter(ci + jitter, mouse_dists,
+                            color=color, edgecolors='black',
+                            linewidths=1.0, s=plt.rcParams['lines.markersize']**2, zorder=3)
 
         ax_dbar.set_xticks(x_pos_dbar)
         ax_dbar.set_xticklabels(conditions_sorted_dbar)
-        ax_dbar.set_title('Average Distance Per Session by Starting Condition\n(collapsed across all sessions)')
         ax_dbar.set_xlabel('Starting Condition')
         ax_dbar.set_ylabel('Average Distance per Session (m, Mean \u00b1 SEM)')
         ax_dbar.set_ylim(bottom=0)
         ax_dbar.tick_params(axis='both', direction='in')
         ax_dbar.spines['top'].set_visible(False)
         ax_dbar.spines['right'].set_visible(False)
+
+        # ── Mann-Whitney U pairwise significance brackets ────────────────────
+        import itertools as _it_dbar
+        from scipy.stats import mannwhitneyu as _mwu_dbar
+        _dbar_pairs = []
+        for (_sc1, _sc2) in _it_dbar.combinations(conditions_sorted_dbar, 2):
+            _dv1 = np.array([v for _, v in condition_mouse_dist_avg[_sc1]])
+            _dv2 = np.array([v for _, v in condition_mouse_dist_avg[_sc2]])
+            if len(_dv1) >= 2 and len(_dv2) >= 2:
+                _dstat, _dp = _mwu_dbar(_dv1, _dv2, alternative='two-sided')
+                _dbar_pairs.append((_sc1, _sc2, float(_dstat), float(_dp)))
+                print(f'  [AVG DISTANCE PER SESSION] {_sc1} vs {_sc2}: U={_dstat:.1f}, p={_dp:.4f}')
+
+        if _dbar_pairs:
+            _all_ddist_vals = [v for entries in condition_mouse_dist_avg.values() for _, v in entries]
+            _dbar_ymax  = max(float(np.nanmax(_all_ddist_vals)),
+                              float(ax_dbar.get_ylim()[1]))
+            _dbar_step  = _dbar_ymax * 0.12
+            for _bk_idx, (_sc1, _sc2, _ds, _dp) in enumerate(_dbar_pairs):
+                _bx1  = conditions_sorted_dbar.index(_sc1)
+                _bx2  = conditions_sorted_dbar.index(_sc2)
+                _bk_y = _dbar_ymax + _dbar_step * (_bk_idx + 1)
+                ax_dbar.plot(
+                    [_bx1, _bx1, _bx2, _bx2],
+                    [_bk_y - _dbar_step * 0.2, _bk_y,
+                     _bk_y, _bk_y - _dbar_step * 0.2],
+                    color='black', linewidth=1.2)
+                _bsig = _fmt_p(_dp)
+                ax_dbar.text((_bx1 + _bx2) / 2.0,
+                             _bk_y + _dbar_step * 0.05,
+                             _bsig, ha='center', va='bottom', fontsize=9)
+            ax_dbar.set_ylim(
+                bottom=0,
+                top=_dbar_ymax + _dbar_step * (len(_dbar_pairs) + 1.8))
+
+        ax_dbar.set_title(
+            'Average Distance Per Session by Starting Condition\n'
+            '(collapsed across all sessions; Mann-Whitney U test)')
         condition_distance_bar_fig.tight_layout()
+        _write_mwu_report(
+            output_dir, 'condition_distance_bar',
+            'Average Distance per Session (m)',
+            [(_sc1, _sc2,
+              [v for _, v in condition_mouse_dist_avg[_sc1]],
+              [v for _, v in condition_mouse_dist_avg[_sc2]])
+             for (_sc1, _sc2, _, _) in _dbar_pairs],
+        )
 
     # Create collapsed condition bar plot for total distance (sum across all sessions, mm → m)
     total_distance_bar_fig = None
@@ -4247,24 +11517,68 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             mean_t = float(np.mean(mouse_totals))
             sem_t  = float(np.std(mouse_totals, ddof=1) / np.sqrt(len(mouse_totals))) if len(mouse_totals) > 1 else 0.0
             color = condition_color_map[condition]
-            ax_tbar.bar(ci, mean_t, width=0.5, color=color, alpha=0.8,
-                        yerr=sem_t, capsize=7, error_kw={'elinewidth': 1.5, 'capthick': 1.5})
+            ax_tbar.bar(ci, mean_t, width=0.5, color=color, alpha=0.7,
+                        yerr=sem_t, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
             jitter = (rng_tbar.random(len(mouse_totals)) - 0.5) * 0.22
-            for j, (_, total_val) in enumerate(entries):
-                ax_tbar.plot(ci + jitter[j], total_val, 'o',
-                             color='white', markeredgecolor=color,
-                             markeredgewidth=1.8, markersize=7, zorder=3)
+            ax_tbar.scatter(ci + jitter, mouse_totals,
+                            color=color, edgecolors='black',
+                            linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
 
         ax_tbar.set_xticks(x_pos_tbar)
         ax_tbar.set_xticklabels(conditions_sorted_tbar)
-        ax_tbar.set_title('Total Distance Traveled per Mouse by Starting Condition\n(summed across all sessions)')
         ax_tbar.set_xlabel('Starting Condition')
         ax_tbar.set_ylabel('Total Distance (m, Mean \u00b1 SEM)')
         ax_tbar.set_ylim(bottom=0)
         ax_tbar.tick_params(axis='both', direction='in')
         ax_tbar.spines['top'].set_visible(False)
         ax_tbar.spines['right'].set_visible(False)
+
+        # ── Mann-Whitney U pairwise significance brackets ────────────────────
+        import itertools as _it_tbar
+        from scipy.stats import mannwhitneyu as _mwu_tbar
+        _tbar_pairs = []
+        for (_sc1, _sc2) in _it_tbar.combinations(conditions_sorted_tbar, 2):
+            _tv1 = np.array([v for _, v in condition_mouse_dist_total[_sc1]])
+            _tv2 = np.array([v for _, v in condition_mouse_dist_total[_sc2]])
+            if len(_tv1) >= 2 and len(_tv2) >= 2:
+                _tstat, _tp = _mwu_tbar(_tv1, _tv2, alternative='two-sided')
+                _tbar_pairs.append((_sc1, _sc2, float(_tstat), float(_tp)))
+                print(f'  [TOTAL DISTANCE] {_sc1} vs {_sc2}: U={_tstat:.1f}, p={_tp:.4f}')
+
+        if _tbar_pairs:
+            _all_tdist_vals = [v for entries in condition_mouse_dist_total.values() for _, v in entries]
+            _tbar_ymax  = max(float(np.nanmax(_all_tdist_vals)),
+                              float(ax_tbar.get_ylim()[1]))
+            _tbar_step  = _tbar_ymax * 0.12
+            for _bk_idx, (_sc1, _sc2, _ts, _tp) in enumerate(_tbar_pairs):
+                _bx1  = conditions_sorted_tbar.index(_sc1)
+                _bx2  = conditions_sorted_tbar.index(_sc2)
+                _bk_y = _tbar_ymax + _tbar_step * (_bk_idx + 1)
+                ax_tbar.plot(
+                    [_bx1, _bx1, _bx2, _bx2],
+                    [_bk_y - _tbar_step * 0.2, _bk_y,
+                     _bk_y, _bk_y - _tbar_step * 0.2],
+                    color='black', linewidth=1.2)
+                _bsig = _fmt_p(_tp)
+                ax_tbar.text((_bx1 + _bx2) / 2.0,
+                             _bk_y + _tbar_step * 0.05,
+                             _bsig, ha='center', va='bottom', fontsize=9)
+            ax_tbar.set_ylim(
+                bottom=0,
+                top=_tbar_ymax + _tbar_step * (len(_tbar_pairs) + 1.8))
+
+        ax_tbar.set_title(
+            'Total Distance Traveled per Mouse by Starting Condition\n'
+            '(summed across all sessions; Mann-Whitney U test)')
         total_distance_bar_fig.tight_layout()
+        _write_mwu_report(
+            output_dir, 'total_distance_bar',
+            'Total Distance per Mouse (m)',
+            [(_sc1, _sc2,
+              [v for _, v in condition_mouse_dist_total[_sc1]],
+              [v for _, v in condition_mouse_dist_total[_sc2]])
+             for (_sc1, _sc2, _, _) in _tbar_pairs],
+        )
 
     # ── Behavioral epoch plots ────────────────────────────────────────────────
     epoch_speed_per_mouse_fig            = epoch_speed_cond_fig            = None
@@ -4283,6 +11597,8 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     epoch_speed_early_ev_cond_fig      = epoch_speed_late_ev_cond_fig      = None
     epoch_cap_early_ev_per_mouse_fig   = epoch_cap_late_ev_per_mouse_fig   = None
     epoch_cap_early_ev_cond_fig        = epoch_cap_late_ev_cond_fig        = None
+    epoch_speed_early_ev_cond_clean_fig = epoch_speed_late_ev_cond_clean_fig = None
+    epoch_cap_early_ev_cond_clean_fig   = epoch_cap_late_ev_cond_clean_fig   = None
     punish_speed_per_mouse_fig         = punish_speed_cond_fig         = None
     punish_cap_per_mouse_fig           = punish_cap_cond_fig           = None
     punish_speed_sess_per_mouse_fig    = punish_speed_sess_cond_fig    = None
@@ -4293,17 +11609,85 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     epoch_cap_sess_sex_per_mouse_fig    = epoch_cap_sess_sex_fig    = None
     epoch_punish_speed_sess_sex_per_mouse_fig = epoch_punish_speed_sess_sex_fig = None
     epoch_punish_cap_sess_sex_per_mouse_fig   = epoch_punish_cap_sess_sex_fig   = None
-    _epoch_keys = {'epoch_reward_speed', 'epoch_reward_cap',
+    epoch_reward_speed_pre_post_fig = None
+    epoch_reward_speed_diff_fig = None
+    epoch_reward_cap_pre_post_fig = None
+    epoch_reward_cap_diff_fig = None
+    epoch_reward_speed_pre_post_entry_fig = None
+    epoch_reward_speed_diff_entry_fig = None
+    epoch_reward_speed_pre_post_entry_1s_fig = None
+    epoch_reward_speed_diff_entry_1s_fig = None
+    epoch_reward_speed_diff_entry_2s_fig = None
+    epoch_reward_lick_count_sess_per_mouse_fig = epoch_reward_lick_count_sess_cond_fig = None
+    epoch_reward_lick_count_sess_cond_clean_fig = None
+    epoch_reward_lick_diff_entry_065s_fig = None
+    epoch_punish_lick_count_sess_per_mouse_fig = epoch_punish_lick_count_sess_cond_fig = None
+    epoch_punish_lick_count_sess_cond_clean_fig = None
+    epoch_punish_speed_pre_post_fig = None
+    epoch_punish_speed_diff_fig = None
+    epoch_punish_speed_pre_post_entry_fig = None
+    epoch_punish_speed_diff_entry_fig = None
+    epoch_punish_speed_diff_entry_2s_fig = None
+    epoch_punish_cap_pre_post_fig = None
+    epoch_punish_cap_diff_fig = None
+    epoch_punish_cap_pre_post_entry_fig = None
+    epoch_punish_cap_diff_entry_fig = None
+    epoch_del_speed_per_mouse_fig = epoch_del_speed_cond_fig = None
+    epoch_del_cap_per_mouse_fig   = epoch_del_cap_cond_fig   = None
+    epoch_del_lick_per_mouse_fig  = epoch_del_lick_cond_fig  = None
+    epoch_del_cap_diff_entry_fig  = None
+    epoch_del_cap_diff_065s_fig   = None
+    epoch_del_lick_diff_065s_fig  = None
+    condition_shuffle_zscore_fig     = None
+    condition_shuffle_zscore_bar_fig = None
+    level_shuffle_zscore_fig         = None
+    condition_punish_shuffle_zscore_fig     = None
+    condition_punish_shuffle_zscore_bar_fig = None
+    level_punish_shuffle_zscore_fig         = None
+    level_shuffle_zscore_line_fig           = None
+    level_shuffle_zscore_cond_fig           = None
+    level_punish_shuffle_zscore_line_fig    = None
+    level_punish_shuffle_zscore_cond_fig    = None
+    level_rew_zone_immobility_prop_fig      = None
+    level_rew_zone_immobility_prop_cond_fig = None
+    level_immobility_prop_fig               = None
+    _epoch_keys = {'epoch_delivery_speed_sess', 'epoch_delivery_cap_sess', 'epoch_delivery_lick_sess',
+                   'epoch_delivery_cap_diff_entry', 'epoch_delivery_cap_diff_065s', 'epoch_delivery_lick_diff_065s',
+                   'epoch_reward_speed', 'epoch_reward_cap',
                    'epoch_reward_speed_sess', 'epoch_reward_cap_sess',
                    'epoch_reward_speed_early_late', 'epoch_reward_cap_early_late',
                    'epoch_reward_speed_early_late_ev', 'epoch_reward_cap_early_late_ev',
+                   'epoch_reward_speed_early_late_ev_clean', 'epoch_reward_cap_early_late_ev_clean',
                    'epoch_reward_speed_sess_clean', 'epoch_reward_cap_sess_clean',
                    'epoch_reward_speed_early_late_clean', 'epoch_reward_cap_early_late_clean',
                    'epoch_punish_speed', 'epoch_punish_cap',
                    'epoch_punish_speed_sess', 'epoch_punish_cap_sess',
                    'epoch_punish_speed_sess_clean', 'epoch_punish_cap_sess_clean',
                    'epoch_reward_speed_sess_sex', 'epoch_reward_cap_sess_sex',
-                   'epoch_punish_speed_sess_sex', 'epoch_punish_cap_sess_sex'}
+                   'epoch_punish_speed_sess_sex', 'epoch_punish_cap_sess_sex',
+                   'epoch_reward_speed_pre_post',
+                   'epoch_reward_speed_diff',
+                   'epoch_reward_cap_pre_post',
+                   'epoch_reward_cap_diff',
+                   'epoch_reward_speed_pre_post_entry',
+                   'epoch_reward_speed_diff_entry',
+                   'epoch_reward_speed_pre_post_entry_1s',
+                   'epoch_reward_speed_diff_entry_1s',
+                   'epoch_reward_speed_diff_entry_2s',
+                   'epoch_reward_lick_count_sess',
+                   'epoch_reward_lick_count_sess_clean',
+                   'epoch_reward_lick_diff_entry_065s',
+                   'epoch_punish_lick_count_sess',
+                   'epoch_punish_lick_count_sess_clean',
+                   'epoch_punish_speed_pre_post',
+                   'epoch_punish_speed_diff',
+                   'epoch_punish_speed_pre_post_entry',
+                   'epoch_punish_speed_diff_entry',
+                   'epoch_punish_speed_diff_entry_2s',
+                   'epoch_punish_cap_pre_post',
+                   'epoch_punish_cap_diff',
+                   'epoch_punish_cap_pre_post_entry',
+                   'epoch_punish_cap_diff_entry'}
     if _epoch_keys & set(selected_plots):
         _any_speed = any(r.get('speed_epoch_matrix') is not None for r in all_results)
         _any_cap   = any(r.get('cap_epoch_matrix')   is not None for r in all_results)
@@ -4339,12 +11723,20 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         if 'epoch_reward_speed_sess_clean' in selected_plots and _any_speed:
             _, epoch_speed_sess_cond_clean_fig = _plot_epoch_panels(
                 all_results, 'speed_epoch_session_means',
-                ylabel='Treadmill Speed (cm/s)',
+                ylabel='Speed (cm/s)',
                 title_prefix='Speed Aligned to Reward Zone Entry',
                 condition_color_map=condition_color_map,
                 hierarchy='session',
                 show_individual_traces=False,
             )
+            epoch_speed_sess_cond_clean_fig.axes[0].set_ylim(0, 15)
+            epoch_speed_sess_cond_clean_fig.axes[0].set_yticks([0, 5, 10, 15])
+            epoch_speed_sess_cond_clean_fig.axes[0].set_xlim(-5,5)
+            epoch_speed_sess_cond_clean_fig.axes[0].set_xticks([-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5])
+            _leg = epoch_speed_sess_cond_clean_fig.axes[0].get_legend()
+            if _leg:
+                _leg.remove()
+            epoch_speed_sess_cond_clean_fig.tight_layout()
 
         if 'epoch_reward_cap_sess' in selected_plots and _any_cap:
             epoch_cap_sess_per_mouse_fig, epoch_cap_sess_cond_fig = _plot_epoch_panels(
@@ -4363,6 +11755,10 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                 hierarchy='session',
                 show_individual_traces=False,
             )
+            epoch_cap_sess_cond_clean_fig.axes[0].set_ylim(0, 10)
+            epoch_cap_sess_cond_clean_fig.axes[0].set_yticks([0, 2, 4, 6, 8, 10])
+            epoch_cap_sess_cond_clean_fig.axes[0].set_xlim(-5,5)
+            epoch_cap_sess_cond_clean_fig.axes[0].set_xticks([-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5])
 
         if 'epoch_reward_speed_early_late' in selected_plots and _any_speed:
             (epoch_speed_early_per_mouse_fig, epoch_speed_late_per_mouse_fig,
@@ -4429,10 +11825,172 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                     row_unit='events',
                     use_sd=True,
                 )
+        if 'epoch_reward_speed_early_late_ev_clean' in selected_plots and _any_speed:
+            (_, _,
+             epoch_speed_early_ev_cond_clean_fig, epoch_speed_late_ev_cond_clean_fig) = \
+                _plot_epoch_early_late_panels(
+                    all_results, 'speed_epoch_matrix',
+                    ylabel='Treadmill Speed (cm/s)',
+                    title_prefix='Speed Aligned to Reward Zone Entry',
+                    condition_color_map=condition_color_map,
+                    indices_key='speed_epoch_event_indices',
+                    row_unit='events',
+                    use_sd=True,
+                    show_individual_traces=False,
+                )
+        if 'epoch_reward_cap_early_late_ev_clean' in selected_plots and _any_cap:
+            (_, _,
+             epoch_cap_early_ev_cond_clean_fig, epoch_cap_late_ev_cond_clean_fig) = \
+                _plot_epoch_early_late_panels(
+                    all_results, 'cap_epoch_matrix',
+                    ylabel='Capacitive Value (z-score)',
+                    title_prefix='Capacitive Value Aligned to Reward Zone Entry',
+                    condition_color_map=condition_color_map,
+                    indices_key='cap_epoch_event_indices',
+                    row_unit='events',
+                    use_sd=True,
+                    show_individual_traces=False,
+                )
+
+        # ── Reward zone: session-averaged lick count epoch ───────────────────
+        _any_reward_lick = any(r.get('lick_epoch_session_means') is not None for r in all_results)
+        if 'epoch_reward_lick_count_sess' in selected_plots and _any_reward_lick:
+            epoch_reward_lick_count_sess_per_mouse_fig, epoch_reward_lick_count_sess_cond_fig = \
+                _plot_epoch_panels(
+                    all_results, 'lick_epoch_session_means',
+                    ylabel='Lick rate (licks/s)',
+                    title_prefix='Lick Rate Aligned to Reward Zone Entry',
+                    condition_color_map=condition_color_map,
+                    hierarchy='session',
+                    reward_delivery_vline=True,
+                    canonical_time=LICK_EPOCH_TIME,
+                    y_scale=2.0,
+                    xticks=list(range(-5, 6)),
+                    ylim=_LICK_EPOCH_YLIM,
+                )
+        if 'epoch_reward_lick_count_sess_clean' in selected_plots and _any_reward_lick:
+            _, epoch_reward_lick_count_sess_cond_clean_fig = \
+                _plot_epoch_panels(
+                    all_results, 'lick_epoch_session_means',
+                    ylabel='Lick rate (licks/s)',
+                    title_prefix='Lick Rate Aligned to Reward Zone Entry',
+                    condition_color_map=condition_color_map,
+                    hierarchy='session',
+                    reward_delivery_vline=True,
+                    show_individual_traces=False,
+                    canonical_time=LICK_EPOCH_TIME,
+                    y_scale=2.0,
+                    xticks=list(range(-5, 6)),
+                    ylim=_LICK_EPOCH_YLIM,
+                )
+
+        # ── Reward zone: post-minus-pre reward delivery lick rate diff bar (0.65 s) ─
+        if 'epoch_reward_lick_diff_entry_065s' in selected_plots and _any_reward_lick:
+            _pre_mask_rlde  = (LICK_EPOCH_TIME >= 0.0)  & (LICK_EPOCH_TIME <  0.65)
+            _post_mask_rlde = (LICK_EPOCH_TIME >= 0.65) & (LICK_EPOCH_TIME <= 1.3)
+            _rlde_by_cond: dict = {}
+            for _r in all_results:
+                _sess_mat = _r.get('lick_epoch_session_means')
+                if _sess_mat is None or _sess_mat.shape[0] == 0:
+                    continue
+                _cond = _r['starting_condition']
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    # ×2 converts licks/0.5 s bin → licks/s
+                    _pre_rlde  = float(np.nanmean(np.nanmean(_sess_mat[:, _pre_mask_rlde],  axis=1))) * 2.0
+                    _post_rlde = float(np.nanmean(np.nanmean(_sess_mat[:, _post_mask_rlde], axis=1))) * 2.0
+                _rlde_by_cond.setdefault(_cond, []).append((_r['mouse'], _post_rlde - _pre_rlde))
+
+            if _rlde_by_cond:
+                _conds_rlde   = sorted(_rlde_by_cond.keys())
+                _n_conds_rlde = len(_conds_rlde)
+                epoch_reward_lick_diff_entry_065s_fig, _ax_rlde = plt.subplots()
+                _all_rlde_vals = []
+                _rng_rlde = np.random.default_rng(seed=42)
+                for _ci, _cond in enumerate(_conds_rlde):
+                    _color     = condition_color_map.get(_cond, 'steelblue')
+                    _entries   = _rlde_by_cond[_cond]
+                    _n_rlde    = len(_entries)
+                    _dvals_rlde = [e[1] for e in _entries]
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _mn_rlde  = float(np.nanmean(_dvals_rlde))
+                        _sem_rlde = (float(np.nanstd(_dvals_rlde, ddof=1) / np.sqrt(_n_rlde))
+                                     if _n_rlde > 1 else 0.0)
+                    _all_rlde_vals.extend(_dvals_rlde + [_mn_rlde + _sem_rlde, _mn_rlde - _sem_rlde])
+                    _ax_rlde.bar(_ci, _mn_rlde, width=0.55, color=_color, alpha=0.7,
+                                 yerr=_sem_rlde,
+                                 error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'),
+                                 zorder=2)
+                    _jitter_rlde = (_rng_rlde.random(_n_rlde) - 0.5) * 0.22
+                    _ax_rlde.scatter(_ci + _jitter_rlde, _dvals_rlde,
+                                     color=_color, edgecolors='black',
+                                     linewidths=0.5, s=plt.rcParams['lines.markersize'] ** 2,
+                                     alpha=0.6, zorder=3)
+                _ax_rlde.axhline(0, color='black', linestyle='--', zorder=1)
+                _ax_rlde.set_xticks(np.arange(_n_conds_rlde))
+                _ax_rlde.set_xticklabels(_conds_rlde)
+                _ax_rlde.set_ylabel('Lick rate difference (licks/s)\n[post-reward \u2212 pre-reward]')
+                _ax_rlde.set_xlabel('Condition')
+                _ax_rlde.tick_params(axis='both', direction='in')
+                _ax_rlde.spines['top'].set_visible(False)
+                _ax_rlde.spines['right'].set_visible(False)
+
+                import itertools as _itertools_rlde
+                _pairs_rlde = list(_itertools_rlde.combinations(range(_n_conds_rlde), 2))
+                _ylim_cur_rlde = list(_ax_rlde.get_ylim())
+                _bracket_step_rlde = (_ylim_cur_rlde[1] - _ylim_cur_rlde[0]) * 0.14
+                _bracket_base_rlde = _ylim_cur_rlde[1]
+                for _pi, (_ia, _ib) in enumerate(_pairs_rlde):
+                    _vals_a_rlde = [e[1] for e in _rlde_by_cond[_conds_rlde[_ia]]]
+                    _vals_b_rlde = [e[1] for e in _rlde_by_cond[_conds_rlde[_ib]]]
+                    if len(_vals_a_rlde) < 2 or len(_vals_b_rlde) < 2:
+                        continue
+                    _, _p_val_rlde = mannwhitneyu(_vals_a_rlde, _vals_b_rlde, alternative='two-sided')
+                    _bh_rlde = _bracket_base_rlde + _bracket_step_rlde * (_pi + 0.6)
+                    _ax_rlde.plot([_ia, _ia, _ib, _ib],
+                                  [_bh_rlde - _bracket_step_rlde * 0.15,
+                                   _bh_rlde, _bh_rlde,
+                                   _bh_rlde - _bracket_step_rlde * 0.15],
+                                  color='black')
+                    _ax_rlde.text((_ia + _ib) / 2, _bh_rlde + _bracket_step_rlde * 0.05,
+                                  _fmt_p(_p_val_rlde), ha='center', va='bottom')
+                if _pairs_rlde:
+                    _ax_rlde.set_ylim(_ylim_cur_rlde[0],
+                                      _bracket_base_rlde + _bracket_step_rlde * (len(_pairs_rlde) + 1.5))
+                _ax_rlde.set_ylim(0, 8)
+
+                epoch_reward_lick_diff_entry_065s_fig.suptitle(
+                    'Post- vs Pre-Reward Delivery Lick Rate Difference by Condition (Reward Zone)',
+                )
+                epoch_reward_lick_diff_entry_065s_fig.tight_layout()
+                _write_mwu_report(
+                    output_dir, 'epoch_reward_lick_diff_entry_065s',
+                    'Lick Rate Post-minus-Pre Reward Delivery (Reward Zone, 0\u20130.65 s vs 0.65\u20131.3 s after zone entry)',
+
+                    [(_conds_rlde[_ia], _conds_rlde[_ib],
+                      [e[1] for e in _rlde_by_cond[_conds_rlde[_ia]]],
+                      [e[1] for e in _rlde_by_cond[_conds_rlde[_ib]]])
+                     for _ia, _ib in _pairs_rlde],
+                )
 
         # ── Punishment zone epoch plots ───────────────────────────────────────
         _any_punish_speed = any(r.get('punish_speed_epoch_matrix') is not None for r in all_results)
         _any_punish_cap   = any(r.get('punish_cap_epoch_matrix')   is not None for r in all_results)
+
+        _n_punish_speed = sum(1 for r in all_results if r.get('punish_speed_epoch_matrix') is not None)
+        _n_punish_cap   = sum(1 for r in all_results if r.get('punish_cap_epoch_matrix')   is not None)
+        print(f"[Epoch] Punishment zone — speed data: {_n_punish_speed}/{len(all_results)} mice, "
+              f"capacitive data: {_n_punish_cap}/{len(all_results)} mice")
+        if not _any_punish_speed and not _any_punish_cap:
+            print("  [WARN] No punishment zone epoch data found for any mouse — "
+                  "check that trial logs contain 'stay_punish_texture_change_time' "
+                  "(new hallway format) or 'texture_history' (old format).")
+            print("  [WARN] Per-mouse punishment epoch matrices:")
+            for r in all_results:
+                _has_spd = r.get('punish_speed_epoch_matrix') is not None
+                _has_cap = r.get('punish_cap_epoch_matrix') is not None
+                print(f"    {r['mouse']}: speed={_has_spd}, cap={_has_cap}")
 
         if 'epoch_punish_speed' in selected_plots and _any_punish_speed:
             punish_speed_per_mouse_fig, punish_speed_cond_fig = _plot_epoch_panels(
@@ -4468,13 +12026,17 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         if 'epoch_punish_speed_sess_clean' in selected_plots and _any_punish_speed:
             _, punish_speed_sess_cond_clean_fig = _plot_epoch_panels(
                 all_results, 'punish_speed_epoch_session_means',
-                ylabel='Treadmill Speed (cm/s)',
-                title_prefix='Speed Aligned to Punishment Zone Entry',
+                ylabel='Speed (cm/s)',
+                title_prefix='Speed Aligned to Distractor Zone Entry',
                 condition_color_map=condition_color_map,
                 hierarchy='session',
                 show_individual_traces=False,
                 reward_delivery_vline=False,
             )
+            punish_speed_sess_cond_clean_fig.axes[0].set_ylim(0, 15)
+            punish_speed_sess_cond_clean_fig.axes[0].set_yticks([0, 5, 10, 15])
+            punish_speed_sess_cond_clean_fig.axes[0].set_xlim(-5,5)
+            punish_speed_sess_cond_clean_fig.axes[0].set_xticks([-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5])
 
         if 'epoch_punish_cap_sess' in selected_plots and _any_punish_cap:
             punish_cap_sess_per_mouse_fig, punish_cap_sess_cond_fig = _plot_epoch_panels(
@@ -4495,6 +12057,331 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                 show_individual_traces=False,
                 reward_delivery_vline=False,
             )
+            punish_cap_sess_cond_clean_fig.axes[0].set_ylim(0, 10)
+            punish_cap_sess_cond_clean_fig.axes[0].set_yticks([0, 2, 4, 6, 8, 10])
+            punish_cap_sess_cond_clean_fig.axes[0].set_xlim(-5,5)
+            punish_cap_sess_cond_clean_fig.axes[0].set_xticks([-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5])
+
+        # ── Reward delivery-aligned epoch plots ──────────────────────────────────
+        _any_del_speed = any(r.get('delivery_speed_epoch_session_means') is not None for r in all_results)
+        _any_del_cap   = any(r.get('delivery_cap_epoch_session_means')   is not None for r in all_results)
+        _any_del_lick  = any(r.get('delivery_lick_epoch_session_means')  is not None for r in all_results)
+
+        if 'epoch_delivery_speed_sess' in selected_plots and _any_del_speed:
+            epoch_del_speed_per_mouse_fig, epoch_del_speed_cond_fig = _plot_epoch_panels(
+                all_results, 'delivery_speed_epoch_session_means',
+                ylabel='Treadmill Speed (cm/s)',
+                title_prefix='Speed Aligned to Reward Delivery',
+                condition_color_map=condition_color_map,
+                hierarchy='session',
+                reward_delivery_vline=True,
+                show_individual_traces=False,
+            )
+
+        if 'epoch_delivery_cap_sess' in selected_plots and _any_del_cap:
+            # ── Manual axis limits for delivery capacitive epoch ──────────────
+            # Set to None for auto-scaling, or provide a tuple e.g. (-5, 5)
+            _DEL_CAP_EPOCH_XLIM = (-5, 5)   # e.g. (-5, 5)
+            _DEL_CAP_EPOCH_YLIM = (0, 10)   # e.g. (-2, 4)
+            epoch_del_cap_per_mouse_fig, epoch_del_cap_cond_fig = _plot_epoch_panels(
+                all_results, 'delivery_cap_epoch_session_means',
+                ylabel='Capacitive Value (z-score)',
+                title_prefix='Capacitive Value Aligned to Reward Delivery',
+                condition_color_map=condition_color_map,
+                hierarchy='session',
+                reward_delivery_vline=True,
+                show_individual_traces=False,
+                xlim=_DEL_CAP_EPOCH_XLIM,
+                ylim=_DEL_CAP_EPOCH_YLIM,
+                xticks=np.arange(-5, 6, 1) if _DEL_CAP_EPOCH_XLIM else None,
+            )
+
+        if 'epoch_delivery_lick_sess' in selected_plots and _any_del_lick:
+            epoch_del_lick_per_mouse_fig, epoch_del_lick_cond_fig = _plot_epoch_panels(
+                all_results, 'delivery_lick_epoch_session_means',
+                ylabel='Lick rate (licks/s)',
+                title_prefix='Lick Rate Aligned to Reward Delivery',
+                condition_color_map=condition_color_map,
+                hierarchy='session',
+                reward_delivery_vline=True,
+                show_individual_traces=False,
+                canonical_time=LICK_EPOCH_TIME,
+                y_scale=2.0,
+                xticks=list(range(-5, 6)),
+                ylim=_LICK_EPOCH_YLIM,
+            )
+
+        # ── Reward delivery lick: post-minus-pre 0.65 s difference bar chart ────
+        if 'epoch_delivery_lick_diff_065s' in selected_plots and _any_del_lick:
+            _dlde_pre_mask  = (LICK_EPOCH_TIME >= -0.65) & (LICK_EPOCH_TIME <  0.0)
+            _dlde_post_mask = (LICK_EPOCH_TIME >= 0.0)   & (LICK_EPOCH_TIME <= 0.65)
+            _dlde_by_cond: dict = {}
+            for _r in all_results:
+                _sess_mat = _r.get('delivery_lick_epoch_session_means')
+                if _sess_mat is None or _sess_mat.shape[0] == 0:
+                    continue
+                _cond = _r['starting_condition']
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    # ×2 converts licks/0.5 s bin → licks/s
+                    _pre_dlde  = float(np.nanmean(np.nanmean(_sess_mat[:, _dlde_pre_mask],  axis=1))) * 2.0
+                    _post_dlde = float(np.nanmean(np.nanmean(_sess_mat[:, _dlde_post_mask], axis=1))) * 2.0
+                _dlde_by_cond.setdefault(_cond, []).append((_r['mouse'], _post_dlde - _pre_dlde))
+
+            if _dlde_by_cond:
+                _conds_dlde   = sorted(_dlde_by_cond.keys())
+                _n_conds_dlde = len(_conds_dlde)
+                epoch_del_lick_diff_065s_fig, _ax_dlde = plt.subplots()
+                _all_dlde_vals = []
+                _rng_dlde = np.random.default_rng(seed=42)
+                for _ci, _cond in enumerate(_conds_dlde):
+                    _color      = condition_color_map.get(_cond, 'steelblue')
+                    _entries    = _dlde_by_cond[_cond]
+                    _n_dlde     = len(_entries)
+                    _dvals_dlde = [e[1] for e in _entries]
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _mn_dlde  = float(np.nanmean(_dvals_dlde))
+                        _sem_dlde = (float(np.nanstd(_dvals_dlde, ddof=1) / np.sqrt(_n_dlde))
+                                     if _n_dlde > 1 else 0.0)
+                    _all_dlde_vals.extend(_dvals_dlde + [_mn_dlde + _sem_dlde, _mn_dlde - _sem_dlde])
+                    _ax_dlde.bar(_ci, _mn_dlde, width=0.55, color=_color, alpha=0.7,
+                                 yerr=_sem_dlde, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
+                    _jitter_dlde = (_rng_dlde.random(_n_dlde) - 0.5) * 0.22
+                    _ax_dlde.scatter(_ci + _jitter_dlde, _dvals_dlde,
+                                     color=_color, edgecolors='black',
+                                     linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
+                _ax_dlde.axhline(0, color='black', linestyle='--', zorder=1)
+                _ax_dlde.set_xticks(np.arange(_n_conds_dlde))
+                _ax_dlde.set_xticklabels(_conds_dlde)
+                _ax_dlde.set_ylabel('Lick Rate Difference (licks/s)')
+                _ax_dlde.set_xlabel('CA%')
+                _ax_dlde.set_ylim(0, 8)
+                _ax_dlde.tick_params(axis='both', direction='in')
+                _ax_dlde.spines['top'].set_visible(False)
+                _ax_dlde.spines['right'].set_visible(False)
+
+                import itertools as _itertools_dlde
+                _pairs_dlde = list(_itertools_dlde.combinations(range(_n_conds_dlde), 2))
+                _ylim_cur_dlde = list(_ax_dlde.get_ylim())
+                _bracket_step_dlde = (_ylim_cur_dlde[1] - _ylim_cur_dlde[0]) * 0.14
+                _bracket_base_dlde = _ylim_cur_dlde[1] * 0.75
+                for _pi, (_ia, _ib) in enumerate(_pairs_dlde):
+                    _vals_a_dlde = [e[1] for e in _dlde_by_cond[_conds_dlde[_ia]]]
+                    _vals_b_dlde = [e[1] for e in _dlde_by_cond[_conds_dlde[_ib]]]
+                    if len(_vals_a_dlde) < 2 or len(_vals_b_dlde) < 2:
+                        continue
+                    _u_dlde, _p_dlde = mannwhitneyu(_vals_a_dlde, _vals_b_dlde, alternative='two-sided')
+                    _sig_dlde = _fmt_p(_p_dlde)
+                    _bh_dlde = _bracket_base_dlde + _bracket_step_dlde * (_pi + 0.6)
+                    _ax_dlde.plot([_ia, _ia, _ib, _ib],
+                                  [_bh_dlde - _bracket_step_dlde * 0.15,
+                                   _bh_dlde, _bh_dlde,
+                                   _bh_dlde - _bracket_step_dlde * 0.15],
+                                  color='black')
+                    _ax_dlde.text((_ia + _ib) / 2, _bh_dlde + _bracket_step_dlde * 0.05,
+                                  _sig_dlde, ha='center', va='bottom')
+                if _pairs_dlde:
+                    _new_top_dlde = _bracket_base_dlde + _bracket_step_dlde * (len(_pairs_dlde) + 1.5)
+                    _ax_dlde.set_ylim(0, _new_top_dlde)
+                _ax_dlde.set_ylim(bottom=0, top=8)
+
+                epoch_del_lick_diff_065s_fig.suptitle(
+                    'Post- vs Pre-Delivery Lick Rate Difference by Condition\n',
+                )
+                epoch_del_lick_diff_065s_fig.tight_layout()
+                _write_mwu_report(
+                    output_dir, 'epoch_delivery_lick_diff_065s',
+                    'Lick rate difference (licks/s)',
+                    [(_conds_dlde[_ia], _conds_dlde[_ib],
+                      [e[1] for e in _dlde_by_cond[_conds_dlde[_ia]]],
+                      [e[1] for e in _dlde_by_cond[_conds_dlde[_ib]]])
+                     for _ia, _ib in _pairs_dlde],
+                )
+
+        # ── Reward delivery cap: pre/post 1 s difference bar chart ─────────────
+        if 'epoch_delivery_cap_diff_entry' in selected_plots and _any_del_cap:
+            _dcde_pre_mask  = (EPOCH_CANONICAL_TIME >= -1.0) & (EPOCH_CANONICAL_TIME <  0.0)
+            _dcde_post_mask = (EPOCH_CANONICAL_TIME >= 0.0)  & (EPOCH_CANONICAL_TIME <= 1.0)
+            _dcde_by_cond: dict = {}
+            for _r in all_results:
+                _sess_mat = _r.get('delivery_cap_epoch_session_means')
+                if _sess_mat is None or _sess_mat.shape[0] == 0:
+                    continue
+                _cond = _r['starting_condition']
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    _pre_dcde  = float(np.nanmean(np.nanmean(_sess_mat[:, _dcde_pre_mask],  axis=1)))
+                    _post_dcde = float(np.nanmean(np.nanmean(_sess_mat[:, _dcde_post_mask], axis=1)))
+                _dcde_by_cond.setdefault(_cond, []).append((_r['mouse'], _post_dcde - _pre_dcde))
+
+            if _dcde_by_cond:
+                _conds_dcde   = sorted(_dcde_by_cond.keys())
+                _n_conds_dcde = len(_conds_dcde)
+                epoch_del_cap_diff_entry_fig, _ax_dcde = plt.subplots()
+                _all_dcde_vals = []
+                _bar_x_dcde = np.arange(_n_conds_dcde)
+                _rng_dcde   = np.random.default_rng(seed=42)
+                for _ci, _cond in enumerate(_conds_dcde):
+                    _color    = condition_color_map.get(_cond, 'steelblue')
+                    _entries  = _dcde_by_cond[_cond]
+                    _n_dcde   = len(_entries)
+                    _dvals_dcde = [e[1] for e in _entries]
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _mn_dcde  = float(np.nanmean(_dvals_dcde))
+                        _sem_dcde = (float(np.nanstd(_dvals_dcde, ddof=1) / np.sqrt(_n_dcde))
+                                     if _n_dcde > 1 else 0.0)
+                    _all_dcde_vals.extend(_dvals_dcde + [_mn_dcde + _sem_dcde, _mn_dcde - _sem_dcde])
+                    _ax_dcde.bar(_ci, _mn_dcde, width=0.55, color=_color, alpha=0.7,
+                                 yerr=_sem_dcde, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
+                    _jitter_dcde = (_rng_dcde.random(_n_dcde) - 0.5) * 0.22
+                    _ax_dcde.scatter(_ci + _jitter_dcde, _dvals_dcde,
+                                     color=_color, edgecolors='black',
+                                     linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
+                _ax_dcde.axhline(0, color='black', linestyle='--', zorder=1)
+                _ax_dcde.set_xticks(_bar_x_dcde)
+                _ax_dcde.set_xticklabels(_conds_dcde)
+                _ax_dcde.set_ylabel('Capacitive difference (z-score)\n[post-delivery \u2212 pre-delivery]')
+                _ax_dcde.set_xlabel('Condition')
+                if _all_dcde_vals:
+                    _ymax_dcde = float(np.nanmax(_all_dcde_vals))
+                    _ymin_dcde = float(np.nanmin(_all_dcde_vals))
+                    _pad_dcde  = max(abs(_ymax_dcde), abs(_ymin_dcde)) * 0.12 or 0.1
+                    _ax_dcde.set_ylim(_ymin_dcde - _pad_dcde, _ymax_dcde + _pad_dcde)
+                _ax_dcde.tick_params(axis='both', direction='in')
+                _ax_dcde.spines['top'].set_visible(False)
+                _ax_dcde.spines['right'].set_visible(False)
+
+                import itertools as _itertools_dcde
+                _pairs_dcde = list(_itertools_dcde.combinations(range(_n_conds_dcde), 2))
+                _ylim_cur_dcde = list(_ax_dcde.get_ylim())
+                _bracket_step_dcde = (_ylim_cur_dcde[1] - _ylim_cur_dcde[0]) * 0.14
+                _bracket_base_dcde = _ylim_cur_dcde[1]
+                for _pi, (_ia, _ib) in enumerate(_pairs_dcde):
+                    _vals_a_dcde = [e[1] for e in _dcde_by_cond[_conds_dcde[_ia]]]
+                    _vals_b_dcde = [e[1] for e in _dcde_by_cond[_conds_dcde[_ib]]]
+                    if len(_vals_a_dcde) < 2 or len(_vals_b_dcde) < 2:
+                        continue
+                    _u_dcde, _p_dcde = mannwhitneyu(_vals_a_dcde, _vals_b_dcde, alternative='two-sided')
+                    _sig_dcde = _fmt_p(_p_dcde)
+                    _bh_dcde = _bracket_base_dcde + _bracket_step_dcde * (_pi + 0.6)
+                    _ax_dcde.plot([_ia, _ia, _ib, _ib],
+                                  [_bh_dcde - _bracket_step_dcde * 0.15,
+                                   _bh_dcde, _bh_dcde,
+                                   _bh_dcde - _bracket_step_dcde * 0.15],
+                                  color='black')
+                    _ax_dcde.text((_ia + _ib) / 2, _bh_dcde + _bracket_step_dcde * 0.05,
+                                  _sig_dcde, ha='center', va='bottom')
+                if _pairs_dcde:
+                    _new_top_dcde = _bracket_base_dcde + _bracket_step_dcde * (len(_pairs_dcde) + 1.5)
+                    _ax_dcde.set_ylim(_ylim_cur_dcde[0], _new_top_dcde)
+
+                epoch_del_cap_diff_entry_fig.suptitle(
+                    'Post- vs Pre-Delivery Capacitive (z-scored) Difference by Condition',
+                )
+                epoch_del_cap_diff_entry_fig.tight_layout()
+                _write_mwu_report(
+                    output_dir, 'epoch_delivery_cap_diff_entry',
+                    'Capacitive (z-scored)',
+                    [(_conds_dcde[_ia], _conds_dcde[_ib],
+                      [e[1] for e in _dcde_by_cond[_conds_dcde[_ia]]],
+                      [e[1] for e in _dcde_by_cond[_conds_dcde[_ib]]])
+                     for _ia, _ib in _pairs_dcde],
+                )
+
+        if 'epoch_delivery_cap_diff_065s' in selected_plots and _any_del_cap:
+            _dcde2_pre_mask  = (EPOCH_CANONICAL_TIME >= -0.65) & (EPOCH_CANONICAL_TIME <  0.0)
+            _dcde2_post_mask = (EPOCH_CANONICAL_TIME >= 0.0)   & (EPOCH_CANONICAL_TIME <= 0.65)
+            _dcde2_by_cond: dict = {}
+            for _r in all_results:
+                _sess_mat2 = _r.get('delivery_cap_epoch_session_means')
+                if _sess_mat2 is None or _sess_mat2.shape[0] == 0:
+                    continue
+                _cond2 = _r['starting_condition']
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    _pre_dcde2  = float(np.nanmean(np.nanmean(_sess_mat2[:, _dcde2_pre_mask],  axis=1)))
+                    _post_dcde2 = float(np.nanmean(np.nanmean(_sess_mat2[:, _dcde2_post_mask], axis=1)))
+                _dcde2_by_cond.setdefault(_cond2, []).append((_r['mouse'], _post_dcde2 - _pre_dcde2))
+
+            if _dcde2_by_cond:
+                _conds_dcde2   = sorted(_dcde2_by_cond.keys())
+                _n_conds_dcde2 = len(_conds_dcde2)
+                epoch_del_cap_diff_065s_fig, _ax_dcde2 = plt.subplots()
+                _all_dcde2_vals = []
+                _bar_x_dcde2 = np.arange(_n_conds_dcde2)
+                _rng_dcde2   = np.random.default_rng(seed=42)
+                for _ci2, _cond2 in enumerate(_conds_dcde2):
+                    _color2    = condition_color_map.get(_cond2, 'steelblue')
+                    _entries2  = _dcde2_by_cond[_cond2]
+                    _n_dcde2   = len(_entries2)
+                    _dvals_dcde2 = [e[1] for e in _entries2]
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _mn_dcde2  = float(np.nanmean(_dvals_dcde2))
+                        _sem_dcde2 = (float(np.nanstd(_dvals_dcde2, ddof=1) / np.sqrt(_n_dcde2))
+                                      if _n_dcde2 > 1 else 0.0)
+                    _all_dcde2_vals.extend(_dvals_dcde2 + [_mn_dcde2 + _sem_dcde2, _mn_dcde2 - _sem_dcde2])
+                    _ax_dcde2.bar(_ci2, _mn_dcde2, width=0.55, color=_color2, alpha=0.7,
+                                  yerr=_sem_dcde2, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
+                    _jitter_dcde2 = (_rng_dcde2.random(_n_dcde2) - 0.5) * 0.22
+                    _ax_dcde2.scatter(_ci2 + _jitter_dcde2, _dvals_dcde2,
+                                      color=_color2, edgecolors='black',
+                                      linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
+                _ax_dcde2.axhline(0, color='black', linestyle='--', zorder=1)
+                _ax_dcde2.set_xticks(_bar_x_dcde2)
+                _ax_dcde2.set_xticklabels(_conds_dcde2)
+                _ax_dcde2.set_ylabel('Lick Rate Difference (licks/s)')
+                _ax_dcde2.set_xlabel('Condition')
+                _DCDE2_YLIM = (0, 8)      # ── manual (bottom, top); set to None to auto-scale
+                if _DCDE2_YLIM is not None:
+                    _ax_dcde2.set_ylim(_DCDE2_YLIM)
+                elif _all_dcde2_vals:
+                    _ymax_dcde2 = float(np.nanmax(_all_dcde2_vals))
+                    _ymin_dcde2 = float(np.nanmin(_all_dcde2_vals))
+                    _pad_dcde2  = max(abs(_ymax_dcde2), abs(_ymin_dcde2)) * 0.12 or 0.1
+                _ax_dcde2.tick_params(axis='both', direction='in')
+                _ax_dcde2.spines['top'].set_visible(False)
+                _ax_dcde2.spines['right'].set_visible(False)
+
+                import itertools as _itertools_dcde2
+                _pairs_dcde2 = list(_itertools_dcde2.combinations(range(_n_conds_dcde2), 2))
+                _ylim_cur_dcde2 = list(_ax_dcde2.get_ylim())
+                _data_top_dcde2 = float(np.nanmax(_all_dcde2_vals)) if _all_dcde2_vals else _ylim_cur_dcde2[1]
+                _bracket_step_dcde2 = (_ylim_cur_dcde2[1] - _ylim_cur_dcde2[0]) * 0.14
+                _bracket_base_dcde2 = _data_top_dcde2 + _bracket_step_dcde2 * 0.3
+                for _pi2, (_ia2, _ib2) in enumerate(_pairs_dcde2):
+                    _vals_a_dcde2 = [e[1] for e in _dcde2_by_cond[_conds_dcde2[_ia2]]]
+                    _vals_b_dcde2 = [e[1] for e in _dcde2_by_cond[_conds_dcde2[_ib2]]]
+                    if len(_vals_a_dcde2) < 2 or len(_vals_b_dcde2) < 2:
+                        continue
+                    _u_dcde2, _p_dcde2 = mannwhitneyu(_vals_a_dcde2, _vals_b_dcde2, alternative='two-sided')
+                    _sig_dcde2 = _fmt_p(_p_dcde2)
+                    _bh_dcde2 = _bracket_base_dcde2 + _bracket_step_dcde2 * (_pi2 + 0.6)
+                    _ax_dcde2.plot([_ia2, _ia2, _ib2, _ib2],
+                                   [_bh_dcde2 - _bracket_step_dcde2 * 0.15,
+                                    _bh_dcde2, _bh_dcde2,
+                                    _bh_dcde2 - _bracket_step_dcde2 * 0.15],
+                                   color='black')
+                    _ax_dcde2.text((_ia2 + _ib2) / 2, _bh_dcde2 + _bracket_step_dcde2 * 0.05,
+                                   _sig_dcde2, ha='center', va='bottom')
+                if _pairs_dcde2 and _DCDE2_YLIM is None:
+                    _new_top_dcde2 = _bracket_base_dcde2 + _bracket_step_dcde2 * (len(_pairs_dcde2) + 1.5)
+                    _ax_dcde2.set_ylim(_ylim_cur_dcde2[0], _new_top_dcde2)
+
+                epoch_del_cap_diff_065s_fig.suptitle(
+                    'Post- vs Pre-Delivery Capacitive (z-scored) Difference by Condition',
+                )
+                epoch_del_cap_diff_065s_fig.tight_layout()
+                _write_mwu_report(
+                    output_dir, 'epoch_delivery_cap_diff_065s',
+                    'Lick Rate (licks/s) Post-minus-Pre Reward Delivery (\u00b10.65 s windows)',
+                    [(_conds_dcde2[_ia2], _conds_dcde2[_ib2],
+                      [e[1] for e in _dcde2_by_cond[_conds_dcde2[_ia2]]],
+                      [e[1] for e in _dcde2_by_cond[_conds_dcde2[_ib2]]])
+                     for _ia2, _ib2 in _pairs_dcde2],
+                )
 
         # ── Sex-split session-averaged epoch plots ───────────────────────────────────
         _sex_color_map = {'male': 'green', 'female': 'purple'}
@@ -4553,6 +12440,2566 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                 group_label='By Sex',
             )
 
+        # ── Punishment zone: session-averaged lick count epoch ───────────────
+        _any_punish_lick = any(r.get('punish_lick_epoch_session_means') is not None for r in all_results)
+        if 'epoch_punish_lick_count_sess' in selected_plots and _any_punish_lick:
+            epoch_punish_lick_count_sess_per_mouse_fig, epoch_punish_lick_count_sess_cond_fig = \
+                _plot_epoch_panels(
+                    all_results, 'punish_lick_epoch_session_means',
+                    ylabel='Lick rate (licks/s)',
+                    title_prefix='Lick Rate Aligned to Punishment Zone Entry',
+                    condition_color_map=condition_color_map,
+                    hierarchy='session',
+                    reward_delivery_vline=False,
+                    canonical_time=LICK_EPOCH_TIME,
+                    y_scale=2.0,
+                    xticks=list(range(-5, 6)),
+                    ylim=_LICK_EPOCH_YLIM,
+                )
+        if 'epoch_punish_lick_count_sess_clean' in selected_plots and _any_punish_lick:
+            _, epoch_punish_lick_count_sess_cond_clean_fig = \
+                _plot_epoch_panels(
+                    all_results, 'punish_lick_epoch_session_means',
+                    ylabel='Lick rate (licks/s)',
+                    title_prefix='Lick Rate Aligned to Punishment Zone Entry',
+                    condition_color_map=condition_color_map,
+                    hierarchy='session',
+                    reward_delivery_vline=False,
+                    show_individual_traces=False,
+                    canonical_time=LICK_EPOCH_TIME,
+                    y_scale=2.0,
+                    xticks=list(range(-5, 6)),
+                    ylim=_LICK_EPOCH_YLIM,
+                )
+
+        # ── Punishment zone: pre/post 0.65 s cutoff speed bar chart ──────────
+        if 'epoch_punish_speed_pre_post' in selected_plots and _any_punish_speed:
+            _pre_mask_pp  = (EPOCH_CANONICAL_TIME >= 0.0)  & (EPOCH_CANONICAL_TIME <= 0.65)
+            _post_mask_pp = (EPOCH_CANONICAL_TIME >  0.65) & (EPOCH_CANONICAL_TIME <= 1.30)
+            _ppp_by_cond: dict = {}
+            for _r in all_results:
+                _sess_mat = _r.get('punish_speed_epoch_session_means')
+                if _sess_mat is None or _sess_mat.shape[0] == 0:
+                    continue
+                _cond = _r['starting_condition']
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    _pre_per_sess  = np.nanmean(_sess_mat[:, _pre_mask_pp],  axis=1)
+                    _post_per_sess = np.nanmean(_sess_mat[:, _post_mask_pp], axis=1)
+                    _pre_mean  = float(np.nanmean(_pre_per_sess))
+                    _post_mean = float(np.nanmean(_post_per_sess))
+                _ppp_by_cond.setdefault(_cond, []).append((_r['mouse'], _pre_mean, _post_mean))
+
+            if _ppp_by_cond:
+                _conds_ppp   = sorted(_ppp_by_cond.keys())
+                _n_conds_ppp = len(_conds_ppp)
+                epoch_punish_speed_pre_post_fig, _axs_ppp = plt.subplots(
+                    1, _n_conds_ppp,
+                    sharey=True, squeeze=False,
+                )
+                _all_ppp_yvals = []
+                for _ci, _cond in enumerate(_conds_ppp):
+                    _ax       = _axs_ppp[0, _ci]
+                    _color    = condition_color_map.get(_cond, 'steelblue')
+                    _entries  = _ppp_by_cond[_cond]
+                    _n_ppp    = len(_entries)
+                    _pre_vals = [e[1] for e in _entries]
+                    _post_vals= [e[2] for e in _entries]
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _mn_pre   = float(np.nanmean(_pre_vals))
+                        _mn_post  = float(np.nanmean(_post_vals))
+                        _sem_pre  = (float(np.nanstd(_pre_vals,  ddof=1) / np.sqrt(_n_ppp))
+                                     if _n_ppp > 1 else 0.0)
+                        _sem_post = (float(np.nanstd(_post_vals, ddof=1) / np.sqrt(_n_ppp))
+                                     if _n_ppp > 1 else 0.0)
+                    _all_ppp_yvals.extend([_mn_pre + _sem_pre, _mn_post + _sem_post,
+                                           _mn_pre - _sem_pre, _mn_post - _sem_post])
+                    _all_ppp_yvals.extend(_pre_vals + _post_vals)
+                    _ax.bar(0, _mn_pre,  width=0.5, color=_color, alpha=0.7,
+                            yerr=_sem_pre,  error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
+                    _ax.bar(1, _mn_post, width=0.5, color=_color, alpha=0.7,
+                            yerr=_sem_post, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
+                    _rng_ppp = np.random.default_rng(seed=42)
+                    _jitter  = (_rng_ppp.random(_n_ppp) - 0.5) * 0.18
+                    for _j, (_mname, _pv, _qv) in enumerate(_entries):
+                        _xp = 0 + _jitter[_j]
+                        _xq = 1 + _jitter[_j]
+                        _ax.plot([_xp, _xq], [_pv, _qv], '-',
+                                 color=_color, alpha=0.5, zorder=2)
+                        _ax.plot(_xp, _pv, 'o', color=_color,
+                                 markeredgecolor='black', markeredgewidth=0.5,
+                                 markersize=plt.rcParams['lines.markersize'], alpha=0.6, zorder=3)
+                        _ax.plot(_xq, _qv, 'o', color=_color,
+                                 markeredgecolor='black', markeredgewidth=0.5,
+                                 markersize=plt.rcParams['lines.markersize'], alpha=0.6, zorder=3)
+                    _ax.set_xticks([0, 1])
+                    _ax.set_xticklabels(['Pre-cutoff\n(0\u20130.65 s)', 'Post-cutoff\n(0.65\u20131.3 s)'])
+                    _ax.set_title(f'{_cond}\n(n={_n_ppp} mice)')
+                    _ax.set_ylabel('Treadmill Speed (cm/s)' if _ci == 0 else '')
+                    _ax.set_xlim(-0.6, 1.6)
+                    _ax.tick_params(axis='both', direction='in')
+                    _ax.spines['top'].set_visible(False)
+                    _ax.spines['right'].set_visible(False)
+                if _all_ppp_yvals:
+                    _ymax_ppp = float(np.nanmax(_all_ppp_yvals))
+                    _ymin_ppp = float(np.nanmin(_all_ppp_yvals))
+                else:
+                    _ymax_ppp, _ymin_ppp = 1.0, 0.0
+                _bot_ppp = _ymin_ppp * 1.05 if _ymin_ppp < 0 else 0.0
+                _axs_ppp[0, 0].set_ylim(_bot_ppp, _ymax_ppp * 1.05)
+                epoch_punish_speed_pre_post_fig.suptitle(
+                    'Average Speed: Pre- vs Post-Cutoff (Punishment Zone)\n'
+                    '(0-0.65 s vs 0.65-1.3 s; session-averaged punishment zone entry epochs, by condition)',
+                )
+                epoch_punish_speed_pre_post_fig.tight_layout()
+
+        # ── Punishment zone: pre-minus-post speed difference bar chart ────────
+        if 'epoch_punish_speed_diff' in selected_plots and _any_punish_speed:
+            _pre_mask_pd  = (EPOCH_CANONICAL_TIME >= 0.0)  & (EPOCH_CANONICAL_TIME <= 0.65)
+            _post_mask_pd = (EPOCH_CANONICAL_TIME >  0.65) & (EPOCH_CANONICAL_TIME <= 1.30)
+            _pdiff_by_cond: dict = {}
+            for _r in all_results:
+                _sess_mat = _r.get('punish_speed_epoch_session_means')
+                if _sess_mat is None or _sess_mat.shape[0] == 0:
+                    continue
+                _cond = _r['starting_condition']
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    _pre_pd  = float(np.nanmean(np.nanmean(_sess_mat[:, _pre_mask_pd],  axis=1)))
+                    _post_pd = float(np.nanmean(np.nanmean(_sess_mat[:, _post_mask_pd], axis=1)))
+                _pdiff_by_cond.setdefault(_cond, []).append((_r['mouse'], _post_pd - _pre_pd))
+
+            if _pdiff_by_cond:
+                _conds_pd   = sorted(_pdiff_by_cond.keys())
+                _n_conds_pd = len(_conds_pd)
+                epoch_punish_speed_diff_fig, _ax_pd = plt.subplots()
+                _all_pdiff_vals = []
+                _bar_x_pd = np.arange(_n_conds_pd)
+                _rng_pd   = np.random.default_rng(seed=42)
+                for _ci, _cond in enumerate(_conds_pd):
+                    _color    = condition_color_map.get(_cond, 'steelblue')
+                    _entries  = _pdiff_by_cond[_cond]
+                    _n_pd     = len(_entries)
+                    _dvals_pd = [e[1] for e in _entries]
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _mn_pd  = float(np.nanmean(_dvals_pd))
+                        _sem_pd = (float(np.nanstd(_dvals_pd, ddof=1) / np.sqrt(_n_pd))
+                                   if _n_pd > 1 else 0.0)
+                    _all_pdiff_vals.extend(_dvals_pd + [_mn_pd + _sem_pd, _mn_pd - _sem_pd])
+                    _ax_pd.bar(_ci, _mn_pd, width=0.55, color=_color, alpha=0.7,
+                               yerr=_sem_pd, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
+                    _jitter_pd = (_rng_pd.random(_n_pd) - 0.5) * 0.22
+                    _ax_pd.scatter(_ci + _jitter_pd, _dvals_pd,
+                                   color=_color, edgecolors='black',
+                                   linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
+                _ax_pd.axhline(0, color='black', linestyle='--', zorder=1)
+                _ax_pd.set_xticks(_bar_x_pd)
+                _ax_pd.set_xticklabels(_conds_pd)
+                _ax_pd.set_ylabel('Speed difference (cm/s)\n[post-cutoff \u2212 pre-cutoff]')
+                _ax_pd.set_xlabel('Condition')
+                if _all_pdiff_vals:
+                    _ymax_pd = float(np.nanmax(_all_pdiff_vals))
+                    _ymin_pd = float(np.nanmin(_all_pdiff_vals))
+                    _pad_pd  = max(abs(_ymax_pd), abs(_ymin_pd)) * 0.12 or 0.5
+                    _ax_pd.set_ylim(_ymin_pd - _pad_pd, _ymax_pd + _pad_pd)
+                _ax_pd.tick_params(axis='both', direction='in')
+                _ax_pd.spines['top'].set_visible(False)
+                _ax_pd.spines['right'].set_visible(False)
+
+                # ── Mann-Whitney U tests for all condition pairs ──────────────
+                import itertools as _itertools_pd
+                _pairs_pd = list(_itertools_pd.combinations(range(_n_conds_pd), 2))
+                _ylim_cur_pd = list(_ax_pd.get_ylim())
+                _bracket_step_pd = (_ylim_cur_pd[1] - _ylim_cur_pd[0]) * 0.14
+                _bracket_base_pd = _ylim_cur_pd[1]
+                for _pi, (_ia, _ib) in enumerate(_pairs_pd):
+                    _vals_a_pd = [e[1] for e in _pdiff_by_cond[_conds_pd[_ia]]]
+                    _vals_b_pd = [e[1] for e in _pdiff_by_cond[_conds_pd[_ib]]]
+                    if len(_vals_a_pd) < 2 or len(_vals_b_pd) < 2:
+                        continue
+                    _u_stat_pd, _p_val_pd = mannwhitneyu(_vals_a_pd, _vals_b_pd, alternative='two-sided')
+                    _sig_str_pd = _fmt_p(_p_val_pd)
+                    _bh_pd = _bracket_base_pd + _bracket_step_pd * (_pi + 0.6)
+                    _ax_pd.plot([_ia, _ia, _ib, _ib],
+                                [_bh_pd - _bracket_step_pd * 0.15,
+                                 _bh_pd,
+                                 _bh_pd,
+                                 _bh_pd - _bracket_step_pd * 0.15],
+                                color='black')
+                    _ax_pd.text((_ia + _ib) / 2, _bh_pd + _bracket_step_pd * 0.05,
+                                _sig_str_pd, ha='center', va='bottom')
+                if _pairs_pd:
+                    _new_top_pd = _bracket_base_pd + _bracket_step_pd * (len(_pairs_pd) + 1.5)
+                    _ax_pd.set_ylim(_ylim_cur_pd[0], _new_top_pd)
+
+                epoch_punish_speed_diff_fig.suptitle(
+                    'Post- vs Pre-Cutoff Speed Difference by Condition (Punishment Zone)\n'
+                    '(0-0.65 s vs 0.65-1.3 s; mean \u00b1 SEM across mice; positive = faster after 0.65 s cutoff)',
+                )
+                epoch_punish_speed_diff_fig.tight_layout()
+                _write_mwu_report(
+                    output_dir, 'epoch_punish_speed_diff',
+                    'Speed Post-minus-Pre 0.65 s Cutoff (Punishment Zone)',
+                    [(_conds_pd[_ia], _conds_pd[_ib],
+                      [e[1] for e in _pdiff_by_cond[_conds_pd[_ia]]],
+                      [e[1] for e in _pdiff_by_cond[_conds_pd[_ib]]])
+                     for _ia, _ib in _pairs_pd],
+                )
+
+        # ── Punishment zone: 1 s pre- vs 1 s post-zone entry bar chart ────────
+        if 'epoch_punish_speed_pre_post_entry' in selected_plots and _any_punish_speed:
+            _pre_mask_pe  = (EPOCH_CANONICAL_TIME >= -1.0) & (EPOCH_CANONICAL_TIME <  0.0)
+            _post_mask_pe = (EPOCH_CANONICAL_TIME >= 0.0)  & (EPOCH_CANONICAL_TIME <= 1.0)
+            _ppe_by_cond: dict = {}
+            for _r in all_results:
+                _sess_mat = _r.get('punish_speed_epoch_session_means')
+                if _sess_mat is None or _sess_mat.shape[0] == 0:
+                    continue
+                _cond = _r['starting_condition']
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    _pre_per_sess  = np.nanmean(_sess_mat[:, _pre_mask_pe],  axis=1)
+                    _post_per_sess = np.nanmean(_sess_mat[:, _post_mask_pe], axis=1)
+                    _pre_mean  = float(np.nanmean(_pre_per_sess))
+                    _post_mean = float(np.nanmean(_post_per_sess))
+                _ppe_by_cond.setdefault(_cond, []).append((_r['mouse'], _pre_mean, _post_mean))
+
+            if _ppe_by_cond:
+                _conds_ppe   = sorted(_ppe_by_cond.keys())
+                _n_conds_ppe = len(_conds_ppe)
+                epoch_punish_speed_pre_post_entry_fig, _axs_ppe = plt.subplots(
+                    1, _n_conds_ppe,
+                    sharey=True, squeeze=False,
+                )
+                _all_ppe_yvals = []
+                for _ci, _cond in enumerate(_conds_ppe):
+                    _ax       = _axs_ppe[0, _ci]
+                    _color    = condition_color_map.get(_cond, 'steelblue')
+                    _entries  = _ppe_by_cond[_cond]
+                    _n_ppe    = len(_entries)
+                    _pre_vals = [e[1] for e in _entries]
+                    _post_vals= [e[2] for e in _entries]
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _mn_pre   = float(np.nanmean(_pre_vals))
+                        _mn_post  = float(np.nanmean(_post_vals))
+                        _sem_pre  = (float(np.nanstd(_pre_vals,  ddof=1) / np.sqrt(_n_ppe))
+                                     if _n_ppe > 1 else 0.0)
+                        _sem_post = (float(np.nanstd(_post_vals, ddof=1) / np.sqrt(_n_ppe))
+                                     if _n_ppe > 1 else 0.0)
+                    _all_ppe_yvals.extend([_mn_pre + _sem_pre, _mn_post + _sem_post,
+                                           _mn_pre - _sem_pre, _mn_post - _sem_post])
+                    _all_ppe_yvals.extend(_pre_vals + _post_vals)
+                    _ax.bar(0, _mn_pre,  width=0.5, color=_color, alpha=0.7,
+                            yerr=_sem_pre,  error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
+                    _ax.bar(1, _mn_post, width=0.5, color=_color, alpha=0.7,
+                            yerr=_sem_post, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
+                    _rng_ppe = np.random.default_rng(seed=42)
+                    _jitter  = (_rng_ppe.random(_n_ppe) - 0.5) * 0.18
+                    for _j, (_mname, _pv, _qv) in enumerate(_entries):
+                        _xp = 0 + _jitter[_j]
+                        _xq = 1 + _jitter[_j]
+                        _ax.plot([_xp, _xq], [_pv, _qv], '-',
+                                 color=_color, alpha=0.5, zorder=2)
+                        _ax.plot(_xp, _pv, 'o', color=_color,
+                                 markeredgecolor='black', markeredgewidth=0.5,
+                                 markersize=plt.rcParams['lines.markersize'], alpha=0.6, zorder=3)
+                        _ax.plot(_xq, _qv, 'o', color=_color,
+                                 markeredgecolor='black', markeredgewidth=0.5,
+                                 markersize=plt.rcParams['lines.markersize'], alpha=0.6, zorder=3)
+                    _ax.set_xticks([0, 1])
+                    _ax.set_xticklabels(['Pre-entry\n(−1–0 s)', 'Post-entry\n(0–1 s)'])
+                    _ax.set_title(f'{_cond}\n(n={_n_ppe} mice)')
+                    _ax.set_ylabel('Treadmill Speed (cm/s)' if _ci == 0 else '')
+                    _ax.set_xlim(-0.6, 1.6)
+                    _ax.tick_params(axis='both', direction='in')
+                    _ax.spines['top'].set_visible(False)
+                    _ax.spines['right'].set_visible(False)
+                if _all_ppe_yvals:
+                    _ymax_ppe = float(np.nanmax(_all_ppe_yvals))
+                    _ymin_ppe = float(np.nanmin(_all_ppe_yvals))
+                else:
+                    _ymax_ppe, _ymin_ppe = 1.0, 0.0
+                _bot_ppe = _ymin_ppe * 1.05 if _ymin_ppe < 0 else 0.0
+                _axs_ppe[0, 0].set_ylim(_bot_ppe, _ymax_ppe * 1.05)
+                epoch_punish_speed_pre_post_entry_fig.suptitle(
+                    'Average Speed: 1 s Pre- vs 1 s Post-Zone Entry (Punishment Zone)\n'
+                    '(-1-0 s vs 0-1 s; session-averaged punishment zone entry epochs, by condition)',
+                )
+                epoch_punish_speed_pre_post_entry_fig.tight_layout()
+
+        # ── Punishment zone: pre-minus-post zone entry difference bar chart ───
+        if 'epoch_punish_speed_diff_entry' in selected_plots and _any_punish_speed:
+            _pre_mask_de  = (EPOCH_CANONICAL_TIME >= -1.0) & (EPOCH_CANONICAL_TIME <  0.0)
+            _post_mask_de = (EPOCH_CANONICAL_TIME >= 0.0)  & (EPOCH_CANONICAL_TIME <= 1.0)
+            _pde_by_cond: dict = {}
+            for _r in all_results:
+                _sess_mat = _r.get('punish_speed_epoch_session_means')
+                if _sess_mat is None or _sess_mat.shape[0] == 0:
+                    continue
+                _cond = _r['starting_condition']
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    _pre_de  = float(np.nanmean(np.nanmean(_sess_mat[:, _pre_mask_de],  axis=1)))
+                    _post_de = float(np.nanmean(np.nanmean(_sess_mat[:, _post_mask_de], axis=1)))
+                _pde_by_cond.setdefault(_cond, []).append((_r['mouse'], _post_de - _pre_de))
+
+            if _pde_by_cond:
+                _conds_de   = sorted(_pde_by_cond.keys())
+                _n_conds_de = len(_conds_de)
+                epoch_punish_speed_diff_entry_fig, _ax_de = plt.subplots()
+                _all_pde_vals = []
+                _bar_x_de = np.arange(_n_conds_de)
+                _rng_de   = np.random.default_rng(seed=42)
+                for _ci, _cond in enumerate(_conds_de):
+                    _color    = condition_color_map.get(_cond, 'steelblue')
+                    _entries  = _pde_by_cond[_cond]
+                    _n_de     = len(_entries)
+                    _dvals_de = [e[1] for e in _entries]
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _mn_de  = float(np.nanmean(_dvals_de))
+                        _sem_de = (float(np.nanstd(_dvals_de, ddof=1) / np.sqrt(_n_de))
+                                   if _n_de > 1 else 0.0)
+                    _all_pde_vals.extend(_dvals_de + [_mn_de + _sem_de, _mn_de - _sem_de])
+                    _ax_de.bar(_ci, _mn_de, width=0.55, color=_color, alpha=0.7,
+                               yerr=_sem_de, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
+                    _jitter_de = (_rng_de.random(_n_de) - 0.5) * 0.22
+                    _ax_de.scatter(_ci + _jitter_de, _dvals_de,
+                                   color=_color, edgecolors='black',
+                                   linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
+                _ax_de.axhline(0, color='black', linestyle='--', zorder=1)
+                _ax_de.set_xticks(_bar_x_de)
+                _ax_de.set_xticklabels(_conds_de)
+                _ax_de.set_ylabel('Speed difference (cm/s)\n[post-entry \u2212 pre-entry]')
+                _ax_de.set_xlabel('Condition')
+                if _all_pde_vals:
+                    _ymax_de = float(np.nanmax(_all_pde_vals))
+                    _ymin_de = float(np.nanmin(_all_pde_vals))
+                    _pad_de  = max(abs(_ymax_de), abs(_ymin_de)) * 0.12 or 0.5
+                    _ax_de.set_ylim(_ymin_de - _pad_de, _ymax_de + _pad_de)
+                _ax_de.tick_params(axis='both', direction='in')
+                _ax_de.spines['top'].set_visible(False)
+                _ax_de.spines['right'].set_visible(False)
+
+                # ── Mann-Whitney U tests for all condition pairs ───────────
+                import itertools as _itertools_de
+                _pairs_de = list(_itertools_de.combinations(range(_n_conds_de), 2))
+                _ylim_cur_de = list(_ax_de.get_ylim())
+                _bracket_step_de = (_ylim_cur_de[1] - _ylim_cur_de[0]) * 0.14
+                _bracket_base_de = _ylim_cur_de[1]
+                for _pi, (_ia, _ib) in enumerate(_pairs_de):
+                    _vals_a_de = [e[1] for e in _pde_by_cond[_conds_de[_ia]]]
+                    _vals_b_de = [e[1] for e in _pde_by_cond[_conds_de[_ib]]]
+                    if len(_vals_a_de) < 2 or len(_vals_b_de) < 2:
+                        continue
+                    _u_stat_de, _p_val_de = mannwhitneyu(_vals_a_de, _vals_b_de, alternative='two-sided')
+                    _sig_str_de = _fmt_p(_p_val_de)
+                    _bh_de = _bracket_base_de + _bracket_step_de * (_pi + 0.6)
+                    _ax_de.plot([_ia, _ia, _ib, _ib],
+                                [_bh_de - _bracket_step_de * 0.15,
+                                 _bh_de,
+                                 _bh_de,
+                                 _bh_de - _bracket_step_de * 0.15],
+                                color='black')
+                    _ax_de.text((_ia + _ib) / 2, _bh_de + _bracket_step_de * 0.05,
+                                _sig_str_de, ha='center', va='bottom')
+                if _pairs_de:
+                    _new_top_de = _bracket_base_de + _bracket_step_de * (len(_pairs_de) + 1.5)
+                    _ax_de.set_ylim(_ylim_cur_de[0], _new_top_de)
+
+                epoch_punish_speed_diff_entry_fig.suptitle(
+                    'Post- vs Pre-Zone Entry Speed Difference by Condition (Punishment Zone)\n'
+                    '(-1-0 s vs 0-1 s; mean ± SEM across mice; positive = faster after zone entry)',
+                )
+                epoch_punish_speed_diff_entry_fig.tight_layout()
+                _write_mwu_report(
+                    output_dir, 'epoch_punish_speed_diff_entry',
+                    'Speed Post-minus-Pre Zone Entry (Punishment Zone, 1 s windows)',
+                    [(_conds_de[_ia], _conds_de[_ib],
+                      [e[1] for e in _pde_by_cond[_conds_de[_ia]]],
+                      [e[1] for e in _pde_by_cond[_conds_de[_ib]]])
+                     for _ia, _ib in _pairs_de],
+                )
+
+        # ── Punishment zone: 2 s pre- vs 2 s post-zone entry difference bar chart ──
+        if 'epoch_punish_speed_diff_entry_2s' in selected_plots and _any_punish_speed:
+            _pre_mask_de2  = (EPOCH_CANONICAL_TIME >= -2.0) & (EPOCH_CANONICAL_TIME <  0.0)
+            _post_mask_de2 = (EPOCH_CANONICAL_TIME >= 0.0)  & (EPOCH_CANONICAL_TIME <= 2.0)
+            _pde2_by_cond: dict = {}
+            for _r in all_results:
+                _sess_mat = _r.get('punish_speed_epoch_session_means')
+                if _sess_mat is None or _sess_mat.shape[0] == 0:
+                    continue
+                _cond = _r['starting_condition']
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    _pre_de2  = float(np.nanmean(np.nanmean(_sess_mat[:, _pre_mask_de2],  axis=1)))
+                    _post_de2 = float(np.nanmean(np.nanmean(_sess_mat[:, _post_mask_de2], axis=1)))
+                _pde2_by_cond.setdefault(_cond, []).append((_r['mouse'], _post_de2 - _pre_de2))
+
+            if _pde2_by_cond:
+                _conds_de2   = sorted(_pde2_by_cond.keys())
+                _n_conds_de2 = len(_conds_de2)
+                epoch_punish_speed_diff_entry_2s_fig, _ax_de2 = plt.subplots()
+                _all_pde2_vals = []
+                _bar_x_de2 = np.arange(_n_conds_de2)
+                _rng_de2   = np.random.default_rng(seed=42)
+                for _ci, _cond in enumerate(_conds_de2):
+                    _color    = condition_color_map.get(_cond, 'steelblue')
+                    _entries  = _pde2_by_cond[_cond]
+                    _n_de2    = len(_entries)
+                    _dvals_de2 = [e[1] for e in _entries]
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _mn_de2  = float(np.nanmean(_dvals_de2))
+                        _sem_de2 = (float(np.nanstd(_dvals_de2, ddof=1) / np.sqrt(_n_de2))
+                                    if _n_de2 > 1 else 0.0)
+                    _all_pde2_vals.extend(_dvals_de2 + [_mn_de2 + _sem_de2, _mn_de2 - _sem_de2])
+                    _ax_de2.bar(_ci, _mn_de2, width=0.55, color=_color, alpha=0.7,
+                                yerr=_sem_de2, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
+                    _jitter_de2 = (_rng_de2.random(_n_de2) - 0.5) * 0.22
+                    _ax_de2.scatter(_ci + _jitter_de2, _dvals_de2,
+                                    color=_color, edgecolors='black',
+                                    linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
+                _ax_de2.axhline(0, color='black', linestyle='-', zorder=1)
+                _ax_de2.set_xticks(_bar_x_de2)
+                _ax_de2.set_xticklabels(_conds_de2)
+                _ax_de2.set_ylim(bottom=-6, top=2)
+                _ax_de2.set_ylabel('Speed Difference (cm/s)\n[post-entry \u2212 pre-entry]')
+                _ax_de2.set_xlabel('CA%')
+                if _all_pde2_vals:
+                    _ymax_de2 = float(np.nanmax(_all_pde2_vals))
+                    _ymin_de2 = float(np.nanmin(_all_pde2_vals))
+                    _pad_de2  = max(abs(_ymax_de2), abs(_ymin_de2)) * 0.12 or 0.5
+                _ax_de2.tick_params(axis='both', direction='in')
+                _ax_de2.spines['top'].set_visible(False)
+                _ax_de2.spines['right'].set_visible(False)
+
+                # ── Mann-Whitney U tests for all condition pairs ──────────────
+                import itertools as _itertools_de2
+                _pairs_de2 = list(_itertools_de2.combinations(range(_n_conds_de2), 2))
+                _ylim_cur_de2 = list(_ax_de2.get_ylim())
+                _bracket_step_de2 = (_ylim_cur_de2[1] - _ylim_cur_de2[0]) * 0.14
+                _bracket_base_de2 = _ylim_cur_de2[1] - _bracket_step_de2 * (len(_pairs_de2) + 0.5)
+                for _pi, (_ia, _ib) in enumerate(_pairs_de2):
+                    _vals_a_de2 = [e[1] for e in _pde2_by_cond[_conds_de2[_ia]]]
+                    _vals_b_de2 = [e[1] for e in _pde2_by_cond[_conds_de2[_ib]]]
+                    if len(_vals_a_de2) < 2 or len(_vals_b_de2) < 2:
+                        continue
+                    _u_stat_de2, _p_val_de2 = mannwhitneyu(_vals_a_de2, _vals_b_de2, alternative='two-sided')
+                    _sig_str_de2 = _fmt_p(_p_val_de2)
+                    _bh_de2 = _bracket_base_de2 + _bracket_step_de2 * (_pi + 0.6)
+                    _ax_de2.plot([_ia, _ia, _ib, _ib],
+                                 [_bh_de2 - _bracket_step_de2 * 0.15,
+                                  _bh_de2,
+                                  _bh_de2,
+                                  _bh_de2 - _bracket_step_de2 * 0.15],
+                                 color='black')
+                    _ax_de2.text((_ia + _ib) / 2, _bh_de2 + _bracket_step_de2 * 0.05,
+                                 _sig_str_de2, ha='center', va='bottom')
+
+                epoch_punish_speed_diff_entry_2s_fig.suptitle(
+                    'Post- vs Pre-Zone Entry Speed Difference (Punishment Zone, 2 s windows)',
+                )
+                epoch_punish_speed_diff_entry_2s_fig.tight_layout()
+                _write_mwu_report(
+                    output_dir, 'epoch_punish_speed_diff_entry_2s',
+                    'Speed Post-minus-Pre Zone Entry (Punishment Zone, 2 s windows)',
+                    [(_conds_de2[_ia], _conds_de2[_ib],
+                      [e[1] for e in _pde2_by_cond[_conds_de2[_ia]]],
+                      [e[1] for e in _pde2_by_cond[_conds_de2[_ib]]])
+                     for _ia, _ib in _pairs_de2],
+                )
+
+        # ── Punishment zone: pre/post 0.65 s cutoff capacitive bar chart ─────
+        if 'epoch_punish_cap_pre_post' in selected_plots and _any_punish_cap:
+            _pcp_pre_mask  = (EPOCH_CANONICAL_TIME >= 0.0)  & (EPOCH_CANONICAL_TIME <= 0.65)
+            _pcp_post_mask = (EPOCH_CANONICAL_TIME >  0.65) & (EPOCH_CANONICAL_TIME <= 1.30)
+            _pcp_by_cond: dict = {}
+            for _r in all_results:
+                _sess_mat = _r.get('punish_cap_epoch_session_means')
+                if _sess_mat is None or _sess_mat.shape[0] == 0:
+                    continue
+                _cond = _r['starting_condition']
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    _pre_per_sess  = np.nanmean(_sess_mat[:, _pcp_pre_mask],  axis=1)
+                    _post_per_sess = np.nanmean(_sess_mat[:, _pcp_post_mask], axis=1)
+                    _pre_mean  = float(np.nanmean(_pre_per_sess))
+                    _post_mean = float(np.nanmean(_post_per_sess))
+                _pcp_by_cond.setdefault(_cond, []).append((_r['mouse'], _pre_mean, _post_mean))
+
+            if _pcp_by_cond:
+                _conds_pcp   = sorted(_pcp_by_cond.keys())
+                _n_conds_pcp = len(_conds_pcp)
+                epoch_punish_cap_pre_post_fig, _axs_pcp = plt.subplots(
+                    1, _n_conds_pcp,
+                    sharey=True, squeeze=False,
+                )
+                _all_pcp_yvals = []
+                for _ci, _cond in enumerate(_conds_pcp):
+                    _ax       = _axs_pcp[0, _ci]
+                    _color    = condition_color_map.get(_cond, 'steelblue')
+                    _entries  = _pcp_by_cond[_cond]
+                    _n_pcp    = len(_entries)
+                    _pre_vals = [e[1] for e in _entries]
+                    _post_vals= [e[2] for e in _entries]
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _mn_pre   = float(np.nanmean(_pre_vals))
+                        _mn_post  = float(np.nanmean(_post_vals))
+                        _sem_pre  = (float(np.nanstd(_pre_vals,  ddof=1) / np.sqrt(_n_pcp))
+                                     if _n_pcp > 1 else 0.0)
+                        _sem_post = (float(np.nanstd(_post_vals, ddof=1) / np.sqrt(_n_pcp))
+                                     if _n_pcp > 1 else 0.0)
+                    _all_pcp_yvals.extend([_mn_pre + _sem_pre, _mn_post + _sem_post,
+                                           _mn_pre - _sem_pre, _mn_post - _sem_post])
+                    _all_pcp_yvals.extend(_pre_vals + _post_vals)
+                    _ax.bar(0, _mn_pre,  width=0.5, color=_color, alpha=0.7,
+                            yerr=_sem_pre,  error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
+                    _ax.bar(1, _mn_post, width=0.5, color=_color, alpha=0.7,
+                            yerr=_sem_post, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
+                    _rng_pcp = np.random.default_rng(seed=42)
+                    _jitter_pcp = (_rng_pcp.random(_n_pcp) - 0.5) * 0.18
+                    for _j, (_mname, _pv, _qv) in enumerate(_entries):
+                        _xp = 0 + _jitter_pcp[_j]
+                        _xq = 1 + _jitter_pcp[_j]
+                        _ax.plot([_xp, _xq], [_pv, _qv], '-',
+                                 color=_color, alpha=0.5, zorder=2)
+                        _ax.plot(_xp, _pv, 'o', color=_color,
+                                 markeredgecolor='black', markeredgewidth=0.5,
+                                 markersize=plt.rcParams['lines.markersize'], alpha=0.6, zorder=3)
+                        _ax.plot(_xq, _qv, 'o', color=_color,
+                                 markeredgecolor='black', markeredgewidth=0.5,
+                                 markersize=plt.rcParams['lines.markersize'], alpha=0.6, zorder=3)
+                    _ax.set_xticks([0, 1])
+                    _ax.set_xticklabels(['Pre-cutoff\n(0\u20130.65 s)', 'Post-cutoff\n(0.65\u20131.3 s)'])
+                    _ax.set_title(f'{_cond}\n(n={_n_pcp} mice)')
+                    _ax.set_ylabel('Capacitive Sensor (z-score)' if _ci == 0 else '')
+                    _ax.set_xlim(-0.6, 1.6)
+                    _ax.axhline(0, color='black', linestyle='--', zorder=1)
+                    _ax.tick_params(axis='both', direction='in')
+                    _ax.spines['top'].set_visible(False)
+                    _ax.spines['right'].set_visible(False)
+                if _all_pcp_yvals:
+                    _ymax_pcp = float(np.nanmax(_all_pcp_yvals))
+                    _ymin_pcp = float(np.nanmin(_all_pcp_yvals))
+                else:
+                    _ymax_pcp, _ymin_pcp = 1.0, -1.0
+                _pad_pcp = max(abs(_ymax_pcp), abs(_ymin_pcp)) * 0.12 or 0.1
+                _axs_pcp[0, 0].set_ylim(_ymin_pcp - _pad_pcp, _ymax_pcp + _pad_pcp)
+                epoch_punish_cap_pre_post_fig.suptitle(
+                    'Average Capacitive Sensor (z-scored): Pre- vs Post-Cutoff (Punishment Zone)\n'
+                    '(0-0.65 s vs 0.65-1.3 s; session-averaged punishment zone entry epochs, by condition)',
+                )
+                epoch_punish_cap_pre_post_fig.tight_layout()
+
+        # ── Punishment zone: pre-minus-post 0.65 s capacitive difference ─────
+        if 'epoch_punish_cap_diff' in selected_plots and _any_punish_cap:
+            _pcd_pre_mask  = (EPOCH_CANONICAL_TIME >= 0.0)  & (EPOCH_CANONICAL_TIME <= 0.65)
+            _pcd_post_mask = (EPOCH_CANONICAL_TIME >  0.65) & (EPOCH_CANONICAL_TIME <= 1.30)
+            _pcdiff_by_cond: dict = {}
+            for _r in all_results:
+                _sess_mat = _r.get('punish_cap_epoch_session_means')
+                if _sess_mat is None or _sess_mat.shape[0] == 0:
+                    continue
+                _cond = _r['starting_condition']
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    _pre_pcd  = float(np.nanmean(np.nanmean(_sess_mat[:, _pcd_pre_mask],  axis=1)))
+                    _post_pcd = float(np.nanmean(np.nanmean(_sess_mat[:, _pcd_post_mask], axis=1)))
+                _pcdiff_by_cond.setdefault(_cond, []).append((_r['mouse'], _post_pcd - _pre_pcd))
+
+            if _pcdiff_by_cond:
+                _conds_pcd   = sorted(_pcdiff_by_cond.keys())
+                _n_conds_pcd = len(_conds_pcd)
+                epoch_punish_cap_diff_fig, _ax_pcd = plt.subplots()
+                _all_pcdiff_vals = []
+                _bar_x_pcd = np.arange(_n_conds_pcd)
+                _rng_pcd   = np.random.default_rng(seed=42)
+                for _ci, _cond in enumerate(_conds_pcd):
+                    _color    = condition_color_map.get(_cond, 'steelblue')
+                    _entries  = _pcdiff_by_cond[_cond]
+                    _n_pcd    = len(_entries)
+                    _dvals_pcd = [e[1] for e in _entries]
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _mn_pcd  = float(np.nanmean(_dvals_pcd))
+                        _sem_pcd = (float(np.nanstd(_dvals_pcd, ddof=1) / np.sqrt(_n_pcd))
+                                    if _n_pcd > 1 else 0.0)
+                    _all_pcdiff_vals.extend(_dvals_pcd + [_mn_pcd + _sem_pcd, _mn_pcd - _sem_pcd])
+                    _ax_pcd.bar(_ci, _mn_pcd, width=0.55, color=_color, alpha=0.7,
+                                yerr=_sem_pcd, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
+                    _jitter_pcd = (_rng_pcd.random(_n_pcd) - 0.5) * 0.22
+                    _ax_pcd.scatter(_ci + _jitter_pcd, _dvals_pcd,
+                                    color=_color, edgecolors='black',
+                                    linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
+                _ax_pcd.axhline(0, color='black', linestyle='--', zorder=1)
+                _ax_pcd.set_xticks(_bar_x_pcd)
+                _ax_pcd.set_xticklabels(_conds_pcd)
+                _ax_pcd.set_ylabel('Capacitive difference (z-score)\n[post-cutoff \u2212 pre-cutoff]')
+                _ax_pcd.set_xlabel('Condition')
+                if _all_pcdiff_vals:
+                    _ymax_pcd = float(np.nanmax(_all_pcdiff_vals))
+                    _ymin_pcd = float(np.nanmin(_all_pcdiff_vals))
+                    _pad_pcd  = max(abs(_ymax_pcd), abs(_ymin_pcd)) * 0.12 or 0.1
+                    _ax_pcd.set_ylim(_ymin_pcd - _pad_pcd, _ymax_pcd + _pad_pcd)
+                _ax_pcd.tick_params(axis='both', direction='in')
+                _ax_pcd.spines['top'].set_visible(False)
+                _ax_pcd.spines['right'].set_visible(False)
+
+                import itertools as _itertools_pcd
+                _pairs_pcd = list(_itertools_pcd.combinations(range(_n_conds_pcd), 2))
+                _ylim_cur_pcd = list(_ax_pcd.get_ylim())
+                _bracket_step_pcd = (_ylim_cur_pcd[1] - _ylim_cur_pcd[0]) * 0.14
+                _bracket_base_pcd = _ylim_cur_pcd[1]
+                for _pi, (_ia, _ib) in enumerate(_pairs_pcd):
+                    _vals_a_pcd = [e[1] for e in _pcdiff_by_cond[_conds_pcd[_ia]]]
+                    _vals_b_pcd = [e[1] for e in _pcdiff_by_cond[_conds_pcd[_ib]]]
+                    if len(_vals_a_pcd) < 2 or len(_vals_b_pcd) < 2:
+                        continue
+                    _u_pcd, _p_pcd = mannwhitneyu(_vals_a_pcd, _vals_b_pcd, alternative='two-sided')
+                    _sig_pcd = _fmt_p(_p_pcd)
+                    _bh_pcd = _bracket_base_pcd + _bracket_step_pcd * (_pi + 0.6)
+                    _ax_pcd.plot([_ia, _ia, _ib, _ib],
+                                 [_bh_pcd - _bracket_step_pcd * 0.15,
+                                  _bh_pcd, _bh_pcd,
+                                  _bh_pcd - _bracket_step_pcd * 0.15],
+                                 color='black')
+                    _ax_pcd.text((_ia + _ib) / 2, _bh_pcd + _bracket_step_pcd * 0.05,
+                                 _sig_pcd, ha='center', va='bottom')
+                if _pairs_pcd:
+                    _new_top_pcd = _bracket_base_pcd + _bracket_step_pcd * (len(_pairs_pcd) + 1.5)
+                    _ax_pcd.set_ylim(_ylim_cur_pcd[0], _new_top_pcd)
+
+                epoch_punish_cap_diff_fig.suptitle(
+                    'Post- vs Pre-Cutoff Capacitive (z-scored) Difference by Condition (Punishment Zone)\n'
+                    '(0-0.65 s vs 0.65-1.3 s; mean \u00b1 SEM across mice; positive = higher licking after 0.65 s cutoff; Mann-Whitney U)',
+                )
+                epoch_punish_cap_diff_fig.tight_layout()
+                _write_mwu_report(
+                    output_dir, 'epoch_punish_cap_diff',
+                    'Capacitive (z-scored) Post-minus-Pre 0.65 s Cutoff (Punishment Zone)',
+                    [(_conds_pcd[_ia], _conds_pcd[_ib],
+                      [e[1] for e in _pcdiff_by_cond[_conds_pcd[_ia]]],
+                      [e[1] for e in _pcdiff_by_cond[_conds_pcd[_ib]]])
+                     for _ia, _ib in _pairs_pcd],
+                )
+
+        # ── Punishment zone: 1 s pre- vs 1 s post-zone entry cap bar chart ───
+        if 'epoch_punish_cap_pre_post_entry' in selected_plots and _any_punish_cap:
+            _pcpe_pre_mask  = (EPOCH_CANONICAL_TIME >= -1.0) & (EPOCH_CANONICAL_TIME <  0.0)
+            _pcpe_post_mask = (EPOCH_CANONICAL_TIME >= 0.0)  & (EPOCH_CANONICAL_TIME <= 1.0)
+            _pcpe_by_cond: dict = {}
+            for _r in all_results:
+                _sess_mat = _r.get('punish_cap_epoch_session_means')
+                if _sess_mat is None or _sess_mat.shape[0] == 0:
+                    continue
+                _cond = _r['starting_condition']
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    _pre_per_sess  = np.nanmean(_sess_mat[:, _pcpe_pre_mask],  axis=1)
+                    _post_per_sess = np.nanmean(_sess_mat[:, _pcpe_post_mask], axis=1)
+                    _pre_mean  = float(np.nanmean(_pre_per_sess))
+                    _post_mean = float(np.nanmean(_post_per_sess))
+                _pcpe_by_cond.setdefault(_cond, []).append((_r['mouse'], _pre_mean, _post_mean))
+
+            if _pcpe_by_cond:
+                _conds_pcpe   = sorted(_pcpe_by_cond.keys())
+                _n_conds_pcpe = len(_conds_pcpe)
+                epoch_punish_cap_pre_post_entry_fig, _axs_pcpe = plt.subplots(
+                    1, _n_conds_pcpe,
+                    sharey=True, squeeze=False,
+                )
+                _all_pcpe_yvals = []
+                for _ci, _cond in enumerate(_conds_pcpe):
+                    _ax       = _axs_pcpe[0, _ci]
+                    _color    = condition_color_map.get(_cond, 'steelblue')
+                    _entries  = _pcpe_by_cond[_cond]
+                    _n_pcpe   = len(_entries)
+                    _pre_vals = [e[1] for e in _entries]
+                    _post_vals= [e[2] for e in _entries]
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _mn_pre   = float(np.nanmean(_pre_vals))
+                        _mn_post  = float(np.nanmean(_post_vals))
+                        _sem_pre  = (float(np.nanstd(_pre_vals,  ddof=1) / np.sqrt(_n_pcpe))
+                                     if _n_pcpe > 1 else 0.0)
+                        _sem_post = (float(np.nanstd(_post_vals, ddof=1) / np.sqrt(_n_pcpe))
+                                     if _n_pcpe > 1 else 0.0)
+                    _all_pcpe_yvals.extend([_mn_pre + _sem_pre, _mn_post + _sem_post,
+                                            _mn_pre - _sem_pre, _mn_post - _sem_post])
+                    _all_pcpe_yvals.extend(_pre_vals + _post_vals)
+                    _ax.bar(0, _mn_pre,  width=0.5, color=_color, alpha=0.7,
+                            yerr=_sem_pre,  error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
+                    _ax.bar(1, _mn_post, width=0.5, color=_color, alpha=0.7,
+                            yerr=_sem_post, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
+                    _rng_pcpe = np.random.default_rng(seed=42)
+                    _jitter_pcpe = (_rng_pcpe.random(_n_pcpe) - 0.5) * 0.18
+                    for _j, (_mname, _pv, _qv) in enumerate(_entries):
+                        _xp = 0 + _jitter_pcpe[_j]
+                        _xq = 1 + _jitter_pcpe[_j]
+                        _ax.plot([_xp, _xq], [_pv, _qv], '-',
+                                 color=_color, alpha=0.5, zorder=2)
+                        _ax.plot(_xp, _pv, 'o', color=_color,
+                                 markeredgecolor='black', markeredgewidth=0.5,
+                                 markersize=plt.rcParams['lines.markersize'], alpha=0.6, zorder=3)
+                        _ax.plot(_xq, _qv, 'o', color=_color,
+                                 markeredgecolor='black', markeredgewidth=0.5,
+                                 markersize=plt.rcParams['lines.markersize'], alpha=0.6, zorder=3)
+                    _ax.set_xticks([0, 1])
+                    _ax.set_xticklabels(['Pre-entry\n(\u22121\u20130 s)', 'Post-entry\n(0\u20131 s)'])
+                    _ax.set_title(f'{_cond}\n(n={_n_pcpe} mice)')
+                    _ax.set_ylabel('Capacitive Sensor (z-score)' if _ci == 0 else '')
+                    _ax.set_xlim(-0.6, 1.6)
+                    _ax.axhline(0, color='black', linestyle='--', zorder=1)
+                    _ax.tick_params(axis='both', direction='in')
+                    _ax.spines['top'].set_visible(False)
+                    _ax.spines['right'].set_visible(False)
+                if _all_pcpe_yvals:
+                    _ymax_pcpe = float(np.nanmax(_all_pcpe_yvals))
+                    _ymin_pcpe = float(np.nanmin(_all_pcpe_yvals))
+                else:
+                    _ymax_pcpe, _ymin_pcpe = 1.0, -1.0
+                _pad_pcpe = max(abs(_ymax_pcpe), abs(_ymin_pcpe)) * 0.12 or 0.1
+                _axs_pcpe[0, 0].set_ylim(_ymin_pcpe - _pad_pcpe, _ymax_pcpe + _pad_pcpe)
+                epoch_punish_cap_pre_post_entry_fig.suptitle(
+                    'Average Capacitive Sensor (z-scored): 1 s Pre- vs 1 s Post-Zone Entry (Punishment Zone)\n'
+                    '(-1-0 s vs 0-1 s; session-averaged punishment zone entry epochs, by condition)',
+                )
+                epoch_punish_cap_pre_post_entry_fig.tight_layout()
+
+        # ── Punishment zone: pre-minus-post zone entry cap difference ─────────
+        if 'epoch_punish_cap_diff_entry' in selected_plots and _any_punish_cap:
+            _pcde_pre_mask  = (EPOCH_CANONICAL_TIME >= -1.0) & (EPOCH_CANONICAL_TIME <  0.0)
+            _pcde_post_mask = (EPOCH_CANONICAL_TIME >= 0.0)  & (EPOCH_CANONICAL_TIME <= 1.0)
+            _pcdentry_by_cond: dict = {}
+            for _r in all_results:
+                _sess_mat = _r.get('punish_cap_epoch_session_means')
+                if _sess_mat is None or _sess_mat.shape[0] == 0:
+                    continue
+                _cond = _r['starting_condition']
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    _pre_pcde  = float(np.nanmean(np.nanmean(_sess_mat[:, _pcde_pre_mask],  axis=1)))
+                    _post_pcde = float(np.nanmean(np.nanmean(_sess_mat[:, _pcde_post_mask], axis=1)))
+                _pcdentry_by_cond.setdefault(_cond, []).append((_r['mouse'], _post_pcde - _pre_pcde))
+
+            if _pcdentry_by_cond:
+                _conds_pcde   = sorted(_pcdentry_by_cond.keys())
+                _n_conds_pcde = len(_conds_pcde)
+                epoch_punish_cap_diff_entry_fig, _ax_pcde = plt.subplots()
+                _all_pcde_vals = []
+                _bar_x_pcde = np.arange(_n_conds_pcde)
+                _rng_pcde   = np.random.default_rng(seed=42)
+                for _ci, _cond in enumerate(_conds_pcde):
+                    _color    = condition_color_map.get(_cond, 'steelblue')
+                    _entries  = _pcdentry_by_cond[_cond]
+                    _n_pcde   = len(_entries)
+                    _dvals_pcde = [e[1] for e in _entries]
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _mn_pcde  = float(np.nanmean(_dvals_pcde))
+                        _sem_pcde = (float(np.nanstd(_dvals_pcde, ddof=1) / np.sqrt(_n_pcde))
+                                     if _n_pcde > 1 else 0.0)
+                    _all_pcde_vals.extend(_dvals_pcde + [_mn_pcde + _sem_pcde, _mn_pcde - _sem_pcde])
+                    _ax_pcde.bar(_ci, _mn_pcde, width=0.55, color=_color, alpha=0.7,
+                                 yerr=_sem_pcde, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
+                    _jitter_pcde = (_rng_pcde.random(_n_pcde) - 0.5) * 0.22
+                    _ax_pcde.scatter(_ci + _jitter_pcde, _dvals_pcde,
+                                     color=_color, edgecolors='black',
+                                     linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
+                _ax_pcde.axhline(0, color='black', linestyle='--', zorder=1)
+                _ax_pcde.set_xticks(_bar_x_pcde)
+                _ax_pcde.set_xticklabels(_conds_pcde)
+                _ax_pcde.set_ylabel('Capacitive difference (z-score)\n[post-entry \u2212 pre-entry]')
+                _ax_pcde.set_xlabel('Condition')
+                if _all_pcde_vals:
+                    _ymax_pcde = float(np.nanmax(_all_pcde_vals))
+                    _ymin_pcde = float(np.nanmin(_all_pcde_vals))
+                    _pad_pcde  = max(abs(_ymax_pcde), abs(_ymin_pcde)) * 0.12 or 0.1
+                    _ax_pcde.set_ylim(_ymin_pcde - _pad_pcde, _ymax_pcde + _pad_pcde)
+                _ax_pcde.tick_params(axis='both', direction='in')
+                _ax_pcde.spines['top'].set_visible(False)
+                _ax_pcde.spines['right'].set_visible(False)
+
+                import itertools as _itertools_pcde
+                _pairs_pcde = list(_itertools_pcde.combinations(range(_n_conds_pcde), 2))
+                _ylim_cur_pcde = list(_ax_pcde.get_ylim())
+                _bracket_step_pcde = (_ylim_cur_pcde[1] - _ylim_cur_pcde[0]) * 0.14
+                _bracket_base_pcde = _ylim_cur_pcde[1]
+                for _pi, (_ia, _ib) in enumerate(_pairs_pcde):
+                    _vals_a_pcde = [e[1] for e in _pcdentry_by_cond[_conds_pcde[_ia]]]
+                    _vals_b_pcde = [e[1] for e in _pcdentry_by_cond[_conds_pcde[_ib]]]
+                    if len(_vals_a_pcde) < 2 or len(_vals_b_pcde) < 2:
+                        continue
+                    _u_pcde, _p_pcde = mannwhitneyu(_vals_a_pcde, _vals_b_pcde, alternative='two-sided')
+                    _sig_pcde = _fmt_p(_p_pcde)
+                    _bh_pcde = _bracket_base_pcde + _bracket_step_pcde * (_pi + 0.6)
+                    _ax_pcde.plot([_ia, _ia, _ib, _ib],
+                                  [_bh_pcde - _bracket_step_pcde * 0.15,
+                                   _bh_pcde, _bh_pcde,
+                                   _bh_pcde - _bracket_step_pcde * 0.15],
+                                  color='black')
+                    _ax_pcde.text((_ia + _ib) / 2, _bh_pcde + _bracket_step_pcde * 0.05,
+                                  _sig_pcde, ha='center', va='bottom')
+                if _pairs_pcde:
+                    _new_top_pcde = _bracket_base_pcde + _bracket_step_pcde * (len(_pairs_pcde) + 1.5)
+                    _ax_pcde.set_ylim(_ylim_cur_pcde[0], _new_top_pcde)
+
+                epoch_punish_cap_diff_entry_fig.suptitle(
+                    'Post- vs Pre-Zone Entry Capacitive (z-scored) Difference by Condition (Punishment Zone)\n'
+                    '(-1-0 s vs 0-1 s; mean \u00b1 SEM across mice; positive = higher licking after zone entry; Mann-Whitney U)',
+                )
+                epoch_punish_cap_diff_entry_fig.tight_layout()
+                _write_mwu_report(
+                    output_dir, 'epoch_punish_cap_diff_entry',
+                    'Capacitive (z-scored) Post-minus-Pre Zone Entry (Punishment Zone, 1 s windows)',
+                    [(_conds_pcde[_ia], _conds_pcde[_ib],
+                      [e[1] for e in _pcdentry_by_cond[_conds_pcde[_ia]]],
+                      [e[1] for e in _pcdentry_by_cond[_conds_pcde[_ib]]])
+                     for _ia, _ib in _pairs_pcde],
+                )
+
+        # ── Pre/post-reward delivery speed bar chart ───────────────────────
+        if 'epoch_reward_speed_pre_post' in selected_plots and _any_speed:
+            _pre_mask  = (EPOCH_CANONICAL_TIME >= 0.0)  & (EPOCH_CANONICAL_TIME <= 0.65)
+            _post_mask = (EPOCH_CANONICAL_TIME >  0.65) & (EPOCH_CANONICAL_TIME <= 1.30)
+            # Collect per-mouse session-averaged bin means, grouped by condition
+            _pp_by_cond: dict = {}
+            for _r in all_results:
+                _sess_mat = _r.get('speed_epoch_session_means')
+                if _sess_mat is None or _sess_mat.shape[0] == 0:
+                    continue
+                _cond = _r['starting_condition']
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    _pre_per_sess  = np.nanmean(_sess_mat[:, _pre_mask],  axis=1)
+                    _post_per_sess = np.nanmean(_sess_mat[:, _post_mask], axis=1)
+                    _pre_mean  = float(np.nanmean(_pre_per_sess))
+                    _post_mean = float(np.nanmean(_post_per_sess))
+                _pp_by_cond.setdefault(_cond, []).append((_r['mouse'], _pre_mean, _post_mean))
+
+            if _pp_by_cond:
+                _conds_pp   = sorted(_pp_by_cond.keys())
+                _n_conds_pp = len(_conds_pp)
+                epoch_reward_speed_pre_post_fig, _axs_pp = plt.subplots(
+                    1, _n_conds_pp,
+                    sharey=True, squeeze=False,
+                )
+                _all_pp_yvals = []
+                for _ci, _cond in enumerate(_conds_pp):
+                    _ax      = _axs_pp[0, _ci]
+                    _color   = condition_color_map.get(_cond, 'steelblue')
+                    _entries = _pp_by_cond[_cond]
+                    _n_pp    = len(_entries)
+                    _pre_vals  = [e[1] for e in _entries]
+                    _post_vals = [e[2] for e in _entries]
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _mn_pre   = float(np.nanmean(_pre_vals))
+                        _mn_post  = float(np.nanmean(_post_vals))
+                        _sem_pre  = (float(np.nanstd(_pre_vals,  ddof=1) / np.sqrt(_n_pp))
+                                     if _n_pp > 1 else 0.0)
+                        _sem_post = (float(np.nanstd(_post_vals, ddof=1) / np.sqrt(_n_pp))
+                                     if _n_pp > 1 else 0.0)
+                    _all_pp_yvals.extend([_mn_pre + _sem_pre, _mn_post + _sem_post,
+                                          _mn_pre - _sem_pre, _mn_post - _sem_post])
+                    _all_pp_yvals.extend(_pre_vals + _post_vals)
+                    _ax.bar(0, _mn_pre,  width=0.5, color=_color, alpha=0.7,
+                            yerr=_sem_pre,  error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
+                    _ax.bar(1, _mn_post, width=0.5, color=_color, alpha=0.7,
+                            yerr=_sem_post, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
+                    _rng_pp = np.random.default_rng(seed=42)
+                    _jitter = (_rng_pp.random(_n_pp) - 0.5) * 0.18
+                    for _j, (_mname, _pv, _qv) in enumerate(_entries):
+                        _xp = 0 + _jitter[_j]
+                        _xq = 1 + _jitter[_j]
+                        _ax.plot([_xp, _xq], [_pv, _qv], '-',
+                                 color=_color, alpha=0.5, zorder=2)
+                        _ax.plot(_xp, _pv, 'o', color=_color,
+                                 markeredgecolor='black', markeredgewidth=0.5,
+                                 markersize=plt.rcParams['lines.markersize'], alpha=0.6, zorder=3)
+                        _ax.plot(_xq, _qv, 'o', color=_color,
+                                 markeredgecolor='black', markeredgewidth=0.5,
+                                 markersize=plt.rcParams['lines.markersize'], alpha=0.6, zorder=3)
+                    _ax.set_xticks([0, 1])
+                    _ax.set_xticklabels(['Pre-reward\n(0\u20130.65 s)', 'Post-reward\n(0.65\u20131.3 s)'])
+                    _ax.set_title(f'{_cond}\n(n={_n_pp} mice)')
+                    _ax.set_ylabel('Treadmill Speed (cm/s)' if _ci == 0 else '')
+                    _ax.set_xlim(-0.6, 1.6)
+                    _ax.tick_params(axis='both', direction='in')
+                    _ax.spines['top'].set_visible(False)
+                    _ax.spines['right'].set_visible(False)
+                if _all_pp_yvals:
+                    _ymax_pp = float(np.nanmax(_all_pp_yvals))
+                    _ymin_pp = float(np.nanmin(_all_pp_yvals))
+                else:
+                    _ymax_pp, _ymin_pp = 1.0, 0.0
+                _bot_pp = _ymin_pp * 1.05 if _ymin_pp < 0 else 0.0
+                _axs_pp[0, 0].set_ylim(_bot_pp, _ymax_pp * 1.05)
+                epoch_reward_speed_pre_post_fig.suptitle(
+                    'Average Speed: Pre- vs Post-Reward Delivery\n'
+                    '(0-0.65 s vs 0.65-1.3 s; session-averaged reward zone entry epochs, by condition)',
+                )
+                epoch_reward_speed_pre_post_fig.tight_layout()
+
+        # ── Pre-minus-post reward speed difference bar chart ──────────────────
+        if 'epoch_reward_speed_diff' in selected_plots and _any_speed:
+            _pre_mask_d  = (EPOCH_CANONICAL_TIME >= 0.0)  & (EPOCH_CANONICAL_TIME <= 0.65)
+            _post_mask_d = (EPOCH_CANONICAL_TIME >  0.65) & (EPOCH_CANONICAL_TIME <= 1.30)
+            # condition -> list of (mouse_name, diff_value)
+            _diff_by_cond: dict = {}
+            for _r in all_results:
+                _sess_mat = _r.get('speed_epoch_session_means')
+                if _sess_mat is None or _sess_mat.shape[0] == 0:
+                    continue
+                _cond = _r['starting_condition']
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    _pre_d  = float(np.nanmean(np.nanmean(_sess_mat[:, _pre_mask_d],  axis=1)))
+                    _post_d = float(np.nanmean(np.nanmean(_sess_mat[:, _post_mask_d], axis=1)))
+                _diff_by_cond.setdefault(_cond, []).append((_r['mouse'], _post_d - _pre_d))
+
+            if _diff_by_cond:
+                _conds_d   = sorted(_diff_by_cond.keys())
+                _n_conds_d = len(_conds_d)
+                epoch_reward_speed_diff_fig, _ax_d = plt.subplots()
+                _all_diff_vals = []
+                _bar_x = np.arange(_n_conds_d)
+                _rng_d = np.random.default_rng(seed=42)
+                for _ci, _cond in enumerate(_conds_d):
+                    _color   = condition_color_map.get(_cond, 'steelblue')
+                    _entries = _diff_by_cond[_cond]
+                    _n_d     = len(_entries)
+                    _dvals   = [e[1] for e in _entries]
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _mn_d  = float(np.nanmean(_dvals))
+                        _sem_d = (float(np.nanstd(_dvals, ddof=1) / np.sqrt(_n_d))
+                                  if _n_d > 1 else 0.0)
+                    _all_diff_vals.extend(_dvals + [_mn_d + _sem_d, _mn_d - _sem_d])
+                    _ax_d.bar(_ci, _mn_d, width=0.55, color=_color, alpha=0.7,
+                              yerr=_sem_d, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
+                    _jitter_d = (_rng_d.random(_n_d) - 0.5) * 0.22
+                    _ax_d.scatter(_ci + _jitter_d, _dvals,
+                                  color=_color, edgecolors='black',
+                                  linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
+                _ax_d.axhline(0, color='black', linestyle='-', zorder=1)
+                _ax_d.set_xticks(_bar_x)
+                _ax_d.set_xticklabels(_conds_d)
+                _ax_d.set_ylabel('Speed difference (cm/s)\n[post-reward \u2212 pre-reward]')
+                _ax_d.set_xlabel('CA%')
+                _ax_d.set_ylim(bottom=-6, top=2)
+                if _all_diff_vals:
+                    _ymax_d = float(np.nanmax(_all_diff_vals))
+                    _ymin_d = float(np.nanmin(_all_diff_vals))
+                    _pad_d  = max(abs(_ymax_d), abs(_ymin_d)) * 0.12 or 0.5
+                _ax_d.tick_params(axis='both', direction='in')
+                _ax_d.spines['top'].set_visible(False)
+                _ax_d.spines['right'].set_visible(False)
+
+                # ── Mann-Whitney U tests for all condition pairs ──────────────
+                import itertools as _itertools_d
+                _pairs_d = list(_itertools_d.combinations(range(_n_conds_d), 2))
+                _ylim_cur = list(_ax_d.get_ylim())
+                _bracket_step = (_ylim_cur[1] - _ylim_cur[0]) * 0.14
+                _bracket_base = _ylim_cur[1] - _bracket_step * (len(_pairs_d) + 0.5)
+                for _pi, (_ia, _ib) in enumerate(_pairs_d):
+                    _vals_a = [e[1] for e in _diff_by_cond[_conds_d[_ia]]]
+                    _vals_b = [e[1] for e in _diff_by_cond[_conds_d[_ib]]]
+                    if len(_vals_a) < 2 or len(_vals_b) < 2:
+                        continue
+                    _u_stat_d, _p_val_d = mannwhitneyu(_vals_a, _vals_b, alternative='two-sided')
+                    _sig_str = _fmt_p(_p_val_d)
+                    _bh = _bracket_base + _bracket_step * (_pi + 0.6)
+                    _ax_d.plot([_ia, _ia, _ib, _ib],
+                               [_bh - _bracket_step * 0.15,
+                                _bh,
+                                _bh,
+                                _bh - _bracket_step * 0.15],
+                               color='black')
+                    _ax_d.text((_ia + _ib) / 2, _bh + _bracket_step * 0.05,
+                               _sig_str, ha='center', va='bottom')
+                epoch_reward_speed_diff_fig.suptitle(
+                    'Post-Reward Delivery Speed Difference',
+                )
+                epoch_reward_speed_diff_fig.tight_layout()
+                _write_mwu_report(
+                    output_dir, 'epoch_reward_speed_diff',
+                    'Speed Post-minus-Pre Reward Delivery (0-0.65 s vs 0.65-1.3 s)',
+                    [(_conds_d[_ia], _conds_d[_ib],
+                      [e[1] for e in _diff_by_cond[_conds_d[_ia]]],
+                      [e[1] for e in _diff_by_cond[_conds_d[_ib]]])
+                     for _ia, _ib in _pairs_d],
+                )
+
+        # ── Pre/post-reward delivery capacitive (z-scored) bar chart ──────────
+        if 'epoch_reward_cap_pre_post' in selected_plots and _any_cap:
+            _cap_pre_mask  = (EPOCH_CANONICAL_TIME >= 0.0)  & (EPOCH_CANONICAL_TIME <= 0.65)
+            _cap_post_mask = (EPOCH_CANONICAL_TIME >  0.65) & (EPOCH_CANONICAL_TIME <= 1.30)
+            _cap_pp_by_cond: dict = {}
+            for _r in all_results:
+                _sess_mat = _r.get('cap_epoch_session_means')
+                if _sess_mat is None or _sess_mat.shape[0] == 0:
+                    continue
+                _cond = _r['starting_condition']
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    _pre_per_sess  = np.nanmean(_sess_mat[:, _cap_pre_mask],  axis=1)
+                    _post_per_sess = np.nanmean(_sess_mat[:, _cap_post_mask], axis=1)
+                    _pre_mean  = float(np.nanmean(_pre_per_sess))
+                    _post_mean = float(np.nanmean(_post_per_sess))
+                _cap_pp_by_cond.setdefault(_cond, []).append((_r['mouse'], _pre_mean, _post_mean))
+
+            if _cap_pp_by_cond:
+                _conds_cap_pp   = sorted(_cap_pp_by_cond.keys())
+                _n_conds_cap_pp = len(_conds_cap_pp)
+                epoch_reward_cap_pre_post_fig, _axs_cap_pp = plt.subplots(
+                    1, _n_conds_cap_pp,
+                    sharey=True, squeeze=False,
+                )
+                _all_cap_pp_yvals = []
+                for _ci, _cond in enumerate(_conds_cap_pp):
+                    _ax      = _axs_cap_pp[0, _ci]
+                    _color   = condition_color_map.get(_cond, 'steelblue')
+                    _entries = _cap_pp_by_cond[_cond]
+                    _n_cap_pp = len(_entries)
+                    _pre_vals  = [e[1] for e in _entries]
+                    _post_vals = [e[2] for e in _entries]
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _mn_pre   = float(np.nanmean(_pre_vals))
+                        _mn_post  = float(np.nanmean(_post_vals))
+                        _sem_pre  = (float(np.nanstd(_pre_vals,  ddof=1) / np.sqrt(_n_cap_pp))
+                                     if _n_cap_pp > 1 else 0.0)
+                        _sem_post = (float(np.nanstd(_post_vals, ddof=1) / np.sqrt(_n_cap_pp))
+                                     if _n_cap_pp > 1 else 0.0)
+                    _all_cap_pp_yvals.extend([_mn_pre + _sem_pre, _mn_post + _sem_post,
+                                              _mn_pre - _sem_pre, _mn_post - _sem_post])
+                    _all_cap_pp_yvals.extend(_pre_vals + _post_vals)
+                    _ax.bar(0, _mn_pre,  width=0.5, color=_color, alpha=0.7,
+                            yerr=_sem_pre,  error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
+                    _ax.bar(1, _mn_post, width=0.5, color=_color, alpha=0.7,
+                            yerr=_sem_post, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
+                    _rng_cap_pp = np.random.default_rng(seed=42)
+                    _jitter_cap_pp = (_rng_cap_pp.random(_n_cap_pp) - 0.5) * 0.18
+                    for _j, (_mname, _pv, _qv) in enumerate(_entries):
+                        _xp = 0 + _jitter_cap_pp[_j]
+                        _xq = 1 + _jitter_cap_pp[_j]
+                        _ax.plot([_xp, _xq], [_pv, _qv], '-',
+                                 color=_color, alpha=0.5, zorder=2)
+                        _ax.plot(_xp, _pv, 'o', color=_color,
+                                 markeredgecolor='black', markeredgewidth=0.5,
+                                 markersize=plt.rcParams['lines.markersize'], alpha=0.6, zorder=3)
+                        _ax.plot(_xq, _qv, 'o', color=_color,
+                                 markeredgecolor='black', markeredgewidth=0.5,
+                                 markersize=plt.rcParams['lines.markersize'], alpha=0.6, zorder=3)
+                    _ax.set_xticks([0, 1])
+                    _ax.set_xticklabels(['Pre-reward\n(0\u20130.65 s)', 'Post-reward\n(0.65\u20131.3 s)'])
+                    _ax.set_title(f'{_cond}\n(n={_n_cap_pp} mice)')
+                    _ax.set_ylabel('Capacitive Sensor (z-score)' if _ci == 0 else '')
+                    _ax.set_xlim(-0.6, 1.6)
+                    _ax.axhline(0, color='black', linestyle='--', zorder=1)
+                    _ax.tick_params(axis='both', direction='in')
+                    _ax.spines['top'].set_visible(False)
+                    _ax.spines['right'].set_visible(False)
+                if _all_cap_pp_yvals:
+                    _ymax_cap_pp = float(np.nanmax(_all_cap_pp_yvals))
+                    _ymin_cap_pp = float(np.nanmin(_all_cap_pp_yvals))
+                else:
+                    _ymax_cap_pp, _ymin_cap_pp = 1.0, -1.0
+                _pad_cap_pp = max(abs(_ymax_cap_pp), abs(_ymin_cap_pp)) * 0.12 or 0.1
+                _axs_cap_pp[0, 0].set_ylim(_ymin_cap_pp - _pad_cap_pp, _ymax_cap_pp + _pad_cap_pp)
+                epoch_reward_cap_pre_post_fig.suptitle(
+                    'Average Capacitive Sensor (z-scored): Pre- vs Post-Reward Delivery\n'
+                    '(0-0.65 s vs 0.65-1.3 s; session-averaged reward zone entry epochs, by condition)',
+                )
+                epoch_reward_cap_pre_post_fig.tight_layout()
+
+        # ── Pre-minus-post reward capacitive difference bar chart (Mann-Whitney U) ──
+        if 'epoch_reward_cap_diff' in selected_plots and _any_cap:
+            _cap_pre_mask_d  = (EPOCH_CANONICAL_TIME >= 0.0)  & (EPOCH_CANONICAL_TIME <= 0.65)
+            _cap_post_mask_d = (EPOCH_CANONICAL_TIME >  0.65) & (EPOCH_CANONICAL_TIME <= 1.30)
+            _cap_diff_by_cond: dict = {}
+            for _r in all_results:
+                _sess_mat = _r.get('cap_epoch_session_means')
+                if _sess_mat is None or _sess_mat.shape[0] == 0:
+                    continue
+                _cond = _r['starting_condition']
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    _pre_d  = float(np.nanmean(np.nanmean(_sess_mat[:, _cap_pre_mask_d],  axis=1)))
+                    _post_d = float(np.nanmean(np.nanmean(_sess_mat[:, _cap_post_mask_d], axis=1)))
+                _cap_diff_by_cond.setdefault(_cond, []).append((_r['mouse'], _post_d - _pre_d))
+
+            if _cap_diff_by_cond:
+                _conds_cap_d   = sorted(_cap_diff_by_cond.keys())
+                _n_conds_cap_d = len(_conds_cap_d)
+                epoch_reward_cap_diff_fig, _ax_cap_d = plt.subplots()
+                _all_cap_diff_vals = []
+                _bar_x_cap = np.arange(_n_conds_cap_d)
+                _rng_cap_d = np.random.default_rng(seed=42)
+                for _ci, _cond in enumerate(_conds_cap_d):
+                    _color   = condition_color_map.get(_cond, 'steelblue')
+                    _entries = _cap_diff_by_cond[_cond]
+                    _n_cap_d = len(_entries)
+                    _dvals   = [e[1] for e in _entries]
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _mn_cap_d  = float(np.nanmean(_dvals))
+                        _sem_cap_d = (float(np.nanstd(_dvals, ddof=1) / np.sqrt(_n_cap_d))
+                                      if _n_cap_d > 1 else 0.0)
+                    _all_cap_diff_vals.extend(_dvals + [_mn_cap_d + _sem_cap_d, _mn_cap_d - _sem_cap_d])
+                    _ax_cap_d.bar(_ci, _mn_cap_d, width=0.55, color=_color, alpha=0.7,
+                                  yerr=_sem_cap_d, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
+                    _jitter_cap_d = (_rng_cap_d.random(_n_cap_d) - 0.5) * 0.22
+                    _ax_cap_d.scatter(_ci + _jitter_cap_d, _dvals,
+                                      color=_color, edgecolors='black',
+                                      linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
+                _ax_cap_d.axhline(0, color='black', linestyle='--', zorder=1)
+                _ax_cap_d.set_xticks(_bar_x_cap)
+                _ax_cap_d.set_xticklabels(_conds_cap_d)
+                _ax_cap_d.set_ylabel('Capacitive difference (z-score)\n[post-reward \u2212 pre-reward]')
+                _ax_cap_d.set_xlabel('CA%')
+                _ax_cap_d.set_ylim(bottom=0, top=8)
+                if _all_cap_diff_vals:
+                    _ymax_cap_d = float(np.nanmax(_all_cap_diff_vals))
+                    _ymin_cap_d = float(np.nanmin(_all_cap_diff_vals))
+                    _pad_cap_d  = max(abs(_ymax_cap_d), abs(_ymin_cap_d)) * 0.12 or 0.1
+                _ax_cap_d.tick_params(axis='both', direction='in')
+                _ax_cap_d.spines['top'].set_visible(False)
+                _ax_cap_d.spines['right'].set_visible(False)
+
+                # ── Mann-Whitney U tests for all condition pairs ──────────────
+                import itertools as _itertools_cap_d
+                _pairs_cap_d = list(_itertools_cap_d.combinations(range(_n_conds_cap_d), 2))
+                _ylim_cur_cap = list(_ax_cap_d.get_ylim())
+                _bracket_step_cap = (_ylim_cur_cap[1] - _ylim_cur_cap[0]) * 0.14
+                _bracket_base_cap = _ylim_cur_cap[1] - _bracket_step_cap * (len(_pairs_cap_d) + 0.5)
+                for _pi, (_ia, _ib) in enumerate(_pairs_cap_d):
+                    _vals_a = [e[1] for e in _cap_diff_by_cond[_conds_cap_d[_ia]]]
+                    _vals_b = [e[1] for e in _cap_diff_by_cond[_conds_cap_d[_ib]]]
+                    if len(_vals_a) < 2 or len(_vals_b) < 2:
+                        continue
+                    _u_stat_cap, _p_val_cap = mannwhitneyu(_vals_a, _vals_b, alternative='two-sided')
+                    _sig_str_cap = _fmt_p(_p_val_cap)
+                    _bh_cap = _bracket_base_cap + _bracket_step_cap * (_pi + 0.6)
+                    _ax_cap_d.plot([_ia, _ia, _ib, _ib],
+                                   [_bh_cap - _bracket_step_cap * 0.15,
+                                    _bh_cap,
+                                    _bh_cap,
+                                    _bh_cap - _bracket_step_cap * 0.15],
+                                   color='black')
+                    _ax_cap_d.text((_ia + _ib) / 2, _bh_cap + _bracket_step_cap * 0.05,
+                                   _sig_str_cap, ha='center', va='bottom')
+                epoch_reward_cap_diff_fig.suptitle(
+                    'Post-Reward Delivery Licking Differences',
+                )
+                epoch_reward_cap_diff_fig.tight_layout()
+                _write_mwu_report(
+                    output_dir, 'epoch_reward_cap_diff',
+                    'Capacitive (z-scored) Post-minus-Pre Reward Delivery (0-0.65 s vs 0.65-1.3 s)',
+                    [(_conds_cap_d[_ia], _conds_cap_d[_ib],
+                      [e[1] for e in _cap_diff_by_cond[_conds_cap_d[_ia]]],
+                      [e[1] for e in _cap_diff_by_cond[_conds_cap_d[_ib]]])
+                     for _ia, _ib in _pairs_cap_d],
+                )
+
+        # ── Reward zone: 0.65 s pre- vs 0.65 s post-zone entry bar chart ─────
+        if 'epoch_reward_speed_pre_post_entry' in selected_plots and _any_speed:
+            _pre_mask_re  = (EPOCH_CANONICAL_TIME >= -0.65) & (EPOCH_CANONICAL_TIME <  0.0)
+            _post_mask_re = (EPOCH_CANONICAL_TIME >= 0.0)   & (EPOCH_CANONICAL_TIME <= 0.65)
+            _rpe_by_cond: dict = {}
+            for _r in all_results:
+                _sess_mat = _r.get('speed_epoch_session_means')
+                if _sess_mat is None or _sess_mat.shape[0] == 0:
+                    continue
+                _cond = _r['starting_condition']
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    _pre_per_sess  = np.nanmean(_sess_mat[:, _pre_mask_re],  axis=1)
+                    _post_per_sess = np.nanmean(_sess_mat[:, _post_mask_re], axis=1)
+                    _pre_mean  = float(np.nanmean(_pre_per_sess))
+                    _post_mean = float(np.nanmean(_post_per_sess))
+                _rpe_by_cond.setdefault(_cond, []).append((_r['mouse'], _pre_mean, _post_mean))
+
+            if _rpe_by_cond:
+                _conds_rpe   = sorted(_rpe_by_cond.keys())
+                _n_conds_rpe = len(_conds_rpe)
+                epoch_reward_speed_pre_post_entry_fig, _axs_rpe = plt.subplots(
+                    1, _n_conds_rpe,
+                    sharey=True, squeeze=False,
+                )
+                _all_rpe_yvals = []
+                for _ci, _cond in enumerate(_conds_rpe):
+                    _ax       = _axs_rpe[0, _ci]
+                    _color    = condition_color_map.get(_cond, 'steelblue')
+                    _entries  = _rpe_by_cond[_cond]
+                    _n_rpe    = len(_entries)
+                    _pre_vals = [e[1] for e in _entries]
+                    _post_vals= [e[2] for e in _entries]
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _mn_pre   = float(np.nanmean(_pre_vals))
+                        _mn_post  = float(np.nanmean(_post_vals))
+                        _sem_pre  = (float(np.nanstd(_pre_vals,  ddof=1) / np.sqrt(_n_rpe))
+                                     if _n_rpe > 1 else 0.0)
+                        _sem_post = (float(np.nanstd(_post_vals, ddof=1) / np.sqrt(_n_rpe))
+                                     if _n_rpe > 1 else 0.0)
+                    _all_rpe_yvals.extend([_mn_pre + _sem_pre, _mn_post + _sem_post,
+                                           _mn_pre - _sem_pre, _mn_post - _sem_post])
+                    _all_rpe_yvals.extend(_pre_vals + _post_vals)
+                    _ax.bar(0, _mn_pre,  width=0.5, color=_color, alpha=0.7,
+                            yerr=_sem_pre,  error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
+                    _ax.bar(1, _mn_post, width=0.5, color=_color, alpha=0.7,
+                            yerr=_sem_post, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
+                    _rng_rpe = np.random.default_rng(seed=42)
+                    _jitter  = (_rng_rpe.random(_n_rpe) - 0.5) * 0.18
+                    for _j, (_mname, _pv, _qv) in enumerate(_entries):
+                        _xp = 0 + _jitter[_j]
+                        _xq = 1 + _jitter[_j]
+                        _ax.plot([_xp, _xq], [_pv, _qv], '-',
+                                 color=_color, alpha=0.5, zorder=2)
+                        _ax.plot(_xp, _pv, 'o', color=_color,
+                                 markeredgecolor='black', markeredgewidth=0.5,
+                                 markersize=plt.rcParams['lines.markersize'], alpha=0.6, zorder=3)
+                        _ax.plot(_xq, _qv, 'o', color=_color,
+                                 markeredgecolor='black', markeredgewidth=0.5,
+                                 markersize=plt.rcParams['lines.markersize'], alpha=0.6, zorder=3)
+                    _ax.set_xticks([0, 1])
+                    _ax.set_xticklabels(['Pre-entry\n(−0.65–0 s)', 'Post-entry\n(0–0.65 s)'])
+                    _ax.set_title(f'{_cond}\n(n={_n_rpe} mice)')
+                    _ax.set_ylabel('Treadmill Speed (cm/s)' if _ci == 0 else '')
+                    _ax.set_xlim(-0.6, 1.6)
+                    _ax.tick_params(axis='both', direction='in')
+                    _ax.spines['top'].set_visible(False)
+                    _ax.spines['right'].set_visible(False)
+                if _all_rpe_yvals:
+                    _ymax_rpe = float(np.nanmax(_all_rpe_yvals))
+                    _ymin_rpe = float(np.nanmin(_all_rpe_yvals))
+                else:
+                    _ymax_rpe, _ymin_rpe = 1.0, 0.0
+                _bot_rpe = _ymin_rpe * 1.05 if _ymin_rpe < 0 else 0.0
+                _axs_rpe[0, 0].set_ylim(_bot_rpe, _ymax_rpe * 1.05)
+                epoch_reward_speed_pre_post_entry_fig.suptitle(
+                    'Average Speed: 0.65 s Pre- vs 0.65 s Post-Zone Entry (Reward Zone)\n'
+                    '(-0.65-0 s vs 0-0.65 s; session-averaged reward zone entry epochs, by condition)',
+                )
+                epoch_reward_speed_pre_post_entry_fig.tight_layout()
+
+        # ── Reward zone: pre-minus-post zone entry difference bar chart ───────
+        if 'epoch_reward_speed_diff_entry' in selected_plots and _any_speed:
+            _pre_mask_rde  = (EPOCH_CANONICAL_TIME >= -0.65) & (EPOCH_CANONICAL_TIME <  0.0)
+            _post_mask_rde = (EPOCH_CANONICAL_TIME >= 0.0)   & (EPOCH_CANONICAL_TIME <= 0.65)
+            _rde_by_cond: dict = {}
+            for _r in all_results:
+                _sess_mat = _r.get('speed_epoch_session_means')
+                if _sess_mat is None or _sess_mat.shape[0] == 0:
+                    continue
+                _cond = _r['starting_condition']
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    _pre_rde  = float(np.nanmean(np.nanmean(_sess_mat[:, _pre_mask_rde],  axis=1)))
+                    _post_rde = float(np.nanmean(np.nanmean(_sess_mat[:, _post_mask_rde], axis=1)))
+                _rde_by_cond.setdefault(_cond, []).append((_r['mouse'], _post_rde - _pre_rde))
+
+            if _rde_by_cond:
+                _conds_rde   = sorted(_rde_by_cond.keys())
+                _n_conds_rde = len(_conds_rde)
+                epoch_reward_speed_diff_entry_fig, _ax_rde = plt.subplots()
+                _all_rde_vals = []
+                _bar_x_rde = np.arange(_n_conds_rde)
+                _rng_rde   = np.random.default_rng(seed=42)
+                for _ci, _cond in enumerate(_conds_rde):
+                    _color    = condition_color_map.get(_cond, 'steelblue')
+                    _entries  = _rde_by_cond[_cond]
+                    _n_rde    = len(_entries)
+                    _dvals_rde = [e[1] for e in _entries]
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _mn_rde  = float(np.nanmean(_dvals_rde))
+                        _sem_rde = (float(np.nanstd(_dvals_rde, ddof=1) / np.sqrt(_n_rde))
+                                    if _n_rde > 1 else 0.0)
+                    _all_rde_vals.extend(_dvals_rde + [_mn_rde + _sem_rde, _mn_rde - _sem_rde])
+                    _ax_rde.bar(_ci, _mn_rde, width=0.55, color=_color, alpha=0.7,
+                                yerr=_sem_rde, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
+                    _jitter_rde = (_rng_rde.random(_n_rde) - 0.5) * 0.22
+                    _ax_rde.scatter(_ci + _jitter_rde, _dvals_rde,
+                                    color=_color, edgecolors='black',
+                                    linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
+                _ax_rde.axhline(0, color='black', linestyle='--', zorder=1)
+                _ax_rde.set_xticks(_bar_x_rde)
+                _ax_rde.set_xticklabels(_conds_rde)
+                _ax_rde.set_ylabel('Speed difference (cm/s)\n[post-entry \u2212 pre-entry]')
+                _ax_rde.set_xlabel('Condition')
+                if _all_rde_vals:
+                    _ymax_rde = float(np.nanmax(_all_rde_vals))
+                    _ymin_rde = float(np.nanmin(_all_rde_vals))
+                    _pad_rde  = max(abs(_ymax_rde), abs(_ymin_rde)) * 0.12 or 0.5
+                    _ax_rde.set_ylim(_ymin_rde - _pad_rde, _ymax_rde + _pad_rde)
+                _ax_rde.tick_params(axis='both', direction='in')
+                _ax_rde.spines['top'].set_visible(False)
+                _ax_rde.spines['right'].set_visible(False)
+
+                # ── Mann-Whitney U tests for all condition pairs ───────────
+                import itertools as _itertools_rde
+                _pairs_rde = list(_itertools_rde.combinations(range(_n_conds_rde), 2))
+                _ylim_cur_rde = list(_ax_rde.get_ylim())
+                _bracket_step_rde = (_ylim_cur_rde[1] - _ylim_cur_rde[0]) * 0.14
+                _bracket_base_rde = _ylim_cur_rde[1]
+                for _pi, (_ia, _ib) in enumerate(_pairs_rde):
+                    _vals_a_rde = [e[1] for e in _rde_by_cond[_conds_rde[_ia]]]
+                    _vals_b_rde = [e[1] for e in _rde_by_cond[_conds_rde[_ib]]]
+                    if len(_vals_a_rde) < 2 or len(_vals_b_rde) < 2:
+                        continue
+                    _u_stat_rde, _p_val_rde = mannwhitneyu(_vals_a_rde, _vals_b_rde, alternative='two-sided')
+                    _sig_str_rde = _fmt_p(_p_val_rde)
+                    _bh_rde = _bracket_base_rde + _bracket_step_rde * (_pi + 0.6)
+                    _ax_rde.plot([_ia, _ia, _ib, _ib],
+                                 [_bh_rde - _bracket_step_rde * 0.15,
+                                  _bh_rde,
+                                  _bh_rde,
+                                  _bh_rde - _bracket_step_rde * 0.15],
+                                 color='black')
+                    _ax_rde.text((_ia + _ib) / 2, _bh_rde + _bracket_step_rde * 0.05,
+                                 _sig_str_rde, ha='center', va='bottom')
+                if _pairs_rde:
+                    _new_top_rde = _bracket_base_rde + _bracket_step_rde * (len(_pairs_rde) + 1.5)
+                    _ax_rde.set_ylim(_ylim_cur_rde[0], _new_top_rde)
+
+                epoch_reward_speed_diff_entry_fig.suptitle(
+                    'Post- vs Pre-Zone Entry Speed Difference by Condition (Reward Zone)\n'
+                    '(-0.65-0 s vs 0-0.65 s; mean ± SEM across mice; positive = faster after zone entry)',
+                )
+                epoch_reward_speed_diff_entry_fig.tight_layout()
+                _write_mwu_report(
+                    output_dir, 'epoch_reward_speed_diff_entry',
+                    'Speed Post-minus-Pre Zone Entry (Reward Zone, -0.65-0 s vs 0-0.65 s)',
+                    [(_conds_rde[_ia], _conds_rde[_ib],
+                      [e[1] for e in _rde_by_cond[_conds_rde[_ia]]],
+                      [e[1] for e in _rde_by_cond[_conds_rde[_ib]]])
+                     for _ia, _ib in _pairs_rde],
+                )
+
+        # ── Reward zone: 1 s pre- vs 1 s post-zone entry bar chart ──────────
+        if 'epoch_reward_speed_pre_post_entry_1s' in selected_plots and _any_speed:
+            _pre_mask_re1  = (EPOCH_CANONICAL_TIME >= -1.0) & (EPOCH_CANONICAL_TIME <  0.0)
+            _post_mask_re1 = (EPOCH_CANONICAL_TIME >= 0.0)  & (EPOCH_CANONICAL_TIME <= 1.0)
+            _re1_by_cond: dict = {}
+            for _r in all_results:
+                _sess_mat = _r.get('speed_epoch_session_means')
+                if _sess_mat is None or _sess_mat.shape[0] == 0:
+                    continue
+                _cond = _r['starting_condition']
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    _pre_per_sess  = np.nanmean(_sess_mat[:, _pre_mask_re1],  axis=1)
+                    _post_per_sess = np.nanmean(_sess_mat[:, _post_mask_re1], axis=1)
+                    _pre_mean  = float(np.nanmean(_pre_per_sess))
+                    _post_mean = float(np.nanmean(_post_per_sess))
+                _re1_by_cond.setdefault(_cond, []).append((_r['mouse'], _pre_mean, _post_mean))
+
+            if _re1_by_cond:
+                _conds_re1   = sorted(_re1_by_cond.keys())
+                _n_conds_re1 = len(_conds_re1)
+                epoch_reward_speed_pre_post_entry_1s_fig, _axs_re1 = plt.subplots(
+                    1, _n_conds_re1,
+                    sharey=True, squeeze=False,
+                )
+                _all_re1_yvals = []
+                for _ci, _cond in enumerate(_conds_re1):
+                    _ax       = _axs_re1[0, _ci]
+                    _color    = condition_color_map.get(_cond, 'steelblue')
+                    _entries  = _re1_by_cond[_cond]
+                    _n_re1    = len(_entries)
+                    _pre_vals = [e[1] for e in _entries]
+                    _post_vals= [e[2] for e in _entries]
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _mn_pre   = float(np.nanmean(_pre_vals))
+                        _mn_post  = float(np.nanmean(_post_vals))
+                        _sem_pre  = (float(np.nanstd(_pre_vals,  ddof=1) / np.sqrt(_n_re1))
+                                     if _n_re1 > 1 else 0.0)
+                        _sem_post = (float(np.nanstd(_post_vals, ddof=1) / np.sqrt(_n_re1))
+                                     if _n_re1 > 1 else 0.0)
+                    _all_re1_yvals.extend([_mn_pre + _sem_pre, _mn_post + _sem_post,
+                                           _mn_pre - _sem_pre, _mn_post - _sem_post])
+                    _all_re1_yvals.extend(_pre_vals + _post_vals)
+                    _ax.bar(0, _mn_pre,  width=0.5, color=_color, alpha=0.7,
+                            yerr=_sem_pre,  error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
+                    _ax.bar(1, _mn_post, width=0.5, color=_color, alpha=0.7,
+                            yerr=_sem_post, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
+                    _rng_re1 = np.random.default_rng(seed=42)
+                    _jitter  = (_rng_re1.random(_n_re1) - 0.5) * 0.18
+                    for _j, (_mname, _pv, _qv) in enumerate(_entries):
+                        _xp = 0 + _jitter[_j]
+                        _xq = 1 + _jitter[_j]
+                        _ax.plot([_xp, _xq], [_pv, _qv], '-',
+                                 color=_color, alpha=0.5, zorder=2)
+                        _ax.plot(_xp, _pv, 'o', color=_color,
+                                 markeredgecolor='black', markeredgewidth=0.5,
+                                 markersize=plt.rcParams['lines.markersize'], alpha=0.6, zorder=3)
+                        _ax.plot(_xq, _qv, 'o', color=_color,
+                                 markeredgecolor='black', markeredgewidth=0.5,
+                                 markersize=plt.rcParams['lines.markersize'], alpha=0.6, zorder=3)
+                    _ax.set_xticks([0, 1])
+                    _ax.set_xticklabels(['Pre-entry\n(\u22121\u20130 s)', 'Post-entry\n(0\u20131 s)'])
+                    _ax.set_title(f'{_cond}\n(n={_n_re1} mice)')
+                    _ax.set_ylabel('Treadmill Speed (cm/s)' if _ci == 0 else '')
+                    _ax.set_xlim(-0.6, 1.6)
+                    _ax.tick_params(axis='both', direction='in')
+                    _ax.spines['top'].set_visible(False)
+                    _ax.spines['right'].set_visible(False)
+                if _all_re1_yvals:
+                    _ymax_re1 = float(np.nanmax(_all_re1_yvals))
+                    _ymin_re1 = float(np.nanmin(_all_re1_yvals))
+                else:
+                    _ymax_re1, _ymin_re1 = 1.0, 0.0
+                _bot_re1 = _ymin_re1 * 1.05 if _ymin_re1 < 0 else 0.0
+                _axs_re1[0, 0].set_ylim(_bot_re1, _ymax_re1 * 1.05)
+                epoch_reward_speed_pre_post_entry_1s_fig.suptitle(
+                    'Average Speed: 1 s Pre- vs 1 s Post-Zone Entry (Reward Zone)\n'
+                    '(-1-0 s vs 0-1 s; session-averaged reward zone entry epochs, by condition)',
+                )
+                epoch_reward_speed_pre_post_entry_1s_fig.tight_layout()
+
+        # ── Reward zone: 1 s pre-minus-post zone entry difference bar chart ──
+        if 'epoch_reward_speed_diff_entry_1s' in selected_plots and _any_speed:
+            _pre_mask_rde1  = (EPOCH_CANONICAL_TIME >= -1.0) & (EPOCH_CANONICAL_TIME <  0.0)
+            _post_mask_rde1 = (EPOCH_CANONICAL_TIME >= 0.0)  & (EPOCH_CANONICAL_TIME <= 1.0)
+            _rde1_by_cond: dict = {}
+            for _r in all_results:
+                _sess_mat = _r.get('speed_epoch_session_means')
+                if _sess_mat is None or _sess_mat.shape[0] == 0:
+                    continue
+                _cond = _r['starting_condition']
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    _pre_rde1  = float(np.nanmean(np.nanmean(_sess_mat[:, _pre_mask_rde1],  axis=1)))
+                    _post_rde1 = float(np.nanmean(np.nanmean(_sess_mat[:, _post_mask_rde1], axis=1)))
+                _rde1_by_cond.setdefault(_cond, []).append((_r['mouse'], _post_rde1 - _pre_rde1))
+
+            if _rde1_by_cond:
+                _conds_rde1   = sorted(_rde1_by_cond.keys())
+                _n_conds_rde1 = len(_conds_rde1)
+                epoch_reward_speed_diff_entry_1s_fig, _ax_rde1 = plt.subplots()
+                _all_rde1_vals = []
+                _bar_x_rde1 = np.arange(_n_conds_rde1)
+                _rng_rde1   = np.random.default_rng(seed=42)
+                for _ci, _cond in enumerate(_conds_rde1):
+                    _color     = condition_color_map.get(_cond, 'steelblue')
+                    _entries   = _rde1_by_cond[_cond]
+                    _n_rde1    = len(_entries)
+                    _dvals_rde1 = [e[1] for e in _entries]
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _mn_rde1  = float(np.nanmean(_dvals_rde1))
+                        _sem_rde1 = (float(np.nanstd(_dvals_rde1, ddof=1) / np.sqrt(_n_rde1))
+                                     if _n_rde1 > 1 else 0.0)
+                    _all_rde1_vals.extend(_dvals_rde1 + [_mn_rde1 + _sem_rde1, _mn_rde1 - _sem_rde1])
+                    _ax_rde1.bar(_ci, _mn_rde1, width=0.55, color=_color, alpha=0.7,
+                                 yerr=_sem_rde1, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
+                    _jitter_rde1 = (_rng_rde1.random(_n_rde1) - 0.5) * 0.22
+                    _ax_rde1.scatter(_ci + _jitter_rde1, _dvals_rde1,
+                                     color=_color, edgecolors='black',
+                                     linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
+                _ax_rde1.axhline(0, color='black', linestyle='--', zorder=1)
+                _ax_rde1.set_xticks(_bar_x_rde1)
+                _ax_rde1.set_xticklabels(_conds_rde1)
+                _ax_rde1.set_ylabel('Speed difference (cm/s)\n[post-entry \u2212 pre-entry]')
+                _ax_rde1.set_xlabel('Condition')
+                if _all_rde1_vals:
+                    _ymax_rde1 = float(np.nanmax(_all_rde1_vals))
+                    _ymin_rde1 = float(np.nanmin(_all_rde1_vals))
+                    _pad_rde1  = max(abs(_ymax_rde1), abs(_ymin_rde1)) * 0.12 or 0.5
+                    _ax_rde1.set_ylim(_ymin_rde1 - _pad_rde1, _ymax_rde1 + _pad_rde1)
+                _ax_rde1.tick_params(axis='both', direction='in')
+                _ax_rde1.spines['top'].set_visible(False)
+                _ax_rde1.spines['right'].set_visible(False)
+
+                # ── Mann-Whitney U tests for all condition pairs ───────────────
+                import itertools as _itertools_rde1
+                _pairs_rde1 = list(_itertools_rde1.combinations(range(_n_conds_rde1), 2))
+                _ylim_cur_rde1 = list(_ax_rde1.get_ylim())
+                _bracket_step_rde1 = (_ylim_cur_rde1[1] - _ylim_cur_rde1[0]) * 0.14
+                _bracket_base_rde1 = _ylim_cur_rde1[1]
+                for _pi, (_ia, _ib) in enumerate(_pairs_rde1):
+                    _vals_a_rde1 = [e[1] for e in _rde1_by_cond[_conds_rde1[_ia]]]
+                    _vals_b_rde1 = [e[1] for e in _rde1_by_cond[_conds_rde1[_ib]]]
+                    if len(_vals_a_rde1) < 2 or len(_vals_b_rde1) < 2:
+                        continue
+                    _u_stat_rde1, _p_val_rde1 = mannwhitneyu(_vals_a_rde1, _vals_b_rde1, alternative='two-sided')
+                    _sig_str_rde1 = _fmt_p(_p_val_rde1)
+                    _bh_rde1 = _bracket_base_rde1 + _bracket_step_rde1 * (_pi + 0.6)
+                    _ax_rde1.plot([_ia, _ia, _ib, _ib],
+                                  [_bh_rde1 - _bracket_step_rde1 * 0.15,
+                                   _bh_rde1,
+                                   _bh_rde1,
+                                   _bh_rde1 - _bracket_step_rde1 * 0.15],
+                                  color='black')
+                    _ax_rde1.text((_ia + _ib) / 2, _bh_rde1 + _bracket_step_rde1 * 0.05,
+                                  _sig_str_rde1, ha='center', va='bottom')
+                if _pairs_rde1:
+                    _new_top_rde1 = _bracket_base_rde1 + _bracket_step_rde1 * (len(_pairs_rde1) + 1.5)
+                    _ax_rde1.set_ylim(_ylim_cur_rde1[0], _new_top_rde1)
+
+                epoch_reward_speed_diff_entry_1s_fig.suptitle(
+                    'Post- vs Pre-Zone Entry Speed Difference by Condition (Reward Zone, 1 s windows)\n'
+                    '(-1-0 s vs 0-1 s; mean \u00b1 SEM across mice; positive = faster after zone entry)',
+                )
+                epoch_reward_speed_diff_entry_1s_fig.tight_layout()
+                _write_mwu_report(
+                    output_dir, 'epoch_reward_speed_diff_entry_1s',
+                    'Speed Post-minus-Pre Zone Entry (Reward Zone, 1 s windows, -1-0 s vs 0-1 s)',
+                    [(_conds_rde1[_ia], _conds_rde1[_ib],
+                      [e[1] for e in _rde1_by_cond[_conds_rde1[_ia]]],
+                      [e[1] for e in _rde1_by_cond[_conds_rde1[_ib]]])
+                     for _ia, _ib in _pairs_rde1],
+                )
+
+        # ── Reward zone: 2 s pre-minus-post zone entry difference bar chart ──
+        if 'epoch_reward_speed_diff_entry_2s' in selected_plots and _any_speed:
+            _pre_mask_rde2  = (EPOCH_CANONICAL_TIME >= -2.0) & (EPOCH_CANONICAL_TIME <  0.0)
+            _post_mask_rde2 = (EPOCH_CANONICAL_TIME >= 0.0)  & (EPOCH_CANONICAL_TIME <= 2.0)
+            _rde2_by_cond: dict = {}
+            for _r in all_results:
+                _sess_mat = _r.get('speed_epoch_session_means')
+                if _sess_mat is None or _sess_mat.shape[0] == 0:
+                    continue
+                _cond = _r['starting_condition']
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    _pre_rde2  = float(np.nanmean(np.nanmean(_sess_mat[:, _pre_mask_rde2],  axis=1)))
+                    _post_rde2 = float(np.nanmean(np.nanmean(_sess_mat[:, _post_mask_rde2], axis=1)))
+                _rde2_by_cond.setdefault(_cond, []).append((_r['mouse'], _post_rde2 - _pre_rde2))
+
+            if _rde2_by_cond:
+                _conds_rde2   = sorted(_rde2_by_cond.keys())
+                _n_conds_rde2 = len(_conds_rde2)
+                epoch_reward_speed_diff_entry_2s_fig, _ax_rde2 = plt.subplots()
+                _all_rde2_vals = []
+                _bar_x_rde2 = np.arange(_n_conds_rde2)
+                _rng_rde2   = np.random.default_rng(seed=42)
+                for _ci, _cond in enumerate(_conds_rde2):
+                    _color     = condition_color_map.get(_cond, 'steelblue')
+                    _entries   = _rde2_by_cond[_cond]
+                    _n_rde2    = len(_entries)
+                    _dvals_rde2 = [e[1] for e in _entries]
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _mn_rde2  = float(np.nanmean(_dvals_rde2))
+                        _sem_rde2 = (float(np.nanstd(_dvals_rde2, ddof=1) / np.sqrt(_n_rde2))
+                                     if _n_rde2 > 1 else 0.0)
+                    _all_rde2_vals.extend(_dvals_rde2 + [_mn_rde2 + _sem_rde2, _mn_rde2 - _sem_rde2])
+                    _ax_rde2.bar(_ci, _mn_rde2, width=0.55, color=_color, alpha=0.7,
+                                 yerr=_sem_rde2, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
+                    _jitter_rde2 = (_rng_rde2.random(_n_rde2) - 0.5) * 0.22
+                    _ax_rde2.scatter(_ci + _jitter_rde2, _dvals_rde2,
+                                     color=_color, edgecolors='black',
+                                     linewidths=0.5, s=plt.rcParams['lines.markersize']**2, alpha=0.6, zorder=3)
+                _ax_rde2.axhline(0, color='black', linestyle='--', zorder=1)
+                _ax_rde2.set_xticks(_bar_x_rde2)
+                _ax_rde2.set_xticklabels(_conds_rde2)
+                _ax_rde2.set_ylabel('Speed difference (cm/s)\n[post-entry \u2212 pre-entry]')
+                _ax_rde2.set_xlabel('Condition')
+                _RDE2_YLIM = (-0.6, 0.4)
+                if _RDE2_YLIM is not None:
+                    _ax_rde2.set_ylim(_RDE2_YLIM)
+                elif _all_rde2_vals:
+                    _ymax_rde2 = float(np.nanmax(_all_rde2_vals))
+                    _ymin_rde2 = float(np.nanmin(_all_rde2_vals))
+                    _pad_rde2  = max(abs(_ymax_rde2), abs(_ymin_rde2)) * 0.12 or 0.5
+                    _ax_rde2.set_ylim(_ymin_rde2 - _pad_rde2, _ymax_rde2 + _pad_rde2)
+                _ax_rde2.tick_params(axis='both', direction='in')
+                _ax_rde2.spines['top'].set_visible(False)
+                _ax_rde2.spines['right'].set_visible(False)
+
+                import itertools as _itertools_rde2
+                _pairs_rde2 = list(_itertools_rde2.combinations(range(_n_conds_rde2), 2))
+                _ylim_cur_rde2 = list(_ax_rde2.get_ylim())
+                _bracket_step_rde2 = (_ylim_cur_rde2[1] - _ylim_cur_rde2[0]) * 0.14
+                _data_top_rde2 = float(np.nanmax(_all_rde2_vals)) if _all_rde2_vals else _ylim_cur_rde2[0]
+                # Cap base so all brackets + text stay within the fixed ylim
+                _bracket_base_rde2 = min(
+                    _data_top_rde2 + _bracket_step_rde2 * 0.3,
+                    _ylim_cur_rde2[1] - _bracket_step_rde2 * (len(_pairs_rde2) + 0.15),
+                )
+                for _pi, (_ia, _ib) in enumerate(_pairs_rde2):
+                    _vals_a_rde2 = [e[1] for e in _rde2_by_cond[_conds_rde2[_ia]]]
+                    _vals_b_rde2 = [e[1] for e in _rde2_by_cond[_conds_rde2[_ib]]]
+                    if len(_vals_a_rde2) < 2 or len(_vals_b_rde2) < 2:
+                        continue
+                    _u_stat_rde2, _p_val_rde2 = mannwhitneyu(_vals_a_rde2, _vals_b_rde2, alternative='two-sided')
+                    _sig_str_rde2 = _fmt_p(_p_val_rde2)
+                    _bh_rde2 = _bracket_base_rde2 + _bracket_step_rde2 * (_pi + 0.6)
+                    _ax_rde2.plot([_ia, _ia, _ib, _ib],
+                                  [_bh_rde2 - _bracket_step_rde2 * 0.15,
+                                   _bh_rde2, _bh_rde2,
+                                   _bh_rde2 - _bracket_step_rde2 * 0.15],
+                                  color='black')
+                    _ax_rde2.text((_ia + _ib) / 2, _bh_rde2 + _bracket_step_rde2 * 0.05,
+                                  _sig_str_rde2, ha='center', va='bottom')
+                if _pairs_rde2 and _RDE2_YLIM is None:
+                    _new_top_rde2 = _bracket_base_rde2 + _bracket_step_rde2 * (len(_pairs_rde2) + 1.5)
+                    _ax_rde2.set_ylim(_ylim_cur_rde2[0], _new_top_rde2)
+
+                epoch_reward_speed_diff_entry_2s_fig.suptitle(
+                    'Post- vs Pre-Zone Entry Speed Difference by Condition (Reward Zone, 2 s windows)\n'
+                    '(-2\u20130 s vs 0\u20132 s; mean \u00b1 SEM across mice; positive = faster after zone entry)',
+                )
+                epoch_reward_speed_diff_entry_2s_fig.tight_layout()
+                _write_mwu_report(
+                    output_dir, 'epoch_reward_speed_diff_entry_2s',
+                    'Speed Post-minus-Pre Zone Entry (Reward Zone, 2 s windows, -2-0 s vs 0-2 s)',
+                    [(_conds_rde2[_ia], _conds_rde2[_ib],
+                      [e[1] for e in _rde2_by_cond[_conds_rde2[_ia]]],
+                      [e[1] for e in _rde2_by_cond[_conds_rde2[_ib]]])
+                     for _ia, _ib in _pairs_rde2],
+                )
+
+    # ── Shuffle Z-score: pre-entry slowing specificity (circular-shift permutation) ──
+    # ── Pre-compute per-level shuffle Z-scores for level-window plots ────────
+    # Builds (animal_id, level_str) -> [z_score, ...] for reward and punish zones.
+    # This replaces the old session-scalar-to-last-level attribution used by
+    # the six level_shuffle_zscore_* and level_punish_shuffle_zscore_* plot blocks.
+    _lev_zscores_rew: dict = {}  # (mouse, level) -> [per-window z-scores]
+    _lev_zscores_pun: dict = {}
+    _lev_rew_zone_immo: dict = {}  # (mouse, level) -> [prop immobile in reward zone]
+    _level_shuf_needed = any(k in selected_plots for k in (
+        'level_shuffle_zscore', 'level_shuffle_zscore_line', 'level_shuffle_zscore_cond',
+        'level_punish_shuffle_zscore', 'level_punish_shuffle_zscore_line',
+        'level_punish_shuffle_zscore_cond', 'level_rew_zone_immobility_prop',
+        'level_rew_zone_immobility_prop_cond'))
+    if _level_shuf_needed and transitions_csv_path:
+        try:
+            _trans_lvz = pd.read_csv(transitions_csv_path)
+            _trans_lvz['date'] = pd.to_datetime(_trans_lvz['date'])
+            _shuf_rng_lv = np.random.default_rng(42)
+            for _r_lv in all_results:
+                _mn_lv    = _r_lv['mouse']
+                _df_lv    = _r_lv['df']
+                _rew_zp   = _r_lv.get('reward_zone_periods', [])
+                _pun_zp   = _r_lv.get('punish_zone_periods', [])
+                _tm_paths = _r_lv.get('treadmill_paths', [])
+                _mt_lv = (_trans_lvz[
+                    _trans_lvz['animal_id'].str.strip().str.lower() ==
+                    _mn_lv.strip().lower()
+                ] if 'animal_id' in _trans_lvz.columns else pd.DataFrame())
+                if _mt_lv.empty:
+                    continue
+                # Build session date → list of (level_str, start_t, end_t) windows
+                _sess_wins_lv: dict = {}
+                _grp_lv = 'session_num' if 'session_num' in _mt_lv.columns else 'date'
+                for _, _sg_lv in _mt_lv.groupby(_grp_lv):
+                    _sg_lv = (_sg_lv.sort_values('transition_ts')
+                              if 'transition_ts' in _sg_lv.columns else _sg_lv)
+                    _dk_lv  = pd.Timestamp(_sg_lv.iloc[0]['date']).normalize()
+                    _lls_lv = _sg_lv['level'].tolist()
+                    _tts_lv = _sg_lv['transition_ts'].tolist()
+                    _ss_lv  = [0.0] + [float(t) if pd.notna(t) else float('inf')
+                                       for t in _tts_lv[:-1]]
+                    _es_lv  = [float(t) if pd.notna(t) else float('inf')
+                               for t in _tts_lv]
+                    _sess_wins_lv[_dk_lv] = [
+                        (str(lv).replace('.json', ''), s, e)
+                        for lv, s, e in zip(_lls_lv, _ss_lv, _es_lv) if e > s
+                    ]
+                for _si_lv, _row_lv in enumerate(_df_lv.itertuples()):
+                    _dk2_lv  = pd.Timestamp(_row_lv.date).normalize()
+                    _wins_lv = _sess_wins_lv.get(_dk2_lv)
+                    if not _wins_lv:
+                        continue
+                    _tm_p_lv = _tm_paths[_si_lv] if _si_lv < len(_tm_paths) else None
+                    _rzp_lv  = _rew_zp[_si_lv]   if _si_lv < len(_rew_zp)   else []
+                    _pzp_lv  = _pun_zp[_si_lv]   if _si_lv < len(_pun_zp)   else []
+                    if not isinstance(_tm_p_lv, str) or not os.path.isfile(_tm_p_lv):
+                        continue
+                    try:
+                        _t_lv, _sp_lv = uniformly_sample_treadmill(
+                            pd.read_csv(_tm_p_lv))
+                    except Exception:
+                        continue
+                    if len(_sp_lv) < 4:
+                        continue
+                    for _lv_str_w, _s_w, _e_w in _wins_lv:
+                        _kw_lv = (_mn_lv, _lv_str_w)
+                        if _rzp_lv:
+                            _z_r = _compute_zone_zscore_window(
+                                _t_lv, _sp_lv, _rzp_lv, _s_w, _e_w,
+                                n_shuffles=200, rng=_shuf_rng_lv)
+                            if not np.isnan(_z_r):
+                                _lev_zscores_rew.setdefault(_kw_lv, []).append(_z_r)
+                        if _pzp_lv:
+                            _z_p = _compute_zone_zscore_window(
+                                _t_lv, _sp_lv, _pzp_lv, _s_w, _e_w,
+                                n_shuffles=200, rng=_shuf_rng_lv)
+                            if not np.isnan(_z_p):
+                                _lev_zscores_pun.setdefault(_kw_lv, []).append(_z_p)
+                        if _rzp_lv and any(k in selected_plots for k in ('level_rew_zone_immobility_prop', 'level_rew_zone_immobility_prop_cond')):
+                            # Proportion of within-reward-zone samples where speed ≤ 0
+                            # for a contiguous run of ≥ 250 ms (filters encoder noise).
+                            _win_m_rzi  = (_t_lv >= _s_w) & (_t_lv < _e_w)
+                            _t_wn_rzi   = _t_lv[_win_m_rzi]
+                            _sp_wn_rzi  = _sp_lv[_win_m_rzi]
+                            _zone_n_rzi = 0
+                            _immo_n_rzi = 0
+                            for _ze_rzi, _zx_rzi in _rzp_lv:
+                                _ce_rzi = max(_ze_rzi, _s_w)
+                                _cx_rzi = min(_zx_rzi, _e_w)
+                                if _cx_rzi > _ce_rzi:
+                                    _zm_rzi  = ((_t_wn_rzi >= _ce_rzi) &
+                                                (_t_wn_rzi <= _cx_rzi))
+                                    _zone_n_rzi += int(np.sum(_zm_rzi))
+                                    # Only count samples inside contiguous speed-≤-0
+                                    # runs that last ≥ 250 ms
+                                    _zt_seg  = _t_wn_rzi[_zm_rzi]
+                                    _zsp_seg = _sp_wn_rzi[_zm_rzi]
+                                    if len(_zt_seg) >= 2:
+                                        _im_seg = _zsp_seg <= 0.0
+                                        _pad    = np.concatenate([[False], _im_seg, [False]])
+                                        _d      = np.diff(_pad.astype(np.int8))
+                                        _rs_arr = np.where(_d == 1)[0]
+                                        _re_arr = np.where(_d == -1)[0]
+                                        for _rs, _re in zip(_rs_arr, _re_arr):
+                                            if (_zt_seg[_re - 1] - _zt_seg[_rs]) >= 0.25:
+                                                _immo_n_rzi += int(_re - _rs)
+                            if _zone_n_rzi > 0:
+                                _lev_rew_zone_immo.setdefault(_kw_lv, []).append(
+                                    _immo_n_rzi / _zone_n_rzi)
+        except Exception as _lvz_err:
+            print(f'  [WARN] pre-computing level shuffle Z-scores: {_lvz_err}')
+
+    _shuf_plot_keys = {'condition_shuffle_zscore', 'condition_shuffle_zscore_bar',
+                       'level_shuffle_zscore', 'level_shuffle_zscore_line',
+                       'level_shuffle_zscore_cond'}
+    if _shuf_plot_keys & set(selected_plots):
+        # Compute per-session shuffle Z-scores using true zone occupancy periods
+        _any_shuf_data = False
+        for _r in all_results:
+            _r['_shuffle_zscores'] = _compute_true_zone_zscores(
+                _r.get('treadmill_paths', []),
+                _r.get('reward_zone_periods', []),
+                session_indices_or_none=None,
+                n_sessions=len(_r['df']),
+                n_shuffles=200,
+                seed=42,
+            )
+            if not np.all(np.isnan(_r['_shuffle_zscores'])):
+                _any_shuf_data = True
+        if not _any_shuf_data:
+            print("  [WARN] shuffle_zscore: no treadmill/zone data found — skipping shuffle plots")
+        else:
+            # ── Line plot: mean ± SEM Z-score per condition over training days ──
+            if 'condition_shuffle_zscore' in selected_plots:
+                condition_shuffle_zscore_fig = plt.figure(figsize=plt.rcParams['figure.figsize'])
+                _shuf_groups: dict = {}
+                for _r in all_results:
+                    _cond = _r['starting_condition']
+                    _zs   = _r['_shuffle_zscores']
+                    _arr  = np.full(max_sessions, np.nan)
+                    for _si in range(min(len(_zs), len(_r['df']), max_sessions)):
+                        if not np.isnan(_zs[_si]):
+                            _arr[_si] = _zs[_si]
+                    _shuf_groups.setdefault(_cond, []).append(_arr)
+
+                _day_nums_shuf = np.arange(1, max_sessions + 1)
+                for _cond, _arrays in _shuf_groups.items():
+                    _color   = condition_color_map.get(_cond, '#7f7f7f')
+                    _padded  = np.array(_arrays)
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _n_mice_shuf = np.sum(~np.isnan(_padded), axis=0)
+                        _mean_shuf   = np.where(_n_mice_shuf > 0, np.nanmean(_padded, axis=0), np.nan)
+                        _sem_shuf    = np.where(
+                            _n_mice_shuf > 1,
+                            np.nanstd(_padded, axis=0) / np.sqrt(_n_mice_shuf),
+                            0,
+                        )
+                    plt.figure(condition_shuffle_zscore_fig.number)
+                    plt.plot(_day_nums_shuf, _mean_shuf, '-', color=_color,
+                             linewidth=plt.rcParams['lines.linewidth'],
+                             label=f'{_cond} (n={len(_arrays)})')
+                    plt.fill_between(_day_nums_shuf,
+                                     _mean_shuf - _sem_shuf,
+                                     _mean_shuf + _sem_shuf,
+                                     color=_color, alpha=0.2)
+
+                plt.figure(condition_shuffle_zscore_fig.number)
+                plt.axhline(0, color='gray', linestyle='--', linewidth=0.8, zorder=1)
+                plt.title('Zone Speed Z-Score by Condition (Reward Zone)')
+                plt.xlabel('Training Day')
+                plt.ylabel('Zone Speed Z-Score (mean \u00b1 SEM)\n(negative = slower than chance; positive = faster)')
+                _ax_shuf_line = plt.gca()
+                _ax_shuf_line.tick_params(axis='both', direction='in')
+                _ax_shuf_line.spines['top'].set_visible(False)
+                _ax_shuf_line.spines['right'].set_visible(False)
+                _ax_shuf_line.set_xlim(left=1, right=max_days + 0.5)
+                _ax_shuf_line.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
+                _ax_shuf_line.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
+                _ax_shuf_line.tick_params(axis='x', which='minor', direction='in')
+                _ax_shuf_line.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+                plt.legend(frameon=False)
+                condition_shuffle_zscore_fig.tight_layout()
+
+            # ── Bar chart: per-mouse mean Z-score collapsed by condition (Mann-Whitney U) ──
+            if 'condition_shuffle_zscore_bar' in selected_plots:
+                _shuf_bar_data: dict = {}
+                for _r in all_results:
+                    _cond = _r['starting_condition']
+                    _zs   = _r['_shuffle_zscores']
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _mouse_z_mean = float(np.nanmean(_zs))
+                    if not np.isnan(_mouse_z_mean):
+                        _shuf_bar_data.setdefault(_cond, []).append((_r['mouse'], _mouse_z_mean))
+
+                if _shuf_bar_data:
+                    _shuf_conds_bar = sorted(_shuf_bar_data.keys())
+                    _n_shuf_conds_b = len(_shuf_conds_bar)
+                    condition_shuffle_zscore_bar_fig, _ax_szbar = plt.subplots(
+                        figsize=plt.rcParams.get('figure.figsize', (3.0, 2.5)))
+                    _rng_szbar    = np.random.default_rng(seed=42)
+                    _all_szbar_v  = []
+                    for _ci, _cond in enumerate(_shuf_conds_bar):
+                        _color_szb   = condition_color_map.get(_cond, '#7f7f7f')
+                        _entries_szb = _shuf_bar_data[_cond]
+                        _n_szb       = len(_entries_szb)
+                        _zvals_szb   = [e[1] for e in _entries_szb]
+                        with warnings.catch_warnings():
+                            warnings.simplefilter('ignore', RuntimeWarning)
+                            _mn_szb  = float(np.nanmean(_zvals_szb))
+                            _sem_szb = (float(np.nanstd(_zvals_szb, ddof=1) / np.sqrt(_n_szb))
+                                        if _n_szb > 1 else 0.0)
+                        _all_szbar_v.extend(_zvals_szb + [_mn_szb + _sem_szb, _mn_szb - _sem_szb])
+                        _ax_szbar.bar(_ci, _mn_szb, width=0.5, color=_color_szb, alpha=0.7,
+                                      yerr=_sem_szb, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
+                        _jitter_szb = (_rng_szbar.random(_n_szb) - 0.5) * 0.22
+                        for _j, (_mname_szb, _zv_szb) in enumerate(_entries_szb):
+                            _ax_szbar.plot(_ci + _jitter_szb[_j], _zv_szb, 'o',
+                                           color=_color_szb, markeredgecolor='black',
+                                           markeredgewidth=plt.rcParams['lines.linewidth'],
+                                           markersize=plt.rcParams['lines.markersize'], zorder=3)
+                    _ax_szbar.axhline(0, color='black', linestyle='--', linewidth=0.8, zorder=1)
+                    _ax_szbar.set_xticks(np.arange(_n_shuf_conds_b))
+                    _ax_szbar.set_xticklabels(_shuf_conds_bar)
+                    _ax_szbar.set_xlabel('Starting Condition')
+                    _ax_szbar.set_ylabel('Zone Speed Z-Score\n(mean \u00b1 SEM)')
+                    if _all_szbar_v:
+                        _ymax_szb = float(np.nanmax(_all_szbar_v))
+                        _ymin_szb = float(np.nanmin(_all_szbar_v))
+                        _pad_szb  = max(abs(_ymax_szb), abs(_ymin_szb)) * 0.12 or 0.1
+                        _ax_szbar.set_ylim(_ymin_szb - _pad_szb, _ymax_szb + _pad_szb)
+                    _ax_szbar.tick_params(axis='both', direction='in')
+                    _ax_szbar.spines['top'].set_visible(False)
+                    _ax_szbar.spines['right'].set_visible(False)
+
+                    # ── Mann-Whitney U pairwise brackets ─────────────────────────
+                    import itertools as _it_szbar
+                    _szbar_pairs = list(_it_szbar.combinations(range(_n_shuf_conds_b), 2))
+                    _ylim_szb = list(_ax_szbar.get_ylim())
+                    _step_szb = (_ylim_szb[1] - _ylim_szb[0]) * 0.14
+                    _base_szb = _ylim_szb[1]
+                    for _pi_szb, (_ia_szb, _ib_szb) in enumerate(_szbar_pairs):
+                        _va_szb = [e[1] for e in _shuf_bar_data[_shuf_conds_bar[_ia_szb]]]
+                        _vb_szb = [e[1] for e in _shuf_bar_data[_shuf_conds_bar[_ib_szb]]]
+                        if len(_va_szb) < 2 or len(_vb_szb) < 2:
+                            continue
+                        _u_szb, _p_szb = mannwhitneyu(_va_szb, _vb_szb, alternative='two-sided')
+                        print(f'  [SHUFFLE Z-SCORE] {_shuf_conds_bar[_ia_szb]} vs '
+                              f'{_shuf_conds_bar[_ib_szb]}: U={_u_szb:.1f}, p={_p_szb:.4f}')
+                        _sig_szb = _fmt_p(_p_szb)
+                        _bh_szb = _base_szb + _step_szb * (_pi_szb + 0.6)
+                        _ax_szbar.plot([_ia_szb, _ia_szb, _ib_szb, _ib_szb],
+                                       [_bh_szb - _step_szb * 0.15, _bh_szb,
+                                        _bh_szb, _bh_szb - _step_szb * 0.15],
+                                       color='black')
+                        _ax_szbar.text((_ia_szb + _ib_szb) / 2, _bh_szb + _step_szb * 0.05,
+                                       _sig_szb, ha='center', va='bottom')
+                    if _szbar_pairs:
+                        _ax_szbar.set_ylim(_ylim_szb[0],
+                                           _base_szb + _step_szb * (len(_szbar_pairs) + 1.5))
+                    condition_shuffle_zscore_bar_fig.suptitle(
+                        'Zone Speed Specificity (Reward Zone) \u2014 Circular-Shift Permutation\n'
+                        'Mean Z-Score per Mouse by Condition (negative = slower than chance inside reward zone)',
+                    )
+                    condition_shuffle_zscore_bar_fig.tight_layout()
+                    _write_mwu_report(
+                        output_dir, 'condition_shuffle_zscore_bar',
+                        'Zone Speed Z-Score (Reward Zone) by Condition',
+                        [(_shuf_conds_bar[_ia_szb], _shuf_conds_bar[_ib_szb],
+                          [e[1] for e in _shuf_bar_data[_shuf_conds_bar[_ia_szb]]],
+                          [e[1] for e in _shuf_bar_data[_shuf_conds_bar[_ib_szb]]])
+                         for _ia_szb, _ib_szb in _szbar_pairs],
+                    )
+
+            # ── Level bar chart: mean Z-score per level per condition ────────
+            if 'level_shuffle_zscore' in selected_plots and _lev_zscores_rew:
+                # Build condition->level->z from pre-computed level-window Z-scores
+                _lev_z_by_cond: dict = {}
+                for (_mn_rc, _lv_rc), _zs_rc in _lev_zscores_rew.items():
+                    _cond_rc = next((_r['starting_condition'] for _r in all_results
+                                     if _r['mouse'] == _mn_rc), None)
+                    if _cond_rc:
+                        _lev_z_by_cond.setdefault(_cond_rc, {}).setdefault(
+                            _lv_rc, []).extend(_zs_rc)
+
+                if _lev_z_by_cond:
+                    def _lsk_shuf(n):
+                        parts = n.split('_')
+                        return int(parts[-1]) if parts[-1].isdigit() else 999
+                    _all_levs_shuf = sorted(
+                        {lv for cd in _lev_z_by_cond.values() for lv in cd},
+                        key=_lsk_shuf,
+                    )
+                    _shuf_conds_lev  = sorted(_lev_z_by_cond.keys())
+                    _n_levs_shuf     = len(_all_levs_shuf)
+                    _n_conds_lev_shuf = len(_shuf_conds_lev)
+                    _width_lev_shuf  = 0.8 / max(_n_conds_lev_shuf, 1)
+                    _x_lev_shuf      = np.arange(_n_levs_shuf)
+                    level_shuffle_zscore_fig, _ax_lsz = plt.subplots(
+                        figsize=(max(4.0, _n_levs_shuf * 0.9), 2.5))
+                    for _ci, _cond in enumerate(_shuf_conds_lev):
+                        _color_lsz = condition_color_map.get(_cond, '#7f7f7f')
+                        _offsets_lsz = (_x_lev_shuf +
+                                        (_ci - (_n_conds_lev_shuf - 1) / 2.0) * _width_lev_shuf)
+                        _means_lsz = []
+                        _sems_lsz  = []
+                        for _lv in _all_levs_shuf:
+                            _lvz = _lev_z_by_cond.get(_cond, {}).get(_lv, [])
+                            if _lvz:
+                                _means_lsz.append(float(np.nanmean(_lvz)))
+                                _sems_lsz.append(
+                                    float(np.nanstd(_lvz, ddof=1) / np.sqrt(len(_lvz)))
+                                    if len(_lvz) > 1 else 0.0
+                                )
+                            else:
+                                _means_lsz.append(np.nan)
+                                _sems_lsz.append(0.0)
+                        _ax_lsz.bar(_offsets_lsz, _means_lsz, width=_width_lev_shuf * 0.9,
+                                    color=_color_lsz, alpha=0.7,
+                                    yerr=_sems_lsz, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2,
+                                    label=_cond)
+                    _ax_lsz.axhline(0, color='black', linestyle='--', linewidth=0.8, zorder=1)
+                    _ax_lsz.set_xticks(_x_lev_shuf)
+                    _ax_lsz.set_xticklabels(_all_levs_shuf, rotation=30, ha='right')
+                    _ax_lsz.set_xlabel('Level')
+                    _ax_lsz.set_ylabel('Zone Speed Z-Score\n(mean \u00b1 SEM)')
+                    _ax_lsz.tick_params(axis='both', direction='in')
+                    _ax_lsz.spines['top'].set_visible(False)
+                    _ax_lsz.spines['right'].set_visible(False)
+                    _ax_lsz.legend(frameon=False)
+                    level_shuffle_zscore_fig.suptitle(
+                        'Zone Speed Z-Score by Level and Condition (Reward Zone)\n'
+                        '(circular-shift permutation; negative = slower than chance inside zone)',
+                    )
+                    level_shuffle_zscore_fig.tight_layout()
+
+            # ── Level line plot: per-mouse mean Z per level (reward zone) ────
+            if 'level_shuffle_zscore_line' in selected_plots and _lev_zscores_rew:
+                # Use pre-computed level-window Z-scores directly
+                _lev_z_mouse_rw: dict = {k: list(v) for k, v in _lev_zscores_rew.items()}
+
+                if _lev_z_mouse_rw:
+                    def _lsk_shuf_ln(n):
+                        parts = n.split('_')
+                        return int(parts[-1]) if parts[-1].isdigit() else 999
+                    _all_levs_shuf_ln = sorted(
+                        {lv for (_, lv) in _lev_z_mouse_rw}, key=_lsk_shuf_ln)
+                    _all_mice_shuf_ln = sorted({mn for (mn, _) in _lev_z_mouse_rw})
+                    level_shuffle_zscore_line_fig = plt.figure(
+                        figsize=plt.rcParams['figure.figsize'], constrained_layout=True)
+                    for _mname_ln in _all_mice_shuf_ln:
+                        _cond_ln  = next(
+                            (_r['starting_condition'] for _r in all_results
+                             if _r['mouse'] == _mname_ln), 'Unknown')
+                        _color_ln = condition_color_map.get(_cond_ln, '#7f7f7f')
+                        _x_ln, _y_ln = [], []
+                        for _lv_idx_ln, _lv_ln in enumerate(_all_levs_shuf_ln):
+                            _vals_ln = _lev_z_mouse_rw.get((_mname_ln, _lv_ln))
+                            if _vals_ln:
+                                with warnings.catch_warnings():
+                                    warnings.simplefilter('ignore', RuntimeWarning)
+                                    _y_ln.append(float(np.nanmean(_vals_ln)))
+                                _x_ln.append(_lv_idx_ln + 1)
+                        if _x_ln:
+                            plt.figure(level_shuffle_zscore_line_fig.number)
+                            plt.plot(_x_ln, _y_ln, '-o',
+                                     color=_color_ln,
+                                     linewidth=plt.rcParams['lines.linewidth'],
+                                     markersize=plt.rcParams['lines.markersize'],
+                                     label=_mname_ln)
+                    _ax_lln = plt.gca()
+                    _ax_lln.axhline(0, color='black', linestyle='--',
+                                    linewidth=0.8, zorder=1)
+                    _ax_lln.set_xticks(range(1, len(_all_levs_shuf_ln) + 1))
+                    _ax_lln.set_xticklabels(
+                        [lv.replace('level_', 'L').replace('.json', '')
+                         for lv in _all_levs_shuf_ln],
+                        rotation=45, ha='right',
+                    )
+                    _ax_lln.set_title(
+                        'Zone Speed Z-Score by Level \u2014 Individual Mice (Reward Zone)')
+                    _ax_lln.set_xlabel('Level')
+                    _ax_lln.set_ylabel(
+                        'Zone Speed Z-Score\n(negative = slower than chance inside zone)')
+                    _ax_lln.tick_params(axis='both', direction='in')
+                    _ax_lln.spines['top'].set_visible(False)
+                    _ax_lln.spines['right'].set_visible(False)
+                    plt.legend(frameon=False, fontsize=plt.rcParams['legend.fontsize'])
+
+            # ── Level condition line: mean ± SEM per condition (reward zone) ─
+            if 'level_shuffle_zscore_cond' in selected_plots and _lev_zscores_rew:
+                _lev_z_cond_rw: dict = {}  # condition -> level -> [per-mouse means]
+                # Reuse per-mouse dict if already built, otherwise pull from pre-computed map
+                _src_rw = (_lev_z_mouse_rw
+                           if '_lev_z_mouse_rw' in dir() and _lev_z_mouse_rw
+                           else {k: list(v) for k, v in _lev_zscores_rew.items()})
+
+                # Aggregate per-mouse means then group by condition
+                for (_mn_scl2, _lv_scl2), _vals_scl in _src_rw.items():
+                    _cond_scl = next(
+                        (_r['starting_condition'] for _r in all_results
+                         if _r['mouse'] == _mn_scl2), None)
+                    if _cond_scl is None:
+                        continue
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _mm_scl = float(np.nanmean(_vals_scl))
+                    if not np.isnan(_mm_scl):
+                        _lev_z_cond_rw.setdefault(_cond_scl, {}).setdefault(
+                            _lv_scl2, []).append(_mm_scl)
+
+                if _lev_z_cond_rw:
+                    def _lsk_scl(n):
+                        parts = n.split('_')
+                        return int(parts[-1]) if parts[-1].isdigit() else 999
+                    _all_levs_scl = sorted(
+                        {lv for cd in _lev_z_cond_rw.values() for lv in cd},
+                        key=_lsk_scl)
+                    _conds_scl    = sorted(_lev_z_cond_rw.keys())
+                    level_shuffle_zscore_cond_fig = plt.figure(
+                        figsize=plt.rcParams['figure.figsize'], constrained_layout=True)
+                    for _cond_scl3 in _conds_scl:
+                        _color_scl = condition_color_map.get(_cond_scl3, '#7f7f7f')
+                        _x_scl, _mean_scl, _sem_scl = [], [], []
+                        for _lv_idx_scl, _lv_scl3 in enumerate(_all_levs_scl):
+                            _vals_c = _lev_z_cond_rw.get(_cond_scl3, {}).get(_lv_scl3, [])
+                            if _vals_c:
+                                with warnings.catch_warnings():
+                                    warnings.simplefilter('ignore', RuntimeWarning)
+                                    _mn_v = float(np.nanmean(_vals_c))
+                                    _se_v = (float(np.nanstd(_vals_c, ddof=1) /
+                                                   np.sqrt(len(_vals_c)))
+                                             if len(_vals_c) > 1 else 0.0)
+                                _x_scl.append(_lv_idx_scl + 1)
+                                _mean_scl.append(_mn_v)
+                                _sem_scl.append(_se_v)
+                        if _x_scl:
+                            _x_arr = np.array(_x_scl)
+                            _m_arr = np.array(_mean_scl)
+                            _s_arr = np.array(_sem_scl)
+                            plt.figure(level_shuffle_zscore_cond_fig.number)
+                            plt.plot(_x_arr, _m_arr, '-o',
+                                     color=_color_scl,
+                                     linewidth=plt.rcParams['lines.linewidth'],
+                                     markersize=plt.rcParams['lines.markersize'],
+                                     label=f'{_cond_scl3} (n={len(_lev_z_cond_rw[_cond_scl3].get(_all_levs_scl[0], _vals_c))})')
+                            plt.fill_between(_x_arr, _m_arr - _s_arr, _m_arr + _s_arr,
+                                             color=_color_scl, alpha=0.2)
+                    _ax_scl = plt.gca()
+                    _ax_scl.axhline(0, color='black', linestyle='--',
+                                    linewidth=0.8, zorder=1)
+                    _ax_scl.set_xticks(range(1, len(_all_levs_scl) + 1))
+                    _ax_scl.set_xticklabels(
+                        [lv.replace('level_', 'L').replace('.json', '')
+                         for lv in _all_levs_scl],
+                        rotation=45, ha='right',
+                    )
+                    _ax_scl.set_title(
+                        'Zone Speed Z-Score by Level \u2014 By Condition (Reward Zone)')
+                    _ax_scl.set_xlabel('Level')
+                    _ax_scl.set_ylabel(
+                        'Zone Speed Z-Score\n(mean \u00b1 SEM; negative = slower than chance)')
+                    _ax_scl.tick_params(axis='both', direction='in')
+                    _ax_scl.spines['top'].set_visible(False)
+                    _ax_scl.spines['right'].set_visible(False)
+                    plt.legend(frameon=False, fontsize=plt.rcParams['legend.fontsize'])
+
+    # ── Punishment zone: post-entry speed Z-score (circular-shift permutation) ──
+    _punish_shuf_plot_keys = {'condition_punish_shuffle_zscore',
+                              'condition_punish_shuffle_zscore_bar',
+                              'level_punish_shuffle_zscore',
+                              'level_punish_shuffle_zscore_line',
+                              'level_punish_shuffle_zscore_cond'}
+    if _punish_shuf_plot_keys & set(selected_plots):
+        _any_punish_shuf = False
+        for _r in all_results:
+            _r['_punish_shuffle_zscores'] = _compute_true_zone_zscores(
+                _r.get('treadmill_paths', []),
+                _r.get('punish_zone_periods', []),
+                session_indices_or_none=None,
+                n_sessions=len(_r['df']),
+                n_shuffles=200,
+                seed=42,
+            )
+            if not np.all(np.isnan(_r['_punish_shuffle_zscores'])):
+                _any_punish_shuf = True
+        if not _any_punish_shuf:
+            print("  [WARN] punish_shuffle_zscore: no punishment zone speed epoch data — skipping")
+        else:
+            # ── Line plot ──────────────────────────────────────────────────────
+            if 'condition_punish_shuffle_zscore' in selected_plots:
+                condition_punish_shuffle_zscore_fig = plt.figure(
+                    figsize=plt.rcParams['figure.figsize'])
+                _pshuf_groups: dict = {}
+                for _r in all_results:
+                    _cond = _r['starting_condition']
+                    _zs   = _r['_punish_shuffle_zscores']
+                    _arr  = np.full(max_sessions, np.nan)
+                    for _si in range(min(len(_zs), len(_r['df']), max_sessions)):
+                        if not np.isnan(_zs[_si]):
+                            _arr[_si] = _zs[_si]
+                    _pshuf_groups.setdefault(_cond, []).append(_arr)
+
+                _day_nums_pshuf = np.arange(1, max_sessions + 1)
+                for _cond, _arrays in _pshuf_groups.items():
+                    _color   = condition_color_map.get(_cond, '#7f7f7f')
+                    _padded  = np.array(_arrays)
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _n_mice_pshuf = np.sum(~np.isnan(_padded), axis=0)
+                        _mean_pshuf   = np.where(
+                            _n_mice_pshuf > 0, np.nanmean(_padded, axis=0), np.nan)
+                        _sem_pshuf    = np.where(
+                            _n_mice_pshuf > 1,
+                            np.nanstd(_padded, axis=0) / np.sqrt(_n_mice_pshuf),
+                            0,
+                        )
+                    plt.figure(condition_punish_shuffle_zscore_fig.number)
+                    plt.plot(_day_nums_pshuf, _mean_pshuf, '-', color=_color,
+                             linewidth=plt.rcParams['lines.linewidth'],
+                             label=f'{_cond} (n={len(_arrays)})')
+                    plt.fill_between(_day_nums_pshuf,
+                                     _mean_pshuf - _sem_pshuf,
+                                     _mean_pshuf + _sem_pshuf,
+                                     color=_color, alpha=0.2)
+
+                plt.figure(condition_punish_shuffle_zscore_fig.number)
+                plt.axhline(0, color='gray', linestyle='--', linewidth=0.8, zorder=1)
+                plt.title('Zone Speed Z-Score by Condition (Punishment Zone)')
+                plt.xlabel('Training Day')
+                plt.ylabel('Zone Speed Z-Score (mean \u00b1 SEM)\n(negative = slower than chance; positive = faster)')
+                _ax_pshuf_line = plt.gca()
+                _ax_pshuf_line.tick_params(axis='both', direction='in')
+                _ax_pshuf_line.spines['top'].set_visible(False)
+                _ax_pshuf_line.spines['right'].set_visible(False)
+                _ax_pshuf_line.set_xlim(left=1, right=max_days + 0.5)
+                _ax_pshuf_line.xaxis.set_major_locator(plt.MultipleLocator(agg_major_spacing))
+                _ax_pshuf_line.xaxis.set_minor_locator(plt.MultipleLocator(agg_minor_spacing))
+                _ax_pshuf_line.tick_params(axis='x', which='minor', direction='in')
+                _ax_pshuf_line.xaxis.set_major_formatter(
+                    plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+                plt.legend(frameon=False)
+                condition_punish_shuffle_zscore_fig.tight_layout()
+
+            # ── Bar chart ──────────────────────────────────────────────────────
+            if 'condition_punish_shuffle_zscore_bar' in selected_plots:
+                _pshuf_bar_data: dict = {}
+                for _r in all_results:
+                    _cond = _r['starting_condition']
+                    _zs   = _r['_punish_shuffle_zscores']
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _mouse_pz_mean = float(np.nanmean(_zs))
+                    if not np.isnan(_mouse_pz_mean):
+                        _pshuf_bar_data.setdefault(_cond, []).append(
+                            (_r['mouse'], _mouse_pz_mean))
+
+                if _pshuf_bar_data:
+                    _pshuf_conds_bar = sorted(_pshuf_bar_data.keys())
+                    _n_pshuf_conds_b = len(_pshuf_conds_bar)
+                    condition_punish_shuffle_zscore_bar_fig, _ax_pszbar = plt.subplots(
+                        figsize=plt.rcParams.get('figure.figsize', (3.0, 2.5)))
+                    _rng_pszbar   = np.random.default_rng(seed=42)
+                    _all_pszbar_v = []
+                    for _ci, _cond in enumerate(_pshuf_conds_bar):
+                        _color_pszb   = condition_color_map.get(_cond, '#7f7f7f')
+                        _entries_pszb = _pshuf_bar_data[_cond]
+                        _n_pszb       = len(_entries_pszb)
+                        _zvals_pszb   = [e[1] for e in _entries_pszb]
+                        with warnings.catch_warnings():
+                            warnings.simplefilter('ignore', RuntimeWarning)
+                            _mn_pszb  = float(np.nanmean(_zvals_pszb))
+                            _sem_pszb = (float(np.nanstd(_zvals_pszb, ddof=1) / np.sqrt(_n_pszb))
+                                         if _n_pszb > 1 else 0.0)
+                        _all_pszbar_v.extend(
+                            _zvals_pszb + [_mn_pszb + _sem_pszb, _mn_pszb - _sem_pszb])
+                        _ax_pszbar.bar(_ci, _mn_pszb, width=0.5, color=_color_pszb, alpha=0.7,
+                                       yerr=_sem_pszb, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2)
+                        _jitter_pszb = (_rng_pszbar.random(_n_pszb) - 0.5) * 0.22
+                        for _j, (_mname_pszb, _zv_pszb) in enumerate(_entries_pszb):
+                            _ax_pszbar.plot(_ci + _jitter_pszb[_j], _zv_pszb, 'o',
+                                            color=_color_pszb, markeredgecolor='black',
+                                            markeredgewidth=plt.rcParams['lines.linewidth'],
+                                            markersize=plt.rcParams['lines.markersize'], zorder=3)
+                    _ax_pszbar.axhline(0, color='black', linestyle='--', linewidth=0.8, zorder=1)
+                    _ax_pszbar.set_xticks(np.arange(_n_pshuf_conds_b))
+                    _ax_pszbar.set_xticklabels(_pshuf_conds_bar)
+                    _ax_pszbar.set_xlabel('Starting Condition')
+                    _ax_pszbar.set_ylabel(
+                        'Zone Speed Z-Score\n(mean \u00b1 SEM, punishment zone)')
+                    if _all_pszbar_v:
+                        _ymax_pszb = float(np.nanmax(_all_pszbar_v))
+                        _ymin_pszb = float(np.nanmin(_all_pszbar_v))
+                        _pad_pszb  = max(abs(_ymax_pszb), abs(_ymin_pszb)) * 0.12 or 0.1
+                        _ax_pszbar.set_ylim(_ymin_pszb - _pad_pszb, _ymax_pszb + _pad_pszb)
+                    _ax_pszbar.tick_params(axis='both', direction='in')
+                    _ax_pszbar.spines['top'].set_visible(False)
+                    _ax_pszbar.spines['right'].set_visible(False)
+
+                    import itertools as _it_pszbar
+                    _pszbar_pairs = list(_it_pszbar.combinations(range(_n_pshuf_conds_b), 2))
+                    _ylim_pszb = list(_ax_pszbar.get_ylim())
+                    _step_pszb = (_ylim_pszb[1] - _ylim_pszb[0]) * 0.14
+                    _base_pszb = _ylim_pszb[1]
+                    for _pi_pszb, (_ia_pszb, _ib_pszb) in enumerate(_pszbar_pairs):
+                        _va_pszb = [e[1] for e in _pshuf_bar_data[_pshuf_conds_bar[_ia_pszb]]]
+                        _vb_pszb = [e[1] for e in _pshuf_bar_data[_pshuf_conds_bar[_ib_pszb]]]
+                        if len(_va_pszb) < 2 or len(_vb_pszb) < 2:
+                            continue
+                        _u_pszb, _p_pszb = mannwhitneyu(
+                            _va_pszb, _vb_pszb, alternative='two-sided')
+                        print(f'  [PUNISH SHUFFLE Z] {_pshuf_conds_bar[_ia_pszb]} vs '
+                              f'{_pshuf_conds_bar[_ib_pszb]}: U={_u_pszb:.1f}, p={_p_pszb:.4f}')
+                        _sig_pszb = _fmt_p(_p_pszb)
+                        _bh_pszb = _base_pszb + _step_pszb * (_pi_pszb + 0.6)
+                        _ax_pszbar.plot(
+                            [_ia_pszb, _ia_pszb, _ib_pszb, _ib_pszb],
+                            [_bh_pszb - _step_pszb * 0.15, _bh_pszb,
+                             _bh_pszb, _bh_pszb - _step_pszb * 0.15],
+                            color='black')
+                        _ax_pszbar.text(
+                            (_ia_pszb + _ib_pszb) / 2, _bh_pszb + _step_pszb * 0.05,
+                            _sig_pszb, ha='center', va='bottom')
+                    if _pszbar_pairs:
+                        _ax_pszbar.set_ylim(
+                            _ylim_pszb[0],
+                            _base_pszb + _step_pszb * (len(_pszbar_pairs) + 1.5))
+                    condition_punish_shuffle_zscore_bar_fig.suptitle(
+                        'Zone Speed Z-Score (Punishment Zone) \u2014 Circular-Shift Permutation\n'
+                        'Mean Z-Score per Mouse by Condition (negative = slower than chance inside zone)',
+                    )
+                    condition_punish_shuffle_zscore_bar_fig.tight_layout()
+                    _write_mwu_report(
+                        output_dir, 'condition_punish_shuffle_zscore_bar',
+                        'Zone Speed Z-Score (Punishment Zone) by Condition',
+                        [(_pshuf_conds_bar[_ia_pszb], _pshuf_conds_bar[_ib_pszb],
+                          [e[1] for e in _pshuf_bar_data[_pshuf_conds_bar[_ia_pszb]]],
+                          [e[1] for e in _pshuf_bar_data[_pshuf_conds_bar[_ib_pszb]]])
+                         for _ia_pszb, _ib_pszb in _pszbar_pairs],
+                    )
+
+            # ── Level bar chart ────────────────────────────────────────────────
+            if 'level_punish_shuffle_zscore' in selected_plots and _lev_zscores_pun:
+                # Build condition->level->z from pre-computed level-window Z-scores
+                _lev_pz_by_cond: dict = {}
+                for (_mn_rpc, _lv_rpc), _zs_rpc in _lev_zscores_pun.items():
+                    _cond_rpc = next((_r['starting_condition'] for _r in all_results
+                                      if _r['mouse'] == _mn_rpc), None)
+                    if _cond_rpc:
+                        _lev_pz_by_cond.setdefault(_cond_rpc, {}).setdefault(
+                            _lv_rpc, []).extend(_zs_rpc)
+
+                if _lev_pz_by_cond:
+                    def _lsk_pshuf(n):
+                        parts = n.split('_')
+                        return int(parts[-1]) if parts[-1].isdigit() else 999
+                    _all_levs_pshuf = sorted(
+                        {lv for cd in _lev_pz_by_cond.values() for lv in cd},
+                        key=_lsk_pshuf,
+                    )
+                    _pshuf_conds_lev  = sorted(_lev_pz_by_cond.keys())
+                    _n_levs_pshuf     = len(_all_levs_pshuf)
+                    _n_conds_lpz      = len(_pshuf_conds_lev)
+                    _width_lev_pshuf  = 0.8 / max(_n_conds_lpz, 1)
+                    _x_lev_pshuf      = np.arange(_n_levs_pshuf)
+                    level_punish_shuffle_zscore_fig, _ax_lpz = plt.subplots(
+                        figsize=(max(4.0, _n_levs_pshuf * 0.9), 2.5))
+                    for _ci, _cond in enumerate(_pshuf_conds_lev):
+                        _color_lpz   = condition_color_map.get(_cond, '#7f7f7f')
+                        _offsets_lpz = (_x_lev_pshuf +
+                                        (_ci - (_n_conds_lpz - 1) / 2.0) * _width_lev_pshuf)
+                        _means_lpz = []
+                        _sems_lpz  = []
+                        for _lv in _all_levs_pshuf:
+                            _lvz = _lev_pz_by_cond.get(_cond, {}).get(_lv, [])
+                            if _lvz:
+                                _means_lpz.append(float(np.nanmean(_lvz)))
+                                _sems_lpz.append(
+                                    float(np.nanstd(_lvz, ddof=1) / np.sqrt(len(_lvz)))
+                                    if len(_lvz) > 1 else 0.0
+                                )
+                            else:
+                                _means_lpz.append(np.nan)
+                                _sems_lpz.append(0.0)
+                        _ax_lpz.bar(_offsets_lpz, _means_lpz,
+                                    width=_width_lev_pshuf * 0.9,
+                                    color=_color_lpz, alpha=0.7,
+                                    yerr=_sems_lpz, error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'), zorder=2,
+                                    label=_cond)
+                    _ax_lpz.axhline(0, color='black', linestyle='--', linewidth=0.8, zorder=1)
+                    _ax_lpz.set_xticks(_x_lev_pshuf)
+                    _ax_lpz.set_xticklabels(_all_levs_pshuf, rotation=30, ha='right')
+                    _ax_lpz.set_xlabel('Level')
+                    _ax_lpz.set_ylabel(
+                        'Post-Entry Speed Z-Score\n(mean \u00b1 SEM, punishment zone)')
+                    _ax_lpz.tick_params(axis='both', direction='in')
+                    _ax_lpz.spines['top'].set_visible(False)
+                    _ax_lpz.spines['right'].set_visible(False)
+                    _ax_lpz.legend(frameon=False)
+                    level_punish_shuffle_zscore_fig.suptitle(
+                        'Zone Speed Z-Score by Level and Condition (Punishment Zone)\n'
+                        '(circular-shift permutation; negative = slower than chance inside zone)',
+                    )
+                    level_punish_shuffle_zscore_fig.tight_layout()
+
+            # ── Level line plot: per-mouse mean Z per level (punishment zone) ─
+            if 'level_punish_shuffle_zscore_line' in selected_plots and _lev_zscores_pun:
+                # Use pre-computed level-window Z-scores directly
+                _lev_z_mouse_pn: dict = {k: list(v) for k, v in _lev_zscores_pun.items()}
+
+                if _lev_z_mouse_pn:
+                    def _lsk_pshuf_ln(n):
+                        parts = n.split('_')
+                        return int(parts[-1]) if parts[-1].isdigit() else 999
+                    _all_levs_pshuf_ln = sorted(
+                        {lv for (_, lv) in _lev_z_mouse_pn}, key=_lsk_pshuf_ln)
+                    _all_mice_pshuf_ln = sorted({mn for (mn, _) in _lev_z_mouse_pn})
+                    level_punish_shuffle_zscore_line_fig = plt.figure(
+                        figsize=plt.rcParams['figure.figsize'], constrained_layout=True)
+                    for _mname_pln2 in _all_mice_pshuf_ln:
+                        _cond_pln2  = next(
+                            (_r['starting_condition'] for _r in all_results
+                             if _r['mouse'] == _mname_pln2), 'Unknown')
+                        _color_pln2 = condition_color_map.get(_cond_pln2, '#7f7f7f')
+                        _x_pln, _y_pln = [], []
+                        for _lv_idx_pln, _lv_pln2 in enumerate(_all_levs_pshuf_ln):
+                            _vals_pln = _lev_z_mouse_pn.get((_mname_pln2, _lv_pln2))
+                            if _vals_pln:
+                                with warnings.catch_warnings():
+                                    warnings.simplefilter('ignore', RuntimeWarning)
+                                    _y_pln.append(float(np.nanmean(_vals_pln)))
+                                _x_pln.append(_lv_idx_pln + 1)
+                        if _x_pln:
+                            plt.figure(level_punish_shuffle_zscore_line_fig.number)
+                            plt.plot(_x_pln, _y_pln, '-o',
+                                     color=_color_pln2,
+                                     linewidth=plt.rcParams['lines.linewidth'],
+                                     markersize=plt.rcParams['lines.markersize'],
+                                     label=_mname_pln2)
+                    _ax_pln = plt.gca()
+                    _ax_pln.axhline(0, color='black', linestyle='--',
+                                    linewidth=0.8, zorder=1)
+                    _ax_pln.set_xticks(range(1, len(_all_levs_pshuf_ln) + 1))
+                    _ax_pln.set_xticklabels(
+                        [lv.replace('level_', 'L').replace('.json', '')
+                         for lv in _all_levs_pshuf_ln],
+                        rotation=45, ha='right',
+                    )
+                    _ax_pln.set_title(
+                        'Zone Speed Z-Score by Level \u2014 Individual Mice (Punishment Zone)')
+                    _ax_pln.set_xlabel('Level')
+                    _ax_pln.set_ylabel(
+                        'Zone Speed Z-Score\n(negative = slower than chance inside zone)')
+                    _ax_pln.tick_params(axis='both', direction='in')
+                    _ax_pln.spines['top'].set_visible(False)
+                    _ax_pln.spines['right'].set_visible(False)
+                    plt.legend(frameon=False, fontsize=plt.rcParams['legend.fontsize'])
+
+            # ── Level condition line: mean ± SEM per condition (punishment zone) ─
+            if 'level_punish_shuffle_zscore_cond' in selected_plots and _lev_zscores_pun:
+                _lev_z_cond_pw: dict = {}  # condition -> level -> [per-mouse means]
+                # Reuse per-mouse dict if already built, otherwise pull from pre-computed map
+                _src_pw = (_lev_z_mouse_pn
+                           if '_lev_z_mouse_pn' in dir() and _lev_z_mouse_pn
+                           else {k: list(v) for k, v in _lev_zscores_pun.items()})
+
+                for (_mn_scp2, _lv_scp2), _vals_scp in _src_pw.items():
+                    _cond_scp = next(
+                        (_r['starting_condition'] for _r in all_results
+                         if _r['mouse'] == _mn_scp2), None)
+                    if _cond_scp is None:
+                        continue
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('ignore', RuntimeWarning)
+                        _mm_scp = float(np.nanmean(_vals_scp))
+                    if not np.isnan(_mm_scp):
+                        _lev_z_cond_pw.setdefault(_cond_scp, {}).setdefault(
+                            _lv_scp2, []).append(_mm_scp)
+
+                if _lev_z_cond_pw:
+                    def _lsk_scp(n):
+                        parts = n.split('_')
+                        return int(parts[-1]) if parts[-1].isdigit() else 999
+                    _all_levs_scp = sorted(
+                        {lv for cd in _lev_z_cond_pw.values() for lv in cd},
+                        key=_lsk_scp)
+                    _conds_scp    = sorted(_lev_z_cond_pw.keys())
+                    level_punish_shuffle_zscore_cond_fig = plt.figure(
+                        figsize=plt.rcParams['figure.figsize'], constrained_layout=True)
+                    for _cond_scp3 in _conds_scp:
+                        _color_scp = condition_color_map.get(_cond_scp3, '#7f7f7f')
+                        _x_scp, _mean_scp, _sem_scp = [], [], []
+                        for _lv_idx_scp, _lv_scp3 in enumerate(_all_levs_scp):
+                            _vals_cp = _lev_z_cond_pw.get(_cond_scp3, {}).get(_lv_scp3, [])
+                            if _vals_cp:
+                                with warnings.catch_warnings():
+                                    warnings.simplefilter('ignore', RuntimeWarning)
+                                    _mn_vp = float(np.nanmean(_vals_cp))
+                                    _se_vp = (float(np.nanstd(_vals_cp, ddof=1) /
+                                                    np.sqrt(len(_vals_cp)))
+                                              if len(_vals_cp) > 1 else 0.0)
+                                _x_scp.append(_lv_idx_scp + 1)
+                                _mean_scp.append(_mn_vp)
+                                _sem_scp.append(_se_vp)
+                        if _x_scp:
+                            _x_arp = np.array(_x_scp)
+                            _m_arp = np.array(_mean_scp)
+                            _s_arp = np.array(_sem_scp)
+                            plt.figure(level_punish_shuffle_zscore_cond_fig.number)
+                            plt.plot(_x_arp, _m_arp, '-o',
+                                     color=_color_scp,
+                                     linewidth=plt.rcParams['lines.linewidth'],
+                                     markersize=plt.rcParams['lines.markersize'],
+                                     label=f'{_cond_scp3} (n={len(_lev_z_cond_pw[_cond_scp3].get(_all_levs_scp[0], _vals_cp))})')
+                            plt.fill_between(_x_arp, _m_arp - _s_arp, _m_arp + _s_arp,
+                                             color=_color_scp, alpha=0.2)
+                    _ax_scp = plt.gca()
+                    _ax_scp.axhline(0, color='black', linestyle='--',
+                                    linewidth=0.8, zorder=1)
+                    _ax_scp.set_xticks(range(1, len(_all_levs_scp) + 1))
+                    _ax_scp.set_xticklabels(
+                        [lv.replace('level_', 'L').replace('.json', '')
+                         for lv in _all_levs_scp],
+                        rotation=45, ha='right',
+                    )
+                    _ax_scp.set_title(
+                        'Zone Speed Z-Score by Level \u2014 By Condition (Punishment Zone)')
+                    _ax_scp.set_xlabel('Level')
+                    _ax_scp.set_ylabel(
+                        'Zone Speed Z-Score\n(mean \u00b1 SEM; negative = slower than chance)')
+                    _ax_scp.tick_params(axis='both', direction='in')
+                    _ax_scp.spines['top'].set_visible(False)
+                    _ax_scp.spines['right'].set_visible(False)
+                    plt.legend(frameon=False, fontsize=plt.rcParams['legend.fontsize'])
+
+    # ── Level: proportion of reward zone time immobile ───────────────────────
+    _rzi_either = any(k in selected_plots for k in
+                      ('level_rew_zone_immobility_prop', 'level_rew_zone_immobility_prop_cond'))
+    if _rzi_either and _lev_rew_zone_immo:
+        def _lsk_rzi(n):
+            parts = n.split('_')
+            return int(parts[-1]) if parts[-1].isdigit() else 999
+        _all_levs_rzi = sorted({lv for (_, lv) in _lev_rew_zone_immo}, key=_lsk_rzi)
+        _all_mice_rzi = sorted({mn for (mn, _) in _lev_rew_zone_immo})
+
+        # Pre-build per-condition aggregation — shared by both figures
+        _cond_agg_rzi: dict = {}
+        for (_mn_ca_rzi, _lv_ca_rzi), _vals_ca_rzi in _lev_rew_zone_immo.items():
+            _cond_ca_rzi = next(
+                (_r['starting_condition'] for _r in all_results
+                 if _r['mouse'] == _mn_ca_rzi), None)
+            if _cond_ca_rzi:
+                with warnings.catch_warnings():
+                    warnings.simplefilter('ignore', RuntimeWarning)
+                    _mm_ca_rzi = float(np.nanmean(_vals_ca_rzi))
+                if not np.isnan(_mm_ca_rzi):
+                    _cond_agg_rzi.setdefault(_cond_ca_rzi, {}).setdefault(
+                        _lv_ca_rzi, []).append(_mm_ca_rzi)
+
+        def _rzi_setup_ax(ax):
+            ax.set_xticks(range(1, len(_all_levs_rzi) + 1))
+            ax.set_xticklabels(
+                [lv.replace('level_', 'L').replace('.json', '')
+                 for lv in _all_levs_rzi],
+                rotation=45, ha='right',
+            )
+            ax.set_ylim(0, 1)
+            ax.set_xlabel('Level')
+            ax.set_ylabel('Prop. zone time immobile\n(speed \u2264 0 for \u2265 250 ms, within reward zone)')
+            ax.tick_params(axis='both', direction='in')
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+
+        # ── Individual figure: one line per mouse ─────────────────────────────
+        if 'level_rew_zone_immobility_prop' in selected_plots:
+            level_rew_zone_immobility_prop_fig = plt.figure(
+                figsize=plt.rcParams['figure.figsize'], constrained_layout=True)
+            for _mn_rzi in _all_mice_rzi:
+                _cond_rzi  = next(
+                    (_r['starting_condition'] for _r in all_results
+                     if _r['mouse'] == _mn_rzi), 'Unknown')
+                _color_rzi = condition_color_map.get(_cond_rzi, '#7f7f7f')
+                _x_rzi, _y_rzi = [], []
+                for _lv_idx_rzi, _lv_rzi in enumerate(_all_levs_rzi):
+                    _vals_rzi = _lev_rew_zone_immo.get((_mn_rzi, _lv_rzi))
+                    if _vals_rzi:
+                        with warnings.catch_warnings():
+                            warnings.simplefilter('ignore', RuntimeWarning)
+                            _y_rzi.append(float(np.nanmean(_vals_rzi)))
+                        _x_rzi.append(_lv_idx_rzi + 1)
+                if _x_rzi:
+                    plt.figure(level_rew_zone_immobility_prop_fig.number)
+                    plt.plot(_x_rzi, _y_rzi, '-o',
+                             color=_color_rzi, alpha=0.5,
+                             linewidth=plt.rcParams['lines.linewidth'],
+                             markersize=plt.rcParams['lines.markersize'],
+                             label=_mn_rzi)
+            _rzi_setup_ax(plt.gca())
+            plt.legend(frameon=False, fontsize=plt.rcParams['legend.fontsize'])
+            level_rew_zone_immobility_prop_fig.suptitle(
+                'Proportion of Time Immobile within Reward Zones by Level \u2014 Individual Mice\n'
+                '(speed \u2264 0 for \u2265 250 ms; zone end clipped to reward delivery; per-level window)',
+
+            )
+
+        # ── Condition figure: condition mean ± SEM ────────────────────────────
+        if 'level_rew_zone_immobility_prop_cond' in selected_plots:
+            level_rew_zone_immobility_prop_cond_fig = plt.figure(
+                figsize=plt.rcParams['figure.figsize'], constrained_layout=True)
+            for _cond_ol_rzi, _lv_dict_ol_rzi in sorted(_cond_agg_rzi.items()):
+                _color_ol_rzi = condition_color_map.get(_cond_ol_rzi, '#7f7f7f')
+                _x_ol_rzi, _m_ol_rzi, _s_ol_rzi = [], [], []
+                for _lv_idx_ol_rzi, _lv_ol_rzi in enumerate(_all_levs_rzi):
+                    _vals_ol_rzi = _lv_dict_ol_rzi.get(_lv_ol_rzi, [])
+                    if _vals_ol_rzi:
+                        _x_ol_rzi.append(_lv_idx_ol_rzi + 1)
+                        _m_ol_rzi.append(float(np.nanmean(_vals_ol_rzi)))
+                        _s_ol_rzi.append(
+                            float(np.nanstd(_vals_ol_rzi, ddof=1) / np.sqrt(len(_vals_ol_rzi)))
+                            if len(_vals_ol_rzi) > 1 else 0.0)
+                if _x_ol_rzi:
+                    plt.figure(level_rew_zone_immobility_prop_cond_fig.number)
+                    _xa_rzi = np.array(_x_ol_rzi)
+                    _ma_rzi = np.array(_m_ol_rzi)
+                    _sa_rzi = np.array(_s_ol_rzi)
+                    plt.plot(_xa_rzi, _ma_rzi, '-o',
+                             color=_color_ol_rzi, linewidth=1.5, markersize=4,
+                             label=_cond_ol_rzi)
+                    plt.fill_between(_xa_rzi, _ma_rzi - _sa_rzi, _ma_rzi + _sa_rzi,
+                                     color=_color_ol_rzi, alpha=0.2)
+            _rzi_setup_ax(plt.gca())
+            plt.legend(frameon=False, fontsize=plt.rcParams['legend.fontsize'])
+            level_rew_zone_immobility_prop_cond_fig.suptitle(
+                'Proportion of Time Immobile within Reward Zones by Level \u2014 Condition Mean \u00b1 SEM\n'
+                '(speed \u2264 0 for \u2265 250 ms; zone end clipped to reward delivery; per-level window)',
+
+            )
+
     # Create the level-based analysis plots
     level_reward_fig = level_speed_collapsed_fig = level_speed_condition_fig = None
     level_lick_collapsed_fig = level_lick_condition_fig = None
@@ -4560,6 +15007,11 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     level_bout_collapsed_fig = level_bout_condition_fig = None
     level_bout_avg_speed_collapsed_fig = level_bout_avg_speed_condition_fig = None
     level_bout_avg_dist_collapsed_fig = level_bout_avg_dist_condition_fig = None
+    last_level_bar_fig = None
+    level_sensitivity_fig = None
+    level_survivor_fig = None
+    time_to_level2_fig = None
+    level_progression_indiv_fig = level_progression_condition_fig = level_progression_bar_fig = None
     _level_stats_data = None
     if transitions_csv_path or any(k in selected_plots for k in ('levels', 'level_speed', 'level_speed_condition',
                                                                    'level_lick', 'level_lick_condition',
@@ -4567,17 +15019,26 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                                                                    'level_dist_condition_excl_last',
                                                                    'level_bout', 'level_bout_condition',
                                                                    'level_bout_avg_speed', 'level_bout_avg_speed_condition',
-                                                                   'level_bout_avg_dist', 'level_bout_avg_dist_condition')):
+                                                                   'level_bout_avg_dist', 'level_bout_avg_dist_condition',
+                                                                   'last_level_bar', 'level_survivor', 'time_to_level2', 'level_sensitivity',
+                                                                   'level_progression_indiv', 'level_progression_condition', 'level_progression_bar',
+                                                                   'level_immobility_prop')):
         level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, \
         level_lick_collapsed_fig, level_lick_condition_fig, \
+        level_sensitivity_fig, \
         level_dist_collapsed_fig, level_dist_condition_fig, \
         level_dist_condition_excl_last_fig, \
         level_bout_collapsed_fig, level_bout_condition_fig, \
         level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, \
         level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, \
+        last_level_bar_fig, level_survivor_fig, time_to_level2_fig, \
+        level_progression_indiv_fig, level_progression_condition_fig, level_progression_bar_fig, \
+        level_immobility_prop_fig, \
         _level_stats_data = analyze_levels(
             data_files, transitions_csv_path, animal_conditions=conditions,
+            animal_markers=markers,
             selected_plots=selected_plots,
+            output_dir=output_dir,
         )
 
     # ── Missing data report ───────────────────────────────────────────────────
@@ -4603,20 +15064,20 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         report_lines.append(f"\nMouse: {mouse_name}")
         report_lines.append(f"  Sessions present   : {len(present)}")
         for d in present:
-            day_offset = (d - global_start).days
+            day_offset = (d - global_start).days + 1
             report_lines.append(f"    Day {day_offset:>3}  {d}")
 
         if file_errors:
             report_lines.append(f"  Incomplete sessions (missing file): {len(file_errors)}")
             for date_str, missing_types in sorted(file_errors.items()):
                 d = datetime.strptime(date_str, '%Y-%m-%d').date()
-                day_offset = (d - global_start).days
+                day_offset = (d - global_start).days + 1
                 report_lines.append(f"    Day {day_offset:>3}  {date_str}  <-- MISSING FILE(S): {', '.join(missing_types)}")
 
         if fully_missing:
             report_lines.append(f"  Fully absent dates : {len(fully_missing)}")
             for d in fully_missing:
-                day_offset = (d - global_start).days
+                day_offset = (d - global_start).days + 1
                 report_lines.append(f"    Day {day_offset:>3}  {d}  <-- NO SESSION")
 
         if not file_errors and not fully_missing:
@@ -4630,11 +15091,612 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     report_dir = output_dir if output_dir else os.path.dirname(os.path.abspath(data_files[0]))
     timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
     report_path = os.path.join(report_dir, f"missing_data_report_{timestamp_str}.txt")
+    os.makedirs(report_dir, exist_ok=True)
     with open(report_path, "w", encoding="utf-8") as f:
         f.write(report_text + "\n")
     print(f"\nMissing data report saved to: {report_path}")
 
-    return speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, distance_fig, bout_count_fig, avg_bout_count_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_bar_fig, condition_speed_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, epoch_speed_per_mouse_fig, epoch_speed_cond_fig, epoch_cap_per_mouse_fig, epoch_cap_cond_fig, epoch_speed_sess_per_mouse_fig, epoch_speed_sess_cond_fig, epoch_cap_sess_per_mouse_fig, epoch_cap_sess_cond_fig, epoch_speed_early_per_mouse_fig, epoch_speed_late_per_mouse_fig, epoch_speed_early_cond_fig, epoch_speed_late_cond_fig, epoch_cap_early_per_mouse_fig, epoch_cap_late_per_mouse_fig, epoch_cap_early_cond_fig, epoch_cap_late_cond_fig, epoch_speed_early_ev_per_mouse_fig, epoch_speed_late_ev_per_mouse_fig, epoch_speed_early_ev_cond_fig, epoch_speed_late_ev_cond_fig, epoch_cap_early_ev_per_mouse_fig, epoch_cap_late_ev_per_mouse_fig, epoch_cap_early_ev_cond_fig, epoch_cap_late_ev_cond_fig, epoch_speed_sess_cond_clean_fig, epoch_cap_sess_cond_clean_fig, epoch_speed_early_cond_clean_fig, epoch_speed_late_cond_clean_fig, epoch_cap_early_cond_clean_fig, epoch_cap_late_cond_clean_fig, punish_speed_per_mouse_fig, punish_speed_cond_fig, punish_cap_per_mouse_fig, punish_cap_cond_fig, punish_speed_sess_per_mouse_fig, punish_speed_sess_cond_fig, punish_cap_sess_per_mouse_fig, punish_cap_sess_cond_fig, punish_speed_sess_cond_clean_fig, punish_cap_sess_cond_clean_fig, sex_speed_fig, sex_distance_indiv_fig, sex_reward_indiv_fig, epoch_speed_sess_sex_per_mouse_fig, epoch_speed_sess_sex_fig, epoch_cap_sess_sex_per_mouse_fig, epoch_cap_sess_sex_fig, epoch_punish_speed_sess_sex_per_mouse_fig, epoch_punish_speed_sess_sex_fig, epoch_punish_cap_sess_sex_per_mouse_fig, epoch_punish_cap_sess_sex_fig, all_results, _level_stats_data
+    # Print weekday alignment table so the user can verify Mon→Tue→Thu→Fri cycle
+    print_session_weekday_alignment(all_results)
+
+    return speed_fig, sensitivity_fig, lick_fig, reward_fig, lick_reward_ratio_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, avg_sex_speed_fig, distance_fig, immobility_prop_fig, bout_count_fig, avg_bout_count_fig, rewards_per_bout_fig, first_lick_latency_fig, condition_rewards_per_bout_fig, condition_rewards_per_bout_bar_fig, condition_first_lick_latency_fig, condition_first_lick_latency_bar_fig, condition_lick_after_reward_prop_fig, condition_lick_after_reward_prop_bar_fig, condition_lick_after_reward_prop_5s_bar_fig, weekday_reward_bar_fig, weekday_reward_bar_condition_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_lick_reward_ratio_fig, condition_lick_reward_ratio_bar_fig, condition_punish_zone_pct_bar_fig, condition_bar_fig, condition_speed_bar_fig, condition_sensitivity_fig, condition_sensitivity_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_sensitivity_fig, level_immobility_prop_fig, level_rew_zone_immobility_prop_fig, level_rew_zone_immobility_prop_cond_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, last_level_bar_fig, level_survivor_fig, time_to_level2_fig, level_progression_indiv_fig, level_progression_condition_fig, level_progression_bar_fig, epoch_del_speed_per_mouse_fig, epoch_del_speed_cond_fig, epoch_del_cap_per_mouse_fig, epoch_del_cap_cond_fig, epoch_del_lick_per_mouse_fig, epoch_del_lick_cond_fig, epoch_del_cap_diff_entry_fig, epoch_del_cap_diff_065s_fig, epoch_del_lick_diff_065s_fig, condition_shuffle_zscore_fig, condition_shuffle_zscore_bar_fig, level_shuffle_zscore_fig, level_shuffle_zscore_line_fig, level_shuffle_zscore_cond_fig, condition_punish_shuffle_zscore_fig, condition_punish_shuffle_zscore_bar_fig, level_punish_shuffle_zscore_fig, level_punish_shuffle_zscore_line_fig, level_punish_shuffle_zscore_cond_fig, epoch_speed_per_mouse_fig, epoch_speed_cond_fig, epoch_cap_per_mouse_fig, epoch_cap_cond_fig, epoch_speed_sess_per_mouse_fig, epoch_speed_sess_cond_fig, epoch_cap_sess_per_mouse_fig, epoch_cap_sess_cond_fig, epoch_speed_early_per_mouse_fig, epoch_speed_late_per_mouse_fig, epoch_speed_early_cond_fig, epoch_speed_late_cond_fig, epoch_cap_early_per_mouse_fig, epoch_cap_late_per_mouse_fig, epoch_cap_early_cond_fig, epoch_cap_late_cond_fig, epoch_speed_early_ev_per_mouse_fig, epoch_speed_late_ev_per_mouse_fig, epoch_speed_early_ev_cond_fig, epoch_speed_late_ev_cond_fig, epoch_cap_early_ev_per_mouse_fig, epoch_cap_late_ev_per_mouse_fig, epoch_cap_early_ev_cond_fig, epoch_cap_late_ev_cond_fig, epoch_speed_early_ev_cond_clean_fig, epoch_speed_late_ev_cond_clean_fig, epoch_cap_early_ev_cond_clean_fig, epoch_cap_late_ev_cond_clean_fig, epoch_speed_sess_cond_clean_fig, epoch_cap_sess_cond_clean_fig, epoch_speed_early_cond_clean_fig, epoch_speed_late_cond_clean_fig, epoch_cap_early_cond_clean_fig, epoch_cap_late_cond_clean_fig, punish_speed_per_mouse_fig, punish_speed_cond_fig, punish_cap_per_mouse_fig, punish_cap_cond_fig, punish_speed_sess_per_mouse_fig, punish_speed_sess_cond_fig, punish_cap_sess_per_mouse_fig, punish_cap_sess_cond_fig, punish_speed_sess_cond_clean_fig, punish_cap_sess_cond_clean_fig, sex_speed_fig, sex_distance_indiv_fig, sex_reward_indiv_fig, epoch_speed_sess_sex_per_mouse_fig, epoch_speed_sess_sex_fig, epoch_cap_sess_sex_per_mouse_fig, epoch_cap_sess_sex_fig, epoch_punish_speed_sess_sex_per_mouse_fig, epoch_punish_speed_sess_sex_fig, epoch_punish_cap_sess_sex_per_mouse_fig, epoch_punish_cap_sess_sex_fig, epoch_reward_speed_pre_post_fig, epoch_reward_speed_diff_fig, epoch_reward_cap_pre_post_fig, epoch_reward_cap_diff_fig, epoch_reward_speed_pre_post_entry_fig, epoch_reward_speed_diff_entry_fig, epoch_reward_speed_pre_post_entry_1s_fig, epoch_reward_speed_diff_entry_1s_fig, epoch_reward_speed_diff_entry_2s_fig, epoch_reward_lick_count_sess_per_mouse_fig, epoch_reward_lick_count_sess_cond_fig, epoch_reward_lick_count_sess_cond_clean_fig, epoch_reward_lick_diff_entry_065s_fig, epoch_punish_lick_count_sess_per_mouse_fig, epoch_punish_lick_count_sess_cond_fig, epoch_punish_lick_count_sess_cond_clean_fig, epoch_punish_speed_pre_post_fig, epoch_punish_speed_diff_fig, epoch_punish_speed_pre_post_entry_fig, epoch_punish_speed_diff_entry_fig, epoch_punish_speed_diff_entry_2s_fig, epoch_punish_cap_pre_post_fig, epoch_punish_cap_diff_fig, epoch_punish_cap_pre_post_entry_fig, epoch_punish_cap_diff_entry_fig, expl_speed_histogram_fig, expl_speed_distfit_fig, expl_speed_boxplot_fig, expl_speed_rm_anova_resid_fig, expl_cap_histogram_fig, expl_cap_boxplot_fig, expl_cap_rm_anova_resid_fig, expl_cap_distfit_fig, expl_lick_distfit_fig, expl_lick_boxplot_fig, expl_lick_rm_anova_resid_fig, expl_lick_rate_distfit_fig, expl_lick_reward_ratio_distfit_fig, all_results, _level_stats_data
+
+def _run_weight_correlations(root, file_paths, animal_info):
+    """Load a weight CSV, match to session data by mouse ID + date, and produce
+    repeated-measures correlation (rmcorr) plots:
+      1. Total Weight Change vs Reward Count — all mice.
+      2. Total Weight Change vs Reward Count — split by starting condition.
+      3. Reward Count (Day D) vs Next-Day Daily Weight Change — all mice.
+      4. Reward Count (Day D) vs Next-Day Daily Weight Change — by condition.
+
+    Uses the R ``rmcorr`` package (Bakdash & Marusich 2017).  Falls back to
+    Spearman scatter if rpy2 / rmcorr are unavailable.
+    """
+
+    # ── Load weight CSV ───────────────────────────────────────────────────────
+    weight_csv_path = filedialog.askopenfilename(
+        title='Select weight master CSV (ID, Date, Total Change …)',
+        filetypes=[('CSV files', '*.csv'), ('All files', '*.*')],
+        initialdir=os.path.dirname(file_paths[0]),
+    ) or None
+    if not weight_csv_path:
+        print("No weight CSV selected — weight correlations cancelled.")
+        return
+
+    try:
+        wdf = pd.read_csv(weight_csv_path)
+        wdf.columns = wdf.columns.str.strip()
+        # Normalise column names to lower-case for flexible matching
+        wdf_cols_lower = {c.lower().replace(' ', '_'): c for c in wdf.columns}
+        id_col    = wdf_cols_lower.get('id',    wdf.columns[0])
+        date_col  = wdf_cols_lower.get('date',  None)
+        dc_col    = wdf_cols_lower.get('daily_change', wdf_cols_lower.get('daily change', None))
+        tc_col    = wdf_cols_lower.get('total_change', wdf_cols_lower.get('total change', None))
+        if date_col is None or tc_col is None:
+            # Try to find by position (Date=col5, Daily Change=col7, Total Change=col8)
+            date_col = wdf.columns[5] if len(wdf.columns) > 5 else wdf.columns[1]
+            tc_col   = wdf.columns[8] if len(wdf.columns) > 8 else wdf.columns[2]
+        if dc_col is None:
+            dc_col = wdf.columns[7] if len(wdf.columns) > 7 else wdf.columns[2]
+        wdf[date_col] = pd.to_datetime(wdf[date_col], errors='coerce')
+        wdf[tc_col]   = pd.to_numeric(wdf[tc_col],   errors='coerce')
+        wdf[dc_col]   = pd.to_numeric(wdf[dc_col],   errors='coerce')
+        # Build lookups: (mouse_id, date_normalised) -> total_change / daily_change
+        weight_lookup       = {}
+        daily_change_lookup = {}
+        for _, row in wdf.iterrows():
+            mid = str(row[id_col]).strip()
+            dt  = row[date_col]
+            if not pd.notna(dt):
+                continue
+            d = dt.normalize()
+            tc = row[tc_col]
+            dc = row[dc_col]
+            if pd.notna(tc):
+                weight_lookup[(mid, d)] = float(tc)
+            if pd.notna(dc):
+                daily_change_lookup[(mid, d)] = float(dc)
+        print(f"Weight CSV loaded: {len(weight_lookup)} total-change entries, "
+              f"{len(daily_change_lookup)} daily-change entries across "
+              f"{len(wdf[id_col].unique())} mice.")
+    except Exception as e:
+        print(f"[ERROR] Cannot read weight CSV: {e}")
+        return
+
+    # ── Load session data ─────────────────────────────────────────────────────
+    *_, all_results, _ = analyze_mouse_data(
+        file_paths,
+        ['s' if animal_info[os.path.basename(fp).split('_')[0]]['sex'] == 'male' else 'o'
+         for fp in file_paths
+         if os.path.basename(fp).split('_')[0] in animal_info],
+        [animal_info[os.path.basename(fp).split('_')[0]]['starting_condition']
+         for fp in file_paths
+         if os.path.basename(fp).split('_')[0] in animal_info],
+        transitions_csv_path=None,
+        selected_plots=frozenset(),
+    )
+
+    # ── Build merged dataframe ────────────────────────────────────────────────
+    _one_day = pd.Timedelta(days=1)
+    records = []
+    for result in all_results:
+        mouse     = result['mouse']
+        condition = result['starting_condition']
+        df_r      = result['df']
+        for _, row in df_r.iterrows():
+            dt      = pd.Timestamp(row['date']).normalize()
+            hits    = pd.to_numeric(row.get('hits', np.nan), errors='coerce')
+            tc      = weight_lookup.get((mouse, dt), np.nan)
+            next_dc = daily_change_lookup.get((mouse, dt + _one_day), np.nan)
+            if pd.notna(hits) and (pd.notna(tc) or pd.notna(next_dc)):
+                records.append({
+                    'mouse':        mouse,
+                    'condition':    condition,
+                    'date':         dt,
+                    'reward_count': float(hits),
+                    'total_change': float(tc)      if pd.notna(tc)      else np.nan,
+                    'next_day_dc':  float(next_dc) if pd.notna(next_dc) else np.nan,
+                })
+
+    if not records:
+        print("[WARN] No overlapping dates found between weight CSV and session data.")
+        return
+
+    merged = pd.DataFrame(records)
+    mice_sorted   = sorted(merged['mouse'].unique())
+    cmap          = plt.get_cmap('tab20')
+    mouse_colors  = {m: cmap(i / max(len(mice_sorted) - 1, 1))
+                     for i, m in enumerate(mice_sorted)}
+    conditions_sorted = sorted(merged['condition'].unique())
+
+    def _compute_rmcorr(sub_df, x_col, y_col):
+        """Run rmcorr (R package) on sub_df.  Falls back gracefully on failure.
+
+        Returns a dict with keys:
+            ok (bool), r, p, ci_lo, ci_hi, slope,
+            intercepts (dict: mouse -> float), df
+        """
+        _rdf = sub_df[['mouse', x_col, y_col]].copy()
+        _rdf = _rdf.rename(columns={x_col: 'xvar', y_col: 'yvar'})
+        _rdf = _rdf.dropna(subset=['xvar', 'yvar'])
+        _rdf['mouse'] = _rdf['mouse'].astype(str)
+        _out = dict(ok=False, r=np.nan, p=np.nan, ci_lo=np.nan, ci_hi=np.nan,
+                    slope=np.nan, intercepts={}, df=np.nan)
+        if _rdf.shape[0] < 5 or _rdf['mouse'].nunique() < 3:
+            print(f"  Not enough data for rmcorr ({y_col} ~ {x_col}): "
+                  f"{_rdf.shape[0]} obs, {_rdf['mouse'].nunique()} mice.")
+            return _out
+        try:
+            import os as _osi
+            if _osi.name == 'nt':
+                _r_home = _osi.environ.get('R_HOME', '')
+                if _r_home:
+                    for _rp in [_osi.path.join(_r_home, 'bin', 'x64'),
+                                 _osi.path.join(_r_home, 'bin')]:
+                        if _osi.path.isdir(_rp):
+                            if _rp not in _osi.environ.get('PATH', ''):
+                                _osi.environ['PATH'] = _rp + _osi.pathsep + _osi.environ.get('PATH', '')
+                            try:
+                                _osi.add_dll_directory(_rp)
+                            except (AttributeError, OSError):
+                                pass
+            import rpy2.robjects as _ro
+            import rpy2.robjects.packages as _rpkgs
+            _rpkgs.importr('rmcorr')
+            import tempfile as _tmp
+            _uid  = str(id(_rdf))[-6:]
+            _tdir = _tmp.gettempdir().replace('\\', '/')
+            _fin  = f"{_tdir}/rmcorr_in_{_uid}.csv"
+            _fout = f"{_tdir}/rmcorr_out_{_uid}.csv"
+            _rdf.to_csv(_fin, index=False)
+            _ro.globalenv['r_rmc_in']  = _fin
+            _ro.globalenv['r_rmc_out'] = _fout
+            _ro.r("""
+                suppressPackageStartupMessages(library(rmcorr))
+                .d <- read.csv(r_rmc_in)
+                .d$mouse <- factor(.d$mouse)
+                .rmc <- rmcorr(participant = mouse,
+                               measure1    = xvar,
+                               measure2    = yvar,
+                               dataset     = .d)
+                .all_coefs <- stats::coef(.rmc$model)
+                .slope     <- as.numeric(.all_coefs["xvar"])
+                .lvls <- levels(.d$mouse)
+                .intercepts <- sapply(.lvls, function(.lv) {
+                    sx <- .d$xvar[.d$mouse == .lv]
+                    sy <- .d$yvar[.d$mouse == .lv]
+                    if (length(sx) == 0 || is.na(.slope)) return(NA_real_)
+                    mean(sy) - .slope * mean(sx)
+                })
+                .out_df <- data.frame(
+                    mouse     = .lvls,
+                    intercept = as.numeric(.intercepts),
+                    slope     = .slope,
+                    r_rm      = .rmc$r,
+                    p_val     = .rmc$p,
+                    ci_lo     = .rmc$CI[1],
+                    ci_hi     = .rmc$CI[2],
+                    df_rm     = .rmc$df
+                )
+                write.csv(.out_df, r_rmc_out, row.names = FALSE)
+            """)
+            _res = pd.read_csv(_fout)
+            for _fp in [_fin, _fout]:
+                try:    _osi.unlink(_fp)
+                except Exception: pass
+            _slope_val = float(_res['slope'].iloc[0])
+            _r_val     = float(_res['r_rm'].iloc[0])
+            _ints      = dict(zip(_res['mouse'].astype(str),
+                                  _res['intercept'].astype(float)))
+            if np.isnan(_slope_val) and not np.isnan(_r_val):
+                _sx = _rdf.groupby('mouse')['xvar'].apply(lambda v: v - v.mean()).std()
+                _sy = _rdf.groupby('mouse')['yvar'].apply(lambda v: v - v.mean()).std()
+                if float(_sx) > 0:
+                    _slope_val = _r_val * float(_sy) / float(_sx)
+                _ints = {
+                    str(m): (float(_rdf.loc[_rdf['mouse'] == m, 'yvar'].mean())
+                             - _slope_val * float(_rdf.loc[_rdf['mouse'] == m, 'xvar'].mean()))
+                    for m in _rdf['mouse'].unique()
+                }
+            _out.update(
+                ok=True,
+                r=_r_val,
+                p=float(_res['p_val'].iloc[0]),
+                ci_lo=float(_res['ci_lo'].iloc[0]),
+                ci_hi=float(_res['ci_hi'].iloc[0]),
+                slope=_slope_val,
+                intercepts=_ints,
+                df=float(_res['df_rm'].iloc[0]),
+            )
+            print(f"  rmcorr ({y_col} ~ {x_col}): r_rm={_out['r']:.4f}, "
+                  f"p={_out['p']:.4f}, CI=[{_out['ci_lo']:.4f}, {_out['ci_hi']:.4f}]")
+        except Exception as _exc:
+            print(f"  NOTE: rmcorr failed ({type(_exc).__name__}: {_exc}); "
+                  f"falling back to Spearman.")
+        return _out
+
+    def _draw_rmcorr_plot(ax, sub_df, x_col, y_col, x_label, y_label, title):
+        """Plot rmcorr scatter + per-mouse parallel lines + overall regression."""
+        from scipy.stats import spearmanr as _spearmanr
+        _rmc = _compute_rmcorr(sub_df, x_col, y_col)
+        _ms  = plt.rcParams.get('lines.markersize', 4)
+        # scatter dots, coloured by starting condition
+        for _m in sorted(sub_df['mouse'].unique()):
+            _sub  = sub_df[sub_df['mouse'] == _m].dropna(subset=[x_col, y_col])
+            _cond_rows = sub_df.loc[sub_df['mouse'] == _m, 'condition']
+            _mcol = _condition_to_color(_cond_rows.iloc[0]) if not _cond_rows.empty else 'gray'
+            ax.scatter(_sub[x_col], _sub[y_col],
+                       color=_mcol,
+                       s=_ms ** 2, alpha=0.80, edgecolors='none',
+                       label=_m, zorder=3)
+        _valid = sub_df[[x_col, y_col]].dropna()
+        _x_all = _valid[x_col].values
+        _y_all = _valid[y_col].values
+        _fin   = np.isfinite(_x_all) & np.isfinite(_y_all)
+        if _rmc['ok'] and not np.isnan(_rmc['slope']):
+            # per-mouse parallel regression lines, coloured by condition
+            for _m, _ic in _rmc['intercepts'].items():
+                if np.isnan(_ic):
+                    continue
+                _mdata = sub_df[sub_df['mouse'] == _m].dropna(subset=[x_col, y_col])
+                if _mdata.empty:
+                    continue
+                _cond_rows = sub_df.loc[sub_df['mouse'] == _m, 'condition']
+                _mcol = _condition_to_color(_cond_rows.iloc[0]) if not _cond_rows.empty else 'gray'
+                _xs = np.linspace(float(_mdata[x_col].min()),
+                                  float(_mdata[x_col].max()), 80)
+                ax.plot(_xs, _rmc['slope'] * _xs + _ic,
+                        color=_mcol,
+                        linewidth=0.9, alpha=0.55, zorder=2)
+            # overall rmcorr regression line (grand intercept)
+            if _fin.sum() > 1:
+                _x_pad   = (_x_all[_fin].max() - _x_all[_fin].min()) * 0.04
+                _x_line  = np.linspace(_x_all[_fin].min() - _x_pad,
+                                       _x_all[_fin].max() + _x_pad, 200)
+                _grand_ic = float(_y_all[_fin].mean()) - _rmc['slope'] * float(_x_all[_fin].mean())
+                ax.plot(_x_line, _rmc['slope'] * _x_line + _grand_ic,
+                        color='black', linewidth=1.4, zorder=4)
+            _p_str = f"p = {_rmc['p']:.2e}"
+            _ann = (f"$r_{{rm}}$ = {_rmc['r']:.3f}\n"
+                    f"{_p_str}\n"
+                    f"95% CI [{_rmc['ci_lo']:.3f}, {_rmc['ci_hi']:.3f}]\n"
+                    f"n = {sub_df['mouse'].nunique()} mice")
+        else:
+            if _fin.sum() >= 2:
+                _coef = np.polyfit(_x_all[_fin], _y_all[_fin], 1)
+                _xl   = np.linspace(_x_all[_fin].min(), _x_all[_fin].max(), 200)
+                ax.plot(_xl, np.polyval(_coef, _xl),
+                        color='dimgray', linewidth=1.2, linestyle='--', zorder=4)
+            if _fin.sum() >= 3:
+                _rho, _pv = _spearmanr(_x_all[_fin], _y_all[_fin])
+                _p_str    = f"p = {_pv:.2e}"
+                _ann = (f"Spearman \u03c1 = {_rho:.3f}\n{_p_str}\n"
+                        f"n = {sub_df['mouse'].nunique()} mice\n"
+                        f"(rmcorr unavailable)")
+            else:
+                _ann = f"n = {sub_df['mouse'].nunique()} mice\n(rmcorr unavailable)"
+        ax.text(0.03, 0.97, _ann,
+                transform=ax.transAxes, va='top', ha='left', fontsize=7.5,
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
+                          edgecolor='lightgray', alpha=0.80))
+        ax.set_xlabel(x_label)
+        ax.set_ylabel(y_label)
+        ax.set_title(title)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+
+    def _assumptions_figure(sub_df, title,
+                             x_col='total_change', y_col='reward_count',
+                             x_label='Total Weight Change (%)',
+                             y_label='Reward Count per Session'):
+        """Return a 2×2 assumption-check figure for a weight-correlation subset.
+
+        Panels:
+          Top-left  — Box plot of X variable with 1.5×IQR whiskers
+          Top-right — Box plot of Y variable with 1.5×IQR whiskers
+          Bot-left  — Scatter with linear fit + LOWESS (linearity check)
+          Bot-right — χ² Q-Q plot of Mahalanobis D² (bivariate normality)
+                      + marginal Shapiro-Wilk results annotated
+        """
+        from scipy.stats import chi2 as _chi2, shapiro as _shapiro
+
+        both_df   = sub_df[[x_col, y_col, 'mouse']].dropna(subset=[x_col, y_col])
+        xy        = both_df[[x_col, y_col]].values.astype(float)
+        fin       = np.isfinite(xy[:, 0]) & np.isfinite(xy[:, 1])
+        x_both    = xy[fin, 0]
+        y_both    = xy[fin, 1]
+        mouse_arr = both_df['mouse'].values[fin]
+        n = len(x_both)
+
+        fig, axes = plt.subplots(2, 2, figsize=(11, 8))
+        fig.suptitle(f'Correlation Assumption Checks — {title}',
+                     fontsize=13, fontweight='bold')
+
+        # ── Panel 1 (top-left): Box plot — Total Weight Change (1.5×IQR) ─────
+        ax1 = axes[0, 0]
+        ax1.boxplot(x_both, vert=True, patch_artist=True,
+                    boxprops=dict(facecolor='#aec6e8', color='#2c5f82'),
+                    medianprops=dict(color='#c0392b', linewidth=2),
+                    whiskerprops=dict(color='#2c5f82', linewidth=1.2),
+                    capprops=dict(color='#2c5f82', linewidth=1.2),
+                    flierprops=dict(marker='o', color='#e74c3c', markersize=5.5,
+                                    linestyle='none', markerfacecolor='#e74c3c',
+                                    alpha=0.75),
+                    whis=1.5)
+        ax1.set_xticks([1])
+        ax1.set_xticklabels([x_label])
+        ax1.set_ylabel('Value')
+        ax1.set_title(f'Outlier Check: {x_label}\n(Whiskers = 1.5 × IQR)')
+        ax1.spines['top'].set_visible(False)
+        ax1.spines['right'].set_visible(False)
+        if n > 0:
+            q1x, q3x = np.percentile(x_both, [25, 75])
+            iqr_x    = q3x - q1x
+            lo_x, hi_x = q1x - 1.5 * iqr_x, q3x + 1.5 * iqr_x
+            n_out_x  = int(np.sum((x_both < lo_x) | (x_both > hi_x)))
+            ax1.text(0.97, 0.97,
+                     f'n = {n}\nIQR = {iqr_x:.2f}\n'
+                     f'Fences: [{lo_x:.2f}, {hi_x:.2f}]\nOutliers: {n_out_x}',
+                     transform=ax1.transAxes, ha='right', va='top', fontsize=7.5,
+                     bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
+                               edgecolor='lightgray', alpha=0.8))
+
+        # ── Panel 2 (top-right): Box plot — Reward Count (1.5×IQR) ──────────
+        ax2 = axes[0, 1]
+        ax2.boxplot(y_both, vert=True, patch_artist=True,
+                    boxprops=dict(facecolor='#a8e8c0', color='#2c7a4b'),
+                    medianprops=dict(color='#c0392b', linewidth=2),
+                    whiskerprops=dict(color='#2c7a4b', linewidth=1.2),
+                    capprops=dict(color='#2c7a4b', linewidth=1.2),
+                    flierprops=dict(marker='o', color='#e74c3c', markersize=5.5,
+                                    linestyle='none', markerfacecolor='#e74c3c',
+                                    alpha=0.75),
+                    whis=1.5)
+        ax2.set_xticks([1])
+        ax2.set_xticklabels([y_label])
+        ax2.set_ylabel('Value')
+        ax2.set_title(f'Outlier Check: {y_label}\n(Whiskers = 1.5 × IQR)')
+        ax2.spines['top'].set_visible(False)
+        ax2.spines['right'].set_visible(False)
+        if n > 0:
+            q1y, q3y = np.percentile(y_both, [25, 75])
+            iqr_y    = q3y - q1y
+            lo_y, hi_y = q1y - 1.5 * iqr_y, q3y + 1.5 * iqr_y
+            n_out_y  = int(np.sum((y_both < lo_y) | (y_both > hi_y)))
+            ax2.text(0.97, 0.97,
+                     f'n = {n}\nIQR = {iqr_y:.2f}\n'
+                     f'Fences: [{lo_y:.2f}, {hi_y:.2f}]\nOutliers: {n_out_y}',
+                     transform=ax2.transAxes, ha='right', va='top', fontsize=7.5,
+                     bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
+                               edgecolor='lightgray', alpha=0.8))
+
+        # ── Panel 3 (bottom-left): Scatter — Linearity check ─────────────────
+        ax3 = axes[1, 0]
+        for m in np.unique(mouse_arr):
+            idx = mouse_arr == m
+            ax3.scatter(x_both[idx], y_both[idx],
+                        color=mouse_colors.get(m, 'gray'),
+                        s=30, alpha=0.75, edgecolors='none', label=m)
+        if n >= 2:
+            coef1  = np.polyfit(x_both, y_both, 1)
+            x_line = np.linspace(x_both.min(), x_both.max(), 200)
+            ax3.plot(x_line, np.polyval(coef1, x_line),
+                     color='black', linewidth=1.5, linestyle='--',
+                     label='Linear fit', zorder=5)
+        try:
+            from statsmodels.nonparametric.smoothers_lowess import lowess as _lowess
+            if n >= 5:
+                order    = np.argsort(x_both)
+                smoothed = _lowess(y_both[order], x_both[order],
+                                   frac=0.5, return_sorted=True)
+                ax3.plot(smoothed[:, 0], smoothed[:, 1],
+                         color='#e74c3c', linewidth=1.5, linestyle='-',
+                         label='LOWESS', zorder=6)
+        except ImportError:
+            if n >= 3:
+                coef2 = np.polyfit(x_both, y_both, 2)
+                ax3.plot(x_line, np.polyval(coef2, x_line),
+                         color='#e74c3c', linewidth=1.5, linestyle='-',
+                         label='Quadratic fit', zorder=6)
+        ax3.set_xlabel(x_label)
+        ax3.set_ylabel(y_label)
+        ax3.set_title('Linearity Check\n(Dashed = linear fit,  Red = LOWESS / quadratic)')
+        ax3.spines['top'].set_visible(False)
+        ax3.spines['right'].set_visible(False)
+        ax3.legend(fontsize=7, loc='best', framealpha=0.7)
+
+        # ── Panel 4 (bottom-right): Bivariate normality — χ² Q-Q plot ────────
+        ax4 = axes[1, 1]
+        if n >= 4:
+            X_mat    = np.column_stack([x_both, y_both])
+            mean_vec = X_mat.mean(axis=0)
+            cov_mat  = np.cov(X_mat.T)
+            try:
+                cov_inv   = np.linalg.inv(cov_mat)
+                diff      = X_mat - mean_vec
+                d2        = np.einsum('ij,jk,ik->i', diff, cov_inv, diff)
+                d2_sorted = np.sort(d2)
+                probs     = (np.arange(1, n + 1) - 0.5) / n
+                chi2_q    = _chi2.ppf(probs, df=2)
+                ax4.scatter(chi2_q, d2_sorted, s=22, alpha=0.75,
+                            color='#5b7fce', edgecolors='none',
+                            label='Observed D²')
+                ref_max = max(float(chi2_q.max()), float(d2_sorted.max()))
+                ax4.plot([0, ref_max], [0, ref_max], 'r--',
+                         linewidth=1.2, label='Reference (normal)')
+                sw_x = _shapiro(x_both)
+                sw_y = _shapiro(y_both)
+                sig_x = '*' if sw_x.pvalue < 0.05 else 'ns'
+                sig_y = '*' if sw_y.pvalue < 0.05 else 'ns'
+                ax4.text(0.03, 0.97,
+                         'Shapiro-Wilk (marginals):\n'
+                         f'  {x_label[:15]}: W={sw_x.statistic:.3f}, '
+                         f'p={sw_x.pvalue:.3f} {sig_x}\n'
+                         f'  {y_label[:15]}: W={sw_y.statistic:.3f}, '
+                         f'p={sw_y.pvalue:.3f} {sig_y}',
+                         transform=ax4.transAxes, ha='left', va='top',
+                         fontsize=7.5,
+                         bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
+                                   edgecolor='lightgray', alpha=0.8))
+                ax4.legend(fontsize=7.5, loc='lower right')
+            except np.linalg.LinAlgError:
+                ax4.text(0.5, 0.5,
+                         'Singular covariance matrix\n(insufficient data variance)',
+                         ha='center', va='center',
+                         transform=ax4.transAxes, fontsize=9)
+        else:
+            ax4.text(0.5, 0.5, f'Insufficient data (n = {n} < 4)',
+                     ha='center', va='center',
+                     transform=ax4.transAxes, fontsize=9)
+        ax4.set_xlabel('Theoretical χ² Quantiles (df = 2)')
+        ax4.set_ylabel('Mahalanobis Distance²')
+        ax4.set_title('Bivariate Normality Check\n(χ² Q-Q of Mahalanobis D²)')
+        ax4.spines['top'].set_visible(False)
+        ax4.spines['right'].set_visible(False)
+
+        fig.tight_layout()
+        return fig
+
+    # ── Assumption checks (one figure per group) — total change ──────────────
+    fig_assump_all   = _assumptions_figure(merged.dropna(subset=['total_change']),
+                                            'All Mice Combined')
+    fig_assump_conds = {
+        cond: _assumptions_figure(
+            merged[merged['condition'] == cond].dropna(subset=['total_change']),
+            f'Condition: {cond}'
+        )
+        for cond in conditions_sorted
+    }
+
+    # ── Assumption checks — reward count vs next-day daily change ─────────────
+    _nd_x_label = 'Reward Count (Day D)'
+    _nd_y_label = 'Daily Weight Change Day D+1 (%)'
+    merged_nd = merged.dropna(subset=['reward_count', 'next_day_dc']).copy()
+    if not merged_nd.empty:
+        fig_assump_nd_all = _assumptions_figure(
+            merged_nd, 'All Mice Combined \u2014 Next-Day Daily Change',
+            x_col='reward_count', y_col='next_day_dc',
+            x_label=_nd_x_label, y_label=_nd_y_label,
+        )
+        fig_assump_nd_conds = {
+            cond: _assumptions_figure(
+                merged_nd[merged_nd['condition'] == cond],
+                f'Condition: {cond} \u2014 Next-Day Daily Change',
+                x_col='reward_count', y_col='next_day_dc',
+                x_label=_nd_x_label, y_label=_nd_y_label,
+            )
+            for cond in conditions_sorted
+            if not merged_nd[merged_nd['condition'] == cond].empty
+        }
+    else:
+        fig_assump_nd_all  = None
+        fig_assump_nd_conds = {}
+        print("[WARN] No next-day daily change data found \u2014 skipping next-day correlation plots.")
+
+    # ── Plot 1: all mice combined (rmcorr) ───────────────────────────────────
+    fig_all, ax_all = plt.subplots(figsize=(8, 6))
+    _draw_rmcorr_plot(ax_all,
+                      merged.dropna(subset=['total_change']),
+                      'total_change', 'reward_count',
+                      'Total Body Weight Change (%)',
+                      'Reward Count per Session',
+                      'Total Weight Change vs Reward Count\n'
+                      '(all mice, all sessions \u2014 rmcorr)')
+    ax_all.legend(title='Mouse', bbox_to_anchor=(1.02, 1), loc='upper left',
+                  fontsize=7.5, title_fontsize=8)
+    fig_all.tight_layout()
+
+    # ── Plot 2: subplots by starting condition (rmcorr) ──────────────────────
+    n_conds = len(conditions_sorted)
+    fig_cond, axes_cond = plt.subplots(1, n_conds,
+                                        figsize=(6 * n_conds, 6),
+                                        sharey=False)
+    if n_conds == 1:
+        axes_cond = [axes_cond]
+    for ax_c, cond in zip(axes_cond, conditions_sorted):
+        sub_cond = merged[merged['condition'] == cond].dropna(subset=['total_change'])
+        _draw_rmcorr_plot(ax_c, sub_cond,
+                          'total_change', 'reward_count',
+                          'Total Body Weight Change (%)',
+                          'Reward Count per Session',
+                          f'Condition: {cond}')
+        ax_c.legend(title='Mouse', fontsize=7.5, title_fontsize=8)
+    fig_cond.suptitle(
+        'Total Weight Change vs Reward Count by Starting Condition (rmcorr)',
+        fontsize=12, fontweight='bold')
+    fig_cond.tight_layout()
+
+    # ── Plot 3: next-day daily change — all mice combined ─────────────────────
+    if merged_nd.empty:
+        fig_nd_all = fig_nd_cond = None
+    else:
+        fig_nd_all, ax_nd_all = plt.subplots(figsize=(8, 6))
+        _draw_rmcorr_plot(ax_nd_all, merged_nd,
+                          'reward_count', 'next_day_dc',
+                          _nd_x_label, _nd_y_label,
+                          'Reward Count (Day D) vs Next-Day Daily Weight Change\n'
+                          '(all mice, all sessions \u2014 rmcorr)')
+        ax_nd_all.legend(title='Mouse', bbox_to_anchor=(1.02, 1), loc='upper left',
+                         fontsize=7.5, title_fontsize=8)
+        fig_nd_all.tight_layout()
+
+        # ── Plot 4: next-day daily change — by starting condition (rmcorr) ──────
+        fig_nd_cond, axes_nd_cond = plt.subplots(1, n_conds,
+                                                  figsize=(6 * n_conds, 6),
+                                                  sharey=False)
+        if n_conds == 1:
+            axes_nd_cond = [axes_nd_cond]
+        for ax_ndc, cond in zip(axes_nd_cond, conditions_sorted):
+            sub_cond_nd = merged_nd[merged_nd['condition'] == cond]
+            _draw_rmcorr_plot(ax_ndc, sub_cond_nd,
+                              'reward_count', 'next_day_dc',
+                              _nd_x_label, _nd_y_label,
+                              f'Condition: {cond}')
+            ax_ndc.legend(title='Mouse', fontsize=7.5, title_fontsize=8)
+        fig_nd_cond.suptitle(
+            'Reward Count (Day D) vs Next-Day Daily Weight Change by Condition'
+            ' (rmcorr)',
+            fontsize=12, fontweight='bold')
+        fig_nd_cond.tight_layout()
+
+    # ── Display and optionally save ───────────────────────────────────────────
+    for fig_obj in ([fig_assump_all]
+                    + list(fig_assump_conds.values())
+                    + [fig_all, fig_cond]
+                    + ([fig_assump_nd_all] if fig_assump_nd_all else [])
+                    + list(fig_assump_nd_conds.values())
+                    + ([fig_nd_all, fig_nd_cond] if fig_nd_all else [])):
+        fig_obj.show()
+    plt.show()
+
+    plt.rcParams['font.family']    = 'sans-serif'
+    plt.rcParams['font.sans-serif'] = ['Arial']
+    plt.rcParams['svg.fonttype']   = 'none'
+    figs_to_save = (
+        [(fig_assump_all, 'weight_assumptions_all')]
+        + [(fig_a, f'weight_assumptions_cond_{cond}')
+           for cond, fig_a in fig_assump_conds.items()]
+        + [(fig_all,  'weight_rmcorr_all_mice'),
+           (fig_cond, 'weight_rmcorr_by_condition')]
+        + ([(fig_assump_nd_all, 'weight_nd_assumptions_all')]
+           if fig_assump_nd_all else [])
+        + [(fig_a, f'weight_nd_assumptions_cond_{cond}')
+           for cond, fig_a in fig_assump_nd_conds.items()]
+        + ([(fig_nd_all,  'weight_nd_rmcorr_all_mice'),
+            (fig_nd_cond, 'weight_nd_rmcorr_by_condition')]
+           if fig_nd_all else [])
+    )
+    for fig_obj, fname in figs_to_save:
+        save_path = filedialog.asksaveasfilename(
+            defaultextension='.svg',
+            filetypes=[('SVG files', '*.svg'), ('All files', '*.*')],
+            title=f'Save {fname} as',
+            initialfile=f'{fname}_{len(mice_sorted)}mice.svg',
+        )
+        if save_path:
+            fig_obj.savefig(save_path, format='svg')
+            print(f"Saved: {save_path}")
+
 
 def _ask_mode(root):
     """Ask whether to generate plots or run the descriptive stats report.
@@ -4656,8 +15718,12 @@ def _ask_mode(root):
     btn_frame.pack(padx=20, pady=(4, 16))
     tk.Button(btn_frame, text='Generate Plots', width=20,
               command=lambda: _choose('plots')).pack(side='left', padx=6)
+    tk.Button(btn_frame, text='Exploratory / Distribution Plots', width=32,
+              command=lambda: _choose('expl')).pack(side='left', padx=6)
     tk.Button(btn_frame, text='Descriptive Stats Report', width=24,
               command=lambda: _choose('stats')).pack(side='left', padx=6)
+    tk.Button(btn_frame, text='Weight Correlations', width=22,
+              command=lambda: _choose('weight_corr')).pack(side='left', padx=6)
 
     dialog.update_idletasks()
     dialog.geometry(
@@ -4668,10 +15734,2046 @@ def _ask_mode(root):
     return result[0]
 
 
+# =============================================================================
+# R-BASED nparLD: NONPARAMETRIC TWO-WAY REPEATED-MEASURES ANOVA
+# Design: Condition (between-subjects) x Week (within-subjects)
+# =============================================================================
+
+def run_nparld_condition_week_r(
+    all_results,
+    measure: str = 'sensitivity',
+    output_dir=None,
+) -> dict:
+    """
+    Nonparametric equivalent of a two-way repeated-measures ANOVA via R nparLD.
+
+    Design  : F1-LD-F1 (one between-subjects factor x one within-subjects factor)
+    Between : Condition  (starting_condition from master CSV)
+    Within  : Week       (sessions 1-4 = week 1, 5-8 = week 2, etc.)
+    Response: per-animal per-week mean of ``measure``
+
+    Requires R with the nparLD package installed.
+
+    Returns
+    -------
+    dict with keys: 'r_output', 'report_path', 'n_subjects', 'conditions', 'weeks'
+    """
+    import glob as _glob
+
+    # ── Build combined weekly-mean dataset ────────────────────────────────────
+    frames = []
+    for result in all_results:
+        df = result['df'].copy()
+        if 'week' not in df.columns:
+            # Fallback: derive week if column was not added at construction time
+            df['week'] = [i // 4 + 1 for i in range(len(df))]
+        if measure not in df.columns:
+            print(f"  [WARNING] '{measure}' not found for {result['mouse']} — skipping")
+            continue
+        df['ID'] = result['mouse']
+        df['Condition'] = result['starting_condition']
+        sub = df[['ID', 'Condition', 'week', measure]].dropna(subset=[measure])
+        frames.append(sub)
+
+    if not frames:
+        print(f"  [ERROR] No data available for measure '{measure}'.")
+        return {}
+
+    combined = pd.concat(frames, ignore_index=True)
+    combined = combined.rename(columns={'week': 'Week', measure: 'Response'})
+
+    # ── Sanity check: raw per-animal totals ──────────────────────────────────
+    _raw_totals_week = (
+        combined.groupby(['ID', 'Condition'])['Response']
+        .agg(total='sum', n_sessions='count')
+        .reset_index()
+        .sort_values('ID')
+    )
+    print(f"\n  [RAW CHECK — week model] per-animal total '{measure}':")
+    for _, r in _raw_totals_week.iterrows():
+        print(f"    {r['ID']:20s}  {r['Condition']:6s}  total={r['total']:.1f}  n_sessions={int(r['n_sessions'])}")
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # Per-animal per-week mean
+    weekly = (
+        combined
+        .groupby(['ID', 'Condition', 'Week'], as_index=False)['Response']
+        .mean()
+    )
+
+    # Complete-case filter: keep only animals present in every Week
+    week_counts = weekly.groupby('ID')['Week'].nunique()
+    all_weeks_n = weekly['Week'].nunique()
+    _all_weeks_pre = sorted(weekly['Week'].unique())
+    complete_ids = week_counts[week_counts == all_weeks_n].index
+    n_dropped = weekly['ID'].nunique() - len(complete_ids)
+    _dropped_info = None
+    if n_dropped:
+        _dropped_grp = (
+            weekly[~weekly['ID'].isin(complete_ids)]
+            [['ID', 'Condition', 'Week']]
+            .groupby(['ID', 'Condition'])['Week']
+            .agg(list)
+            .reset_index()
+            .sort_values('ID')
+        )
+        _dropped_info = _dropped_grp
+        print(f"  [NOTE] Dropped {n_dropped} animal(s) with incomplete weekly records; "
+              f"{len(complete_ids)} retained")
+        for _, _row in _dropped_grp.iterrows():
+            _present = sorted(set(_row['Week']))
+            _missing = sorted(set(_all_weeks_pre) - set(_present))
+            print(f"    Excluded: {_row['ID']:20s}  condition={_row['Condition']}  "
+                  f"weeks present={_present}  missing weeks={_missing}")
+    weekly = weekly[weekly['ID'].isin(complete_ids)].copy()
+
+    if weekly.empty or len(complete_ids) < 3:
+        print(f"  [ERROR] Insufficient complete-case animals ({len(complete_ids)}) for nparLD.")
+        return {}
+
+    week_levels = sorted(weekly['Week'].unique())
+    condition_levels = sorted(weekly['Condition'].unique())
+    n_subjects = int(weekly['ID'].nunique())
+
+    print(f"\nnparLD: {n_subjects} subjects x {len(week_levels)} weeks x {len(condition_levels)} conditions")
+    print(f"  Conditions : {condition_levels}")
+    print(f"  Weeks      : {week_levels}")
+
+    # ── Write temp CSV ────────────────────────────────────────────────────────
+    tmp_csv = Path(tempfile.mktemp(suffix='.csv'))
+    weekly[['ID', 'Condition', 'Week', 'Response']].to_csv(str(tmp_csv), index=False)
+
+    _csv_r     = str(tmp_csv).replace('\\', '/')
+    _wk_levels = ', '.join(str(w) for w in week_levels)
+    _co_levels = ', '.join(f'"{c}"' for c in condition_levels)
+
+    r_script = (
+        'options(warn=1)\n'
+        'if (!require("nparLD", quietly=TRUE, warn.conflicts=FALSE)) {\n'
+        '  install.packages("nparLD", repos="https://cran.r-project.org", quiet=TRUE)\n'
+        '  library(nparLD)\n'
+        '}\n'
+        '\n'
+        f'data <- read.csv("{_csv_r}")\n'
+        f'data$Week      <- factor(data$Week,      levels=c({_wk_levels}))\n'
+        f'data$Condition <- factor(data$Condition, levels=c({_co_levels}))\n'
+        'data$ID        <- factor(data$ID)\n'
+        '\n'
+        'cat("\\n================================================================\\n")\n'
+        f'cat("nparLD: {measure} -- Condition x Week (F1-LD-F1 design)\\n")\n'
+        'cat("================================================================\\n")\n'
+        'cat("N subjects  :", nlevels(data$ID), "\\n")\n'
+        'cat("Conditions  :", paste(levels(data$Condition), collapse=", "), "\\n")\n'
+        'cat("Weeks       :", paste(levels(data$Week),      collapse=", "), "\\n\\n")\n'
+        '\n'
+        'result <- f1.ld.f1(\n'
+        '  y          = data$Response,\n'
+        '  time       = data$Week,\n'
+        '  group      = data$Condition,\n'
+        '  subject    = data$ID,\n'
+        '  time.name  = "Week",\n'
+        '  group.name = "Condition",\n'
+        '  description = FALSE\n'
+        ')\n'
+        '\n'
+        '# Helper functions (used throughout for formatting)\n'
+        'sig_fn <- function(p) {\n'
+        '  if(is.na(p)) return("")\n'
+        '  if(p<0.001) return("***")\n'
+        '  if(p<0.01)  return("**")\n'
+        '  if(p<0.05)  return("*")\n'
+        '  if(p<0.1)   return(".")\n'
+        '  return("")\n'
+        '}\n'
+        'fmt_p <- function(p) {\n'
+        '  if(is.na(p)) return("      NA")\n'
+        '  sprintf("%.2e", p)\n'
+        '}\n'
+        '\n'
+        'cat("\\n--- ANOVA-Type Statistic (ATS) ---\\n")\n'
+        'cat(sprintf("  %-22s  %10s  %8s  %12s  %s\\n", "Effect", "ATS", "df", "p-value", "Sig"))\n'
+        'cat("  ", strrep("-", 58), "\\n", sep="")\n'
+        'ats_df <- result$ANOVA.test\n'
+        'for (i in seq_len(nrow(ats_df))) {\n'
+        '  eff <- rownames(ats_df)[i]\n'
+        '  pv  <- ats_df[i, ncol(ats_df)]\n'
+        '  cat(sprintf("  %-22s  %10.4f  %8.4f  %12s  %s\\n",\n'
+        '              eff, ats_df[i,1], ats_df[i,2], fmt_p(pv), sig_fn(pv)))\n'
+        '}\n'
+        '\n'
+        'cat("\\n--- ATS with Box approximation ---\\n")\n'
+        'cat(sprintf("  %-22s  %10s  %7s  %8s  %12s  %s\\n",\n'
+        '            "Effect", "ATS", "df1", "df2", "p-value", "Sig"))\n'
+        'cat("  ", strrep("-", 68), "\\n", sep="")\n'
+        'box_df <- result$ANOVA.test.mod.Box\n'
+        'for (i in seq_len(nrow(box_df))) {\n'
+        '  eff <- rownames(box_df)[i]\n'
+        '  pv  <- box_df[i, ncol(box_df)]\n'
+        '  cat(sprintf("  %-22s  %10.4f  %7.4f  %8.4f  %12s  %s\\n",\n'
+        '              eff, box_df[i,1], box_df[i,2], box_df[i,3], fmt_p(pv), sig_fn(pv)))\n'
+        '}\n'
+        '\n'
+        'cat("\\n--- Wald-Type Statistic (WTS) ---\\n")\n'
+        'cat(sprintf("  %-22s  %10s  %8s  %12s  %s\\n", "Effect", "WTS", "df", "p-value", "Sig"))\n'
+        'cat("  ", strrep("-", 58), "\\n", sep="")\n'
+        'wts_df <- result$Wald.test\n'
+        'for (i in seq_len(nrow(wts_df))) {\n'
+        '  eff <- rownames(wts_df)[i]\n'
+        '  pv  <- wts_df[i, ncol(wts_df)]\n'
+        '  cat(sprintf("  %-22s  %10.4f  %8.4f  %12s  %s\\n",\n'
+        '              eff, wts_df[i,1], wts_df[i,2], fmt_p(pv), sig_fn(pv)))\n'
+        '}\n'
+        '\n'
+        'cat("\\n--- Relative Treatment Effects (RTE) ---\\n")\n'
+        'print(result$RTE)\n'
+        '\n'
+        'cat("\\n================================================================\\n")\n'
+        'cat("POST-HOC: Between-condition (Mann-Whitney U, Holm corrected)\\n")\n'
+        'cat("  (per-animal mean across all weeks)\\n")\n'
+        'cat("================================================================\\n")\n'
+        'per_animal <- aggregate(Response ~ ID + Condition, data=data, FUN=mean)\n'
+        'conds_all  <- levels(per_animal$Condition)\n'
+        'if (length(conds_all) >= 2) {\n'
+        '  pairs_all <- combn(length(conds_all), 2)\n'
+        '  tests_all <- apply(pairs_all, 2, function(idx) {\n'
+        '    x <- per_animal$Response[per_animal$Condition == conds_all[idx[1]]]\n'
+        '    y <- per_animal$Response[per_animal$Condition == conds_all[idx[2]]]\n'
+        '    if (length(x)<1 || length(y)<1) return(NULL)\n'
+        '    tryCatch(wilcox.test(x, y, exact=FALSE, conf.int=TRUE), error=function(e) NULL)\n'
+        '  }, simplify=FALSE)\n'
+        '  p_raw_all  <- sapply(tests_all, function(t) if (is.null(t)) NA_real_ else t$p.value)\n'
+        '  p_holm_all <- p.adjust(p_raw_all, method="holm")\n'
+        '  cat(sprintf("  %-22s  %-22s  %8s  %8s  %8s  %7s  %9s  %-22s  %s\\n",\n'
+        '              "Group A", "Group B", "p_raw", "p_holm", "U", "r_rb", "HL_est", "95% CI", "Sig"))\n'
+        '  cat("  ", strrep("-", 110), "\\n", sep="")\n'
+        '  n_all_pairs <- ncol(pairs_all)\n'
+        '  for (k in seq_len(n_all_pairs)) {\n'
+        '    ca    <- conds_all[pairs_all[1,k]]\n'
+        '    cb    <- conds_all[pairs_all[2,k]]\n'
+        '    x_k   <- per_animal$Response[per_animal$Condition==ca]\n'
+        '    y_k   <- per_animal$Response[per_animal$Condition==cb]\n'
+        '    na_ca <- sum(!is.na(x_k)); nb_cb <- sum(!is.na(y_k))\n'
+        '    tt    <- tests_all[[k]]\n'
+        '    if (is.null(tt) || is.na(p_raw_all[k])) {\n'
+        '      cat(sprintf("  %-22s  %-22s  %8s  %8s\\n",\n'
+        '                  paste0(ca," (n=",na_ca,")"), paste0(cb," (n=",nb_cb,")"),\n'
+        '                  "NA", "NA"))\n'
+        '    } else {\n'
+        '      u_stat <- as.numeric(tt$statistic)\n'
+        '      r_rb   <- 1 - 2*u_stat / (na_ca * nb_cb)\n'
+        '      hl_est <- as.numeric(tt$estimate)\n'
+        '      ci_lo  <- tt$conf.int[1]; ci_hi <- tt$conf.int[2]\n'
+        '      ci_str <- sprintf("[%.4f, %.4f]", ci_lo, ci_hi)\n'
+        '      cat(sprintf("  %-22s  %-22s  %8s  %8s  %8.2f  %7.4f  %9.4f  %-22s  %s\\n",\n'
+        '                  paste0(ca," (n=",na_ca,")"), paste0(cb," (n=",nb_cb,")"),\n'
+        '                  fmt_p(p_raw_all[k]), fmt_p(p_holm_all[k]),\n'
+        '                  u_stat, r_rb, hl_est, ci_str, sig_fn(p_holm_all[k])))\n'
+        '    }\n'
+        '  }\n'
+        '} else {\n'
+        '  cat("  (only 1 condition -- no pairwise test)\\n")\n'
+        '}\n'
+        '\n'
+        'cat("\\n================================================================\\n")\n'
+        'cat("POST-HOC: Between-condition comparisons at each week\\n")\n'
+        'cat("  (Mann-Whitney U, Holm corrected within each week)\\n")\n'
+        'cat("================================================================\\n")\n'
+        'for (wk in levels(data$Week)) {\n'
+        '  sub <- data[data$Week == wk, ]\n'
+        '  cat("\\nWeek:", wk, "\\n")\n'
+        '  conds <- levels(sub$Condition)\n'
+        '  if (length(conds) < 2) { cat("  (only 1 condition -- no pairwise test)\\n"); next }\n'
+        '  pairs_idx <- combn(length(conds), 2)\n'
+        '  tests_wk <- apply(pairs_idx, 2, function(idx) {\n'
+        '    x <- sub$Response[sub$Condition == conds[idx[1]]]\n'
+        '    y <- sub$Response[sub$Condition == conds[idx[2]]]\n'
+        '    if (length(x) < 1 || length(y) < 1) return(NULL)\n'
+        '    tryCatch(\n'
+        '      wilcox.test(x, y, exact=FALSE, conf.int=TRUE),\n'
+        '      error = function(e) NULL\n'
+        '    )\n'
+        '  }, simplify=FALSE)\n'
+        '  p_raw <- sapply(tests_wk, function(t) if (is.null(t)) NA_real_ else t$p.value)\n'
+        '  p_holm <- p.adjust(p_raw, method="holm")\n'
+        '  n_pairs <- ncol(pairs_idx)\n'
+        '  for (k in seq_len(n_pairs)) {\n'
+        '    ca <- conds[pairs_idx[1, k]]\n'
+        '    cb <- conds[pairs_idx[2, k]]\n'
+        '    na_ca <- sum(!is.na(sub$Response[sub$Condition == ca]))\n'
+        '    nb_cb <- sum(!is.na(sub$Response[sub$Condition == cb]))\n'
+        '    tt <- tests_wk[[k]]\n'
+        '    if (is.null(tt) || is.na(p_raw[k])) {\n'
+        '      cat(sprintf("  %s (n=%d) vs %s (n=%d) : NA\\n", ca, na_ca, cb, nb_cb))\n'
+        '    } else {\n'
+        '      u_stat <- as.numeric(tt$statistic)\n'
+        '      r_rb   <- 1 - 2*u_stat / (na_ca * nb_cb)\n'
+        '      hl_est <- as.numeric(tt$estimate)\n'
+        '      ci_lo  <- tt$conf.int[1]; ci_hi <- tt$conf.int[2]\n'
+        '      sig <- sig_fn(p_holm[k])\n'
+        '      cat(sprintf("  %s (n=%d) vs %s (n=%d) : U=%.2f  p_raw=%s  p_holm=%s  r_rb=%.4f  HL=%.4f  CI=[%.4f,%.4f]  %s\\n",\n'
+        '                  ca, na_ca, cb, nb_cb, u_stat, fmt_p(p_raw[k]), fmt_p(p_holm[k]),\n'
+        '                  r_rb, hl_est, ci_lo, ci_hi, sig))\n'
+        '    }\n'
+        '  }\n'
+        '}\n'
+        '\n'
+        'cat("\\n================================================================\\n")\n'
+        'cat("POST-HOC: Pairwise week comparisons (condition-agnostic)\\n")\n'
+        'cat("  (Wilcoxon signed-rank, paired by animal, Holm corrected)\\n")\n'
+        'cat("================================================================\\n")\n'
+        'week_levels_r <- levels(data$Week)\n'
+        'if (length(week_levels_r) >= 2) {\n'
+        '  wk_pairs   <- combn(week_levels_r, 2)\n'
+        '  n_wk_pairs <- ncol(wk_pairs)\n'
+        '  wk_tests   <- vector("list", n_wk_pairs)\n'
+        '  wk_n_shared <- integer(n_wk_pairs)\n'
+        '  for (k in seq_len(n_wk_pairs)) {\n'
+        '    wa <- wk_pairs[1, k]; wb <- wk_pairs[2, k]\n'
+        '    ids_shared <- intersect(data$ID[data$Week==wa], data$ID[data$Week==wb])\n'
+        '    wk_n_shared[k] <- length(ids_shared)\n'
+        '    if (length(ids_shared) < 3) next\n'
+        '    va <- sapply(ids_shared, function(id) mean(data$Response[data$Week==wa & data$ID==id], na.rm=TRUE))\n'
+        '    vb <- sapply(ids_shared, function(id) mean(data$Response[data$Week==wb & data$ID==id], na.rm=TRUE))\n'
+        '    wk_tests[[k]] <- tryCatch(\n'
+        '      wilcox.test(va, vb, paired=TRUE, exact=FALSE, conf.int=TRUE),\n'
+        '      error=function(e) NULL\n'
+        '    )\n'
+        '  }\n'
+        '  wk_p_raw  <- sapply(wk_tests, function(t) if (is.null(t)) NA_real_ else t$p.value)\n'
+        '  wk_p_holm <- p.adjust(wk_p_raw, method="holm")\n'
+        '  cat(sprintf("  %-10s  %-10s  %6s  %8s  %8s  %9s  %7s  %9s  %-22s  %s\\n",\n'
+        '              "Week A", "Week B", "n", "p_raw", "p_holm", "V", "r_rb", "HL_est", "95% CI", "Sig"))\n'
+        '  cat("  ", strrep("-", 110), "\\n", sep="")\n'
+        '  for (k in seq_len(n_wk_pairs)) {\n'
+        '    wa <- wk_pairs[1, k]; wb <- wk_pairs[2, k]\n'
+        '    np <- wk_n_shared[k]\n'
+        '    tt <- wk_tests[[k]]\n'
+        '    if (is.null(tt) || is.na(wk_p_raw[k])) {\n'
+        '      cat(sprintf("  %-10s  %-10s  %6d  %8s  %8s\\n", wa, wb, np, "NA", "NA"))\n'
+        '    } else {\n'
+        '      v_stat <- as.numeric(tt$statistic)\n'
+        '      r_rb   <- 4 * v_stat / (np * (np + 1)) - 1\n'
+        '      hl_est <- as.numeric(tt$estimate)\n'
+        '      ci_lo  <- tt$conf.int[1]; ci_hi <- tt$conf.int[2]\n'
+        '      ci_str <- sprintf("[%.4f, %.4f]", ci_lo, ci_hi)\n'
+        '      cat(sprintf("  %-10s  %-10s  %6d  %8s  %8s  %9.2f  %7.4f  %9.4f  %-22s  %s\\n",\n'
+        '                  wa, wb, np, fmt_p(wk_p_raw[k]), fmt_p(wk_p_holm[k]),\n'
+        '                  v_stat, r_rb, hl_est, ci_str, sig_fn(wk_p_holm[k])))\n'
+        '    }\n'
+        '  }\n'
+        '} else {\n'
+        '  cat("  (fewer than 2 weeks -- no pairwise test)\\n")\n'
+        '}\n'
+        '\n'
+        'cat("\\n================================================================\\n")\n'
+        'cat("OMNIBUS SUMMARY -- ATS\\n")\n'
+        'cat("================================================================\\n")\n'
+        'cat(sprintf("  %-22s  %10s  %8s  %12s  %s\\n", "Effect", "ATS", "df", "p-value", "Sig"))\n'
+        'cat("  ", strrep("-", 58), "\\n", sep="")\n'
+        'for (i in seq_len(nrow(ats_df))) {\n'
+        '  eff <- rownames(ats_df)[i]\n'
+        '  pv  <- ats_df[i, ncol(ats_df)]\n'
+        '  cat(sprintf("  %-22s  %10.4f  %8.4f  %12s  %s\\n",\n'
+        '              eff, ats_df[i,1], ats_df[i,2], fmt_p(pv), sig_fn(pv)))\n'
+        '}\n'
+        '\n'
+        'cat("\\n================================================================\\n")\n'
+        'cat("END\\n")\n'
+        '\n'
+        '# Machine-readable line for Python BH-FDR collection (do not remove)\n'
+        'p_cond  <- ats_df["Condition",      ncol(ats_df)]\n'
+        'p_week  <- ats_df["Week",           ncol(ats_df)]\n'
+        'p_inter <- ats_df["Condition:Week", ncol(ats_df)]\n'
+        'p_cond_box <- box_df["Condition",   ncol(box_df)]\n'
+        'cat(sprintf("__ATS_PVALS__ Condition=%.15g Week=%.15g Interaction=%.15g\\n",\n'
+        '            p_cond, p_week, p_inter))\n'
+        'cat(sprintf("__BOX_PVALS__ Condition=%.15g\\n", p_cond_box))\n'
+    )
+
+    tmp_r = Path(tempfile.mktemp(suffix='.R'))
+    tmp_r.write_text(r_script, encoding='utf-8')
+
+    # ── Locate Rscript ────────────────────────────────────────────────────────
+    rscript = shutil.which('Rscript') or shutil.which('Rscript.exe')
+    if rscript is None:
+        for _pat in (
+            r'C:\Program Files\R\R-*\bin\Rscript.exe',
+            r'C:\Program Files\R\R-*\bin\x64\Rscript.exe',
+        ):
+            _m = sorted(_glob.glob(_pat))
+            if _m:
+                rscript = _m[-1]
+                break
+
+    if rscript is None:
+        print("ERROR: 'Rscript' not found. Install R and add to PATH.")
+        tmp_csv.unlink(missing_ok=True)
+        tmp_r.unlink(missing_ok=True)
+        return {}
+
+    r_output = ''
+    try:
+        proc = subprocess.run(
+            [rscript, '--vanilla', str(tmp_r)],
+            capture_output=True, text=True, timeout=300,
+        )
+        r_output = proc.stdout
+        r_stderr = proc.stderr.strip()
+        if proc.returncode != 0:
+            print(f"R exited with code {proc.returncode}.")
+        if r_stderr:
+            non_trivial = [
+                ln for ln in r_stderr.splitlines()
+                if not ln.startswith('Loading') and ln.strip()
+            ]
+            if non_trivial:
+                print("R messages:\n" + '\n'.join(non_trivial))
+    except FileNotFoundError:
+        print("ERROR: 'Rscript' not found. Install R and add to the system PATH.")
+        return {}
+    except subprocess.TimeoutExpired:
+        print("ERROR: R script timed out after 300 s.")
+        return {}
+    finally:
+        tmp_csv.unlink(missing_ok=True)
+        tmp_r.unlink(missing_ok=True)
+
+    # ── Parse ATS p-values from machine-readable line ─────────────────────────
+    import re as _re
+    _pv_match = _re.search(
+        r'__ATS_PVALS__ Condition=(\S+) Week=(\S+) Interaction=(\S+)',
+        r_output,
+    )
+    ats_pvalues = {}
+    if _pv_match:
+        try:
+            ats_pvalues = {
+                'Condition':      float(_pv_match.group(1)),
+                'Week':           float(_pv_match.group(2)),
+                'Condition:Week': float(_pv_match.group(3)),
+            }
+        except ValueError:
+            pass
+    # Parse Box approximation p-value for Condition
+    _box_match = _re.search(r'__BOX_PVALS__ Condition=(\S+)', r_output)
+    box_pvalues = {}
+    if _box_match:
+        try:
+            box_pvalues = {'Condition': float(_box_match.group(1))}
+        except ValueError:
+            pass
+    # Strip the machine-readable lines before display/save
+    r_output_clean = _re.sub(r'__ATS_PVALS__[^\n]*\n?', '', r_output)
+    r_output_clean = _re.sub(r'__BOX_PVALS__[^\n]*\n?', '', r_output_clean)
+
+    print(r_output_clean)
+
+    # ── Save report ───────────────────────────────────────────────────────────
+    report_path = None
+    if r_output.strip() and output_dir is not None:
+        os.makedirs(output_dir, exist_ok=True)
+        _ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        report_path = os.path.join(
+            output_dir, f'nparld_condition_week_{measure}_{_ts}.txt'
+        )
+        header_lines = [
+            '=' * 72,
+            f'nparLD: {measure} -- Condition x Week (F1-LD-F1 nonparametric ANOVA)',
+            '=' * 72,
+            f'Generated   : {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
+            f'Measure     : {measure}',
+            f'Conditions  : {", ".join(str(c) for c in condition_levels)}',
+            f'Weeks       : {week_levels}',
+            f'N subjects  : {n_subjects} (complete cases across all weeks)',
+            f'N excluded  : {n_dropped}',
+            '',
+            'Design      : F1-LD-F1 (one between-subjects x one within-subjects factor)',
+            'Between     : Condition  (starting_condition)',
+            'Within      : Week       (sessions 1-4 = week 1, 5-8 = week 2, etc.)',
+            'Response    : Per-animal per-week mean of measure',
+            '',
+            'Statistics  : ANOVA-Type Statistic (ATS, chi-sq approx.) -- primary',
+            '              Box approximation of ATS -- secondary',
+            '              Wald-Type Statistic (WTS) -- reference only',
+            'Post-hoc    : Between-condition: pairwise Mann-Whitney U, Holm corrected',
+            '              Per-week        : pairwise Mann-Whitney U at each week, Holm corrected',
+            '              Across-week     : pairwise Wilcoxon signed-rank (paired by animal, condition-agnostic), Holm corrected',
+            '',
+            'R output:',
+            '-' * 72,
+            '',
+        ]
+        if _dropped_info is not None:
+            _excl_insert_idx = header_lines.index(f'N excluded  : {n_dropped}') + 1
+            header_lines.insert(_excl_insert_idx, 'Excluded animals:')
+            for _ei, (_idx, _row) in enumerate(_dropped_info.iterrows()):
+                _present = sorted(set(_row['Week']))
+                _missing = sorted(set(_all_weeks_pre) - set(_present))
+                header_lines.insert(
+                    _excl_insert_idx + 1 + _ei,
+                    f'  {_row["ID"]:20s}  condition={_row["Condition"]}  '
+                    f'weeks present={_present}  missing={_missing}',
+                )
+        with open(report_path, 'w', encoding='utf-8') as _fout:
+            _fout.write('\n'.join(header_lines) + r_output_clean)
+        print(f"\n[OK] nparLD report saved -> {report_path}")
+
+    return {
+        'r_output': r_output_clean,
+        'report_path': report_path,
+        'n_subjects': n_subjects,
+        'conditions': condition_levels,
+        'weeks': week_levels,
+        'ats_pvalues': ats_pvalues,
+        'box_pvalues': box_pvalues,
+        'measure': measure,
+    }
+
+
+def _bh_fdr(p_values):
+    """Benjamini-Hochberg FDR correction (no scipy dependency)."""
+    n = len(p_values)
+    if n == 0:
+        return []
+    order = sorted(range(n), key=lambda i: p_values[i])
+    p_sorted = [p_values[i] for i in order]
+    p_adj = [p_sorted[i] * n / (i + 1) for i in range(n)]
+    # Enforce monotonicity from right to left
+    for i in range(n - 2, -1, -1):
+        p_adj[i] = min(p_adj[i], p_adj[i + 1])
+    result = [0.0] * n
+    for rank, orig_idx in enumerate(order):
+        result[orig_idx] = min(p_adj[rank], 1.0)
+    return result
+
+
+def _write_nparld_bh_fdr_summary(run_results, output_dir=None,
+                                  effects=None, filename_tag='bh_fdr_summary'):
+    """
+    Apply BH FDR correction across all DVs (one correction per ANOVA effect)
+    and print + save a summary report.
+
+    run_results  : list of dicts returned by run_nparld_condition_week_r() or
+                   run_nparld_condition_weekday_r(); each must have keys
+                   'measure' and 'ats_pvalues'.
+    effects      : list of effect names to correct (keys in 'ats_pvalues').
+                   Defaults to ['Condition', 'Week', 'Condition:Week'].
+    filename_tag : suffix used in the output filename.
+    """
+    measures = [r['measure'] for r in run_results]
+    if effects is None:
+        effects = ['Condition', 'Week', 'Condition:Week']
+
+    _ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    lines = [
+        '=' * 72,
+        'nparLD: BH FDR CORRECTION ACROSS DEPENDENT VARIABLES',
+        '=' * 72,
+        f'Generated : {_ts}',
+        f'N DVs     : {len(measures)}',
+        f'DVs       : {", ".join(measures)}',
+        '',
+        'Method : Benjamini-Hochberg FDR applied independently for each',
+        '         ANOVA effect (Condition, Week, Condition:Week) across',
+        '         all dependent variables listed above.',
+        '',
+        'Note   : Correction is across DVs only; the 3 effects within a',
+        '         single model are NOT corrected against each other.',
+        '         Condition p-value: Box approximation (ATS with Box df).',
+        '         Week / Condition:Week p-values: ATS (primary statistic).',
+        '',
+    ]
+
+    print('\n' + '=' * 72)
+    print('nparLD: BH FDR CORRECTION ACROSS DEPENDENT VARIABLES')
+    print(f'N DVs: {len(measures)}')
+    print('=' * 72)
+
+    for effect in effects:
+        # Condition uses Box approximation; Week and Condition:Week use ATS
+        if effect == 'Condition':
+            p_vals = [r.get('box_pvalues', {}).get('Condition',
+                      r['ats_pvalues'].get('Condition', float('nan')))
+                      for r in run_results]
+        else:
+            p_vals = [r['ats_pvalues'].get(effect, float('nan')) for r in run_results]
+        valid_idx = [i for i, p in enumerate(p_vals) if p == p]  # exclude NaN
+
+        header = f'Effect: {effect}  (n_valid={len(valid_idx)})'
+        lines.append(header)
+        print(f'\n{header}')
+
+        if not valid_idx:
+            lines.append('  -- no valid p-values --')
+            print('  -- no valid p-values --')
+            lines.append('')
+            continue
+
+        p_valid   = [p_vals[i] for i in valid_idx]
+        p_fdr     = _bh_fdr(p_valid)
+
+        col_hdr = f'  {"DV":<26}  {"p_raw":>10}  {"p_BH_FDR":>10}  {"Sig":<4}'
+        sep     = '  ' + '-' * 54
+        lines += [col_hdr, sep]
+        print(col_hdr)
+        print(sep)
+
+        for j, orig_i in enumerate(valid_idx):
+            m_name = measures[orig_i]
+            p_r    = p_vals[orig_i]
+            p_b    = p_fdr[j]
+            sig    = ('***' if p_b < 0.001 else
+                      '**'  if p_b < 0.01  else
+                      '*'   if p_b < 0.05  else
+                      '.'   if p_b < 0.1   else '')
+            _fmt_bh = lambda v: f'{v:.2e}' if (v < 0.001 or v == 0.0) else f'{v:.6f}'
+            row = f'  {m_name:<26}  {_fmt_bh(p_r):>10}  {_fmt_bh(p_b):>10}  {sig:<4}'
+            lines.append(row)
+            print(row)
+
+        lines.append('')
+        print()
+
+    if output_dir is not None:
+        os.makedirs(output_dir, exist_ok=True)
+        _fts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        summary_path = os.path.join(
+            output_dir, f'nparld_{filename_tag}_{_fts}.txt'
+        )
+        with open(summary_path, 'w', encoding='utf-8') as _fout:
+            _fout.write('\n'.join(lines) + '\n')
+        print(f'[OK] BH FDR summary saved -> {summary_path}')
+
+
+def _run_nparld_menu(all_results, output_dir=None):
+    """Interactive CLI menu to run nparLD Condition x Week ANOVA."""
+    _NPARLD_MEASURES = [
+        'sensitivity',
+        'average_speed',
+        'hits',
+        'lick_count',
+        'avg_cap',
+        'rewards_per_bout',
+        'lick_after_reward_prop',
+        'dprime',
+        'total_distance',
+        'immobility_prop',
+    ]
+    # Append ending_level if it was injected into results_df (requires transitions CSV)
+    if all_results and 'ending_level' in all_results[0].get('df', {}).columns:
+        _NPARLD_MEASURES.append('ending_level')
+    print('\n' + '=' * 60)
+    print('nparLD: Condition x Week nonparametric ANOVA')
+    print('Sessions 1-4 = Week 1, 5-8 = Week 2, etc.')
+    print('=' * 60)
+    print('Available measures:')
+    for idx, m in enumerate(_NPARLD_MEASURES, 1):
+        print(f'  {idx:2d}. {m}')
+    print('   0. Run all measures')
+    print('  -1. Cancel / return')
+
+    while True:
+        try:
+            choice = input('Select measure(s) — single number, comma-separated list, 0, or -1: ').strip()
+        except EOFError:
+            print('nparLD cancelled.')
+            return
+        if choice == '-1':
+            print('nparLD cancelled.')
+            return
+        if choice == '0':
+            selected_measures = _NPARLD_MEASURES
+        else:
+            # Accept comma-separated list of indices, e.g. "1,9,10"
+            try:
+                indices = [int(x.strip()) for x in choice.split(',')]
+            except ValueError:
+                print('  Invalid input. Enter a number or comma-separated numbers.')
+                continue
+            invalid = [i for i in indices if not (1 <= i <= len(_NPARLD_MEASURES))]
+            if invalid:
+                print(f'  Out-of-range: {invalid}. Please enter numbers between 1 and {len(_NPARLD_MEASURES)}.')
+                continue
+            selected_measures = [_NPARLD_MEASURES[i - 1] for i in indices]
+
+        all_nparld_results = []
+        for m in selected_measures:
+            print(f'\n--- Running nparLD for: {m} ---')
+            res = run_nparld_condition_week_r(
+                all_results, measure=m, output_dir=output_dir
+            )
+            if res and res.get('ats_pvalues'):
+                all_nparld_results.append(res)
+        # BH FDR correction across DVs (only meaningful with ≥2 DVs)
+        if len(all_nparld_results) >= 2:
+            _write_nparld_bh_fdr_summary(all_nparld_results, output_dir)
+        return
+
+
+# ── nparLD: Condition x Weekday (training day of week) ────────────────────────
+
+_DOW_NPARLD = ['Monday', 'Tuesday', 'Thursday', 'Friday']  # fixed 4-day training cycle
+
+
+def run_nparld_condition_weekday_r(
+    all_results,
+    measure: str = 'hits',
+    output_dir=None,
+) -> dict:
+    """
+    Nonparametric repeated-measures ANOVA via R nparLD.
+
+    Design  : F1-LD-F1 (one between-subjects x one within-subjects factor)
+    Between : Condition  (starting_condition)
+    Within  : Weekday    (Monday / Tuesday / Thursday / Friday)
+    Response: per-animal per-weekday mean of ``measure``
+
+    Returns
+    -------
+    dict with keys: 'r_output', 'report_path', 'n_subjects', 'conditions',
+                    'weekdays', 'ats_pvalues', 'measure'
+    """
+    import glob as _glob
+
+    _WD_ORDER = _DOW_NPARLD
+
+    # ── Build per-animal per-weekday mean dataset ─────────────────────────────
+    frames = []
+    for result in all_results:
+        df = result['df'].copy()
+        if 'weekday' not in df.columns:
+            print(f"  [WARNING] 'weekday' column missing for {result['mouse']} — skipping")
+            continue
+        if measure not in df.columns:
+            print(f"  [WARNING] '{measure}' not found for {result['mouse']} — skipping")
+            continue
+        df['ID'] = result['mouse']
+        df['Condition'] = result['starting_condition']
+        sub = df[['ID', 'Condition', 'weekday', measure]].dropna(subset=[measure])
+        frames.append(sub)
+
+    if not frames:
+        print(f"  [ERROR] No data available for measure '{measure}'.")
+        return {}
+
+    combined = pd.concat(frames, ignore_index=True)
+    combined = combined.rename(columns={'weekday': 'Weekday', measure: 'Response'})
+
+    # ── Sanity check: raw per-animal totals ──────────────────────────────────
+    _raw_totals_wd = (
+        combined.groupby(['ID', 'Condition'])['Response']
+        .agg(total='sum', n_sessions='count')
+        .reset_index()
+        .sort_values('ID')
+    )
+    print(f"\n  [RAW CHECK — weekday model] per-animal total '{measure}':")
+    for _, r in _raw_totals_wd.iterrows():
+        print(f"    {r['ID']:20s}  {r['Condition']:6s}  total={r['total']:.1f}  n_sessions={int(r['n_sessions'])}")
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # Per-animal per-weekday mean
+    wd_data = (
+        combined
+        .groupby(['ID', 'Condition', 'Weekday'], as_index=False)['Response']
+        .mean()
+    )
+
+    # Complete-case filter: keep only animals present in every training weekday
+    wd_counts = wd_data.groupby('ID')['Weekday'].nunique()
+    n_required = len(_WD_ORDER)
+    complete_ids = wd_counts[wd_counts == n_required].index
+    n_dropped = wd_data['ID'].nunique() - len(complete_ids)
+    if n_dropped:
+        print(f"  [NOTE] Dropped {n_dropped} animal(s) missing at least one weekday; "
+              f"{len(complete_ids)} retained")
+    wd_data = wd_data[wd_data['ID'].isin(complete_ids)].copy()
+
+    if wd_data.empty or len(complete_ids) < 3:
+        print(f"  [ERROR] Insufficient complete-case animals ({len(complete_ids)}) for nparLD.")
+        return {}
+
+    condition_levels = sorted(wd_data['Condition'].unique())
+    n_subjects = int(wd_data['ID'].nunique())
+
+    print(f"\nnparLD (weekday): {n_subjects} subjects x {len(_WD_ORDER)} weekdays x {len(condition_levels)} conditions")
+    print(f"  Conditions : {condition_levels}")
+    print(f"  Weekdays   : {_WD_ORDER}")
+
+    # ── Write temp CSV ────────────────────────────────────────────────────────
+    tmp_csv = Path(tempfile.mktemp(suffix='.csv'))
+    wd_data[['ID', 'Condition', 'Weekday', 'Response']].to_csv(str(tmp_csv), index=False)
+
+    _csv_r     = str(tmp_csv).replace('\\', '/')
+    _wd_levels = ', '.join(f'"{w}"' for w in _WD_ORDER)
+    _co_levels = ', '.join(f'"{c}"' for c in condition_levels)
+
+    r_script = (
+        'options(warn=1)\n'
+        'if (!require("nparLD", quietly=TRUE, warn.conflicts=FALSE)) {\n'
+        '  install.packages("nparLD", repos="https://cran.r-project.org", quiet=TRUE)\n'
+        '  library(nparLD)\n'
+        '}\n'
+        '\n'
+        f'data <- read.csv("{_csv_r}")\n'
+        f'data$Weekday   <- factor(data$Weekday,   levels=c({_wd_levels}))\n'
+        f'data$Condition <- factor(data$Condition, levels=c({_co_levels}))\n'
+        'data$ID        <- factor(data$ID)\n'
+        '\n'
+        'cat("\\n================================================================\\n")\n'
+        f'cat("nparLD: {measure} -- Condition x Weekday (F1-LD-F1 design)\\n")\n'
+        'cat("================================================================\\n")\n'
+        'cat("N subjects  :", nlevels(data$ID), "\\n")\n'
+        'cat("Conditions  :", paste(levels(data$Condition), collapse=", "), "\\n")\n'
+        'cat("Weekdays    :", paste(levels(data$Weekday),   collapse=", "), "\\n\\n")\n'
+        '\n'
+        'result <- f1.ld.f1(\n'
+        '  y          = data$Response,\n'
+        '  time       = data$Weekday,\n'
+        '  group      = data$Condition,\n'
+        '  subject    = data$ID,\n'
+        '  time.name  = "Weekday",\n'
+        '  group.name = "Condition",\n'
+        '  description = FALSE\n'
+        ')\n'
+        '\n'
+        '# Helper functions\n'
+        'sig_fn <- function(p) {\n'
+        '  if(is.na(p)) return("")\n'
+        '  if(p<0.001) return("***")\n'
+        '  if(p<0.01)  return("**")\n'
+        '  if(p<0.05)  return("*")\n'
+        '  if(p<0.1)   return(".")\n'
+        '  return("")\n'
+        '}\n'
+        'fmt_p <- function(p) {\n'
+        '  if(is.na(p)) return("      NA")\n'
+        '  sprintf("%.2e", p)\n'
+        '}\n'
+        '\n'
+        'cat("\\n--- ANOVA-Type Statistic (ATS) ---\\n")\n'
+        'cat(sprintf("  %-26s  %10s  %8s  %12s  %s\\n", "Effect", "ATS", "df", "p-value", "Sig"))\n'
+        'cat("  ", strrep("-", 62), "\\n", sep="")\n'
+        'ats_df <- result$ANOVA.test\n'
+        'for (i in seq_len(nrow(ats_df))) {\n'
+        '  eff <- rownames(ats_df)[i]\n'
+        '  pv  <- ats_df[i, ncol(ats_df)]\n'
+        '  cat(sprintf("  %-26s  %10.4f  %8.4f  %12s  %s\\n",\n'
+        '              eff, ats_df[i,1], ats_df[i,2], fmt_p(pv), sig_fn(pv)))\n'
+        '}\n'
+        '\n'
+        'cat("\\n--- ATS with Box approximation ---\\n")\n'
+        'cat(sprintf("  %-26s  %10s  %7s  %8s  %12s  %s\\n",\n'
+        '            "Effect", "ATS", "df1", "df2", "p-value", "Sig"))\n'
+        'cat("  ", strrep("-", 72), "\\n", sep="")\n'
+        'box_df <- result$ANOVA.test.mod.Box\n'
+        'for (i in seq_len(nrow(box_df))) {\n'
+        '  eff <- rownames(box_df)[i]\n'
+        '  pv  <- box_df[i, ncol(box_df)]\n'
+        '  cat(sprintf("  %-26s  %10.4f  %7.4f  %8.4f  %12s  %s\\n",\n'
+        '              eff, box_df[i,1], box_df[i,2], box_df[i,3], fmt_p(pv), sig_fn(pv)))\n'
+        '}\n'
+        '\n'
+        'cat("\\n--- Wald-Type Statistic (WTS) ---\\n")\n'
+        'cat(sprintf("  %-26s  %10s  %8s  %12s  %s\\n", "Effect", "WTS", "df", "p-value", "Sig"))\n'
+        'cat("  ", strrep("-", 62), "\\n", sep="")\n'
+        'wts_df <- result$Wald.test\n'
+        'for (i in seq_len(nrow(wts_df))) {\n'
+        '  eff <- rownames(wts_df)[i]\n'
+        '  pv  <- wts_df[i, ncol(wts_df)]\n'
+        '  cat(sprintf("  %-26s  %10.4f  %8.4f  %12s  %s\\n",\n'
+        '              eff, wts_df[i,1], wts_df[i,2], fmt_p(pv), sig_fn(pv)))\n'
+        '}\n'
+        '\n'
+        'cat("\\n--- Relative Treatment Effects (RTE) ---\\n")\n'
+        'print(result$RTE)\n'
+        '\n'
+        'cat("\\n================================================================\\n")\n'
+        'cat("POST-HOC: Between-condition (Mann-Whitney U, Holm corrected)\\n")\n'
+        'cat("  (per-animal mean across all weekdays)\\n")\n'
+        'cat("================================================================\\n")\n'
+        'per_animal <- aggregate(Response ~ ID + Condition, data=data, FUN=mean)\n'
+        'conds_all  <- levels(per_animal$Condition)\n'
+        'if (length(conds_all) >= 2) {\n'
+        '  pairs_all <- combn(length(conds_all), 2)\n'
+        '  tests_all <- apply(pairs_all, 2, function(idx) {\n'
+        '    x <- per_animal$Response[per_animal$Condition == conds_all[idx[1]]]\n'
+        '    y <- per_animal$Response[per_animal$Condition == conds_all[idx[2]]]\n'
+        '    if (length(x)<1 || length(y)<1) return(NULL)\n'
+        '    tryCatch(wilcox.test(x, y, exact=FALSE, conf.int=TRUE), error=function(e) NULL)\n'
+        '  }, simplify=FALSE)\n'
+        '  p_raw_all  <- sapply(tests_all, function(t) if (is.null(t)) NA_real_ else t$p.value)\n'
+        '  p_holm_all <- p.adjust(p_raw_all, method="holm")\n'
+        '  cat(sprintf("  %-22s  %-22s  %8s  %8s  %8s  %7s  %9s  %-22s  %s\\n",\n'
+        '              "Group A", "Group B", "p_raw", "p_holm", "U", "r_rb", "HL_est", "95% CI", "Sig"))\n'
+        '  cat("  ", strrep("-", 110), "\\n", sep="")\n'
+        '  for (k in seq_len(ncol(pairs_all))) {\n'
+        '    ca    <- conds_all[pairs_all[1,k]]\n'
+        '    cb    <- conds_all[pairs_all[2,k]]\n'
+        '    x_k   <- per_animal$Response[per_animal$Condition==ca]\n'
+        '    y_k   <- per_animal$Response[per_animal$Condition==cb]\n'
+        '    na_ca <- sum(!is.na(x_k)); nb_cb <- sum(!is.na(y_k))\n'
+        '    tt    <- tests_all[[k]]\n'
+        '    if (is.null(tt) || is.na(p_raw_all[k])) {\n'
+        '      cat(sprintf("  %-22s  %-22s  %8s  %8s\\n",\n'
+        '                  paste0(ca," (n=",na_ca,")"), paste0(cb," (n=",nb_cb,")"),\n'
+        '                  "NA", "NA"))\n'
+        '    } else {\n'
+        '      u_stat <- as.numeric(tt$statistic)\n'
+        '      r_rb   <- 1 - 2*u_stat / (na_ca * nb_cb)\n'
+        '      hl_est <- as.numeric(tt$estimate)\n'
+        '      ci_lo  <- tt$conf.int[1]; ci_hi <- tt$conf.int[2]\n'
+        '      ci_str <- sprintf("[%.4f, %.4f]", ci_lo, ci_hi)\n'
+        '      cat(sprintf("  %-22s  %-22s  %8s  %8s  %8.2f  %7.4f  %9.4f  %-22s  %s\\n",\n'
+        '                  paste0(ca," (n=",na_ca,")"), paste0(cb," (n=",nb_cb,")"),\n'
+        '                  fmt_p(p_raw_all[k]), fmt_p(p_holm_all[k]),\n'
+        '                  u_stat, r_rb, hl_est, ci_str, sig_fn(p_holm_all[k])))\n'
+        '    }\n'
+        '  }\n'
+        '} else {\n'
+        '  cat("  (only 1 condition -- no pairwise test)\\n")\n'
+        '}\n'
+        '\n'
+        'cat("\\n================================================================\\n")\n'
+        'cat("POST-HOC: Between-condition comparisons at each weekday\\n")\n'
+        'cat("  (Mann-Whitney U, Holm corrected within each weekday)\\n")\n'
+        'cat("================================================================\\n")\n'
+        'for (wd in levels(data$Weekday)) {\n'
+        '  sub <- data[data$Weekday == wd, ]\n'
+        '  cat("\\nWeekday:", wd, "\\n")\n'
+        '  conds <- levels(sub$Condition)\n'
+        '  if (length(conds) < 2) { cat("  (only 1 condition -- no pairwise test)\\n"); next }\n'
+        '  pairs_idx <- combn(length(conds), 2)\n'
+        '  tests_wd <- apply(pairs_idx, 2, function(idx) {\n'
+        '    x <- sub$Response[sub$Condition == conds[idx[1]]]\n'
+        '    y <- sub$Response[sub$Condition == conds[idx[2]]]\n'
+        '    if (length(x) < 1 || length(y) < 1) return(NULL)\n'
+        '    tryCatch(\n'
+        '      wilcox.test(x, y, exact=FALSE, conf.int=TRUE),\n'
+        '      error = function(e) NULL\n'
+        '    )\n'
+        '  }, simplify=FALSE)\n'
+        '  p_raw <- sapply(tests_wd, function(t) if (is.null(t)) NA_real_ else t$p.value)\n'
+        '  p_holm <- p.adjust(p_raw, method="holm")\n'
+        '  n_pairs <- ncol(pairs_idx)\n'
+        '  for (k in seq_len(n_pairs)) {\n'
+        '    ca <- conds[pairs_idx[1, k]]\n'
+        '    cb <- conds[pairs_idx[2, k]]\n'
+        '    na_ca <- sum(!is.na(sub$Response[sub$Condition == ca]))\n'
+        '    nb_cb <- sum(!is.na(sub$Response[sub$Condition == cb]))\n'
+        '    tt <- tests_wd[[k]]\n'
+        '    if (is.null(tt) || is.na(p_raw[k])) {\n'
+        '      cat(sprintf("  %s (n=%d) vs %s (n=%d) : NA\\n", ca, na_ca, cb, nb_cb))\n'
+        '    } else {\n'
+        '      u_stat <- as.numeric(tt$statistic)\n'
+        '      r_rb   <- 1 - 2*u_stat / (na_ca * nb_cb)\n'
+        '      hl_est <- as.numeric(tt$estimate)\n'
+        '      ci_lo  <- tt$conf.int[1]; ci_hi <- tt$conf.int[2]\n'
+        '      sig <- sig_fn(p_holm[k])\n'
+        '      cat(sprintf("  %s (n=%d) vs %s (n=%d) : U=%.2f  p_raw=%s  p_holm=%s  r_rb=%.4f  HL=%.4f  CI=[%.4f,%.4f]  %s\\n",\n'
+        '                  ca, na_ca, cb, nb_cb, u_stat, fmt_p(p_raw[k]), fmt_p(p_holm[k]),\n'
+        '                  r_rb, hl_est, ci_lo, ci_hi, sig))\n'
+        '    }\n'
+        '  }\n'
+        '}\n'
+        '\n'
+        'cat("\\n================================================================\\n")\n'
+        'cat("POST-HOC: Pairwise weekday comparisons (condition-agnostic)\\n")\n'
+        'cat("  (Wilcoxon signed-rank, paired by animal, Holm corrected)\\n")\n'
+        'cat("================================================================\\n")\n'
+        'wd_lvls_ph  <- levels(data$Weekday)\n'
+        'wd_pairs_ph <- combn(length(wd_lvls_ph), 2)\n'
+        'n_wd_pairs  <- ncol(wd_pairs_ph)\n'
+        'wd_tests    <- vector("list", n_wd_pairs)\n'
+        'n_pairs_used <- integer(n_wd_pairs)\n'
+        'for (k in seq_len(n_wd_pairs)) {\n'
+        '  da    <- wd_lvls_ph[wd_pairs_ph[1, k]]\n'
+        '  db    <- wd_lvls_ph[wd_pairs_ph[2, k]]\n'
+        '  sub_a <- data[data$Weekday == da, ]\n'
+        '  sub_b <- data[data$Weekday == db, ]\n'
+        '  common_ids <- intersect(as.character(sub_a$ID), as.character(sub_b$ID))\n'
+        '  x <- sub_a$Response[match(common_ids, as.character(sub_a$ID))]\n'
+        '  y <- sub_b$Response[match(common_ids, as.character(sub_b$ID))]\n'
+        '  n_pairs_used[k] <- length(common_ids)\n'
+        '  if (length(x) < 3) { wd_tests[[k]] <- NULL; next }\n'
+        '  wd_tests[[k]] <- tryCatch(\n'
+        '    wilcox.test(x, y, paired=TRUE, exact=FALSE, conf.int=TRUE),\n'
+        '    error = function(e) NULL\n'
+        '  )\n'
+        '}\n'
+        'p_raw_wd_ph  <- sapply(wd_tests, function(t) if (is.null(t)) NA_real_ else t$p.value)\n'
+        'p_holm_wd_ph <- p.adjust(p_raw_wd_ph, method="holm")\n'
+        'cat(sprintf("  %-14s  %-14s  %6s  %8s  %8s  %9s  %7s  %9s  %-22s  %s\\n",\n'
+        '            "Day A", "Day B", "n", "p_raw", "p_holm", "V", "r_rb", "HL_est", "95% CI", "Sig"))\n'
+        'cat("  ", strrep("-", 110), "\\n", sep="")\n'
+        'for (k in seq_len(n_wd_pairs)) {\n'
+        '  da <- wd_lvls_ph[wd_pairs_ph[1, k]]\n'
+        '  db <- wd_lvls_ph[wd_pairs_ph[2, k]]\n'
+        '  np <- n_pairs_used[k]\n'
+        '  tt <- wd_tests[[k]]\n'
+        '  if (is.null(tt) || is.na(p_raw_wd_ph[k])) {\n'
+        '    cat(sprintf("  %-14s  %-14s  %6d  %8s  %8s\\n",\n'
+        '                da, db, np, "NA", "NA"))\n'
+        '  } else {\n'
+        '    v_stat <- as.numeric(tt$statistic)\n'
+        '    r_rb   <- 4 * v_stat / (np * (np + 1)) - 1\n'
+        '    hl_est <- as.numeric(tt$estimate)\n'
+        '    ci_lo  <- tt$conf.int[1]; ci_hi <- tt$conf.int[2]\n'
+        '    ci_str <- sprintf("[%.4f, %.4f]", ci_lo, ci_hi)\n'
+        '    cat(sprintf("  %-14s  %-14s  %6d  %8s  %8s  %9.2f  %7.4f  %9.4f  %-22s  %s\\n",\n'
+        '                da, db, np, fmt_p(p_raw_wd_ph[k]), fmt_p(p_holm_wd_ph[k]),\n'
+        '                v_stat, r_rb, hl_est, ci_str, sig_fn(p_holm_wd_ph[k])))\n'
+        '  }\n'
+        '}\n'
+        '\n'
+        'cat("\\n================================================================\\n")\n'
+        'cat("OMNIBUS SUMMARY -- ATS\\n")\n'
+        'cat("================================================================\\n")\n'
+        'cat(sprintf("  %-26s  %10s  %8s  %12s  %s\\n", "Effect", "ATS", "df", "p-value", "Sig"))\n'
+        'cat("  ", strrep("-", 62), "\\n", sep="")\n'
+        'for (i in seq_len(nrow(ats_df))) {\n'
+        '  eff <- rownames(ats_df)[i]\n'
+        '  pv  <- ats_df[i, ncol(ats_df)]\n'
+        '  cat(sprintf("  %-26s  %10.4f  %8.4f  %12s  %s\\n",\n'
+        '              eff, ats_df[i,1], ats_df[i,2], fmt_p(pv), sig_fn(pv)))\n'
+        '}\n'
+        '\n'
+        'cat("\\n================================================================\\n")\n'
+        'cat("END\\n")\n'
+        '\n'
+        '# Machine-readable line for Python BH-FDR collection (do not remove)\n'
+        'p_cond  <- ats_df["Condition",         ncol(ats_df)]\n'
+        'p_wd    <- ats_df["Weekday",            ncol(ats_df)]\n'
+        'p_inter <- ats_df["Condition:Weekday",  ncol(ats_df)]\n'
+        'cat(sprintf("__ATS_PVALS_WD__ Condition=%.15g Weekday=%.15g Interaction=%.15g\\n",\n'
+        '            p_cond, p_wd, p_inter))\n'
+    )
+
+    tmp_r = Path(tempfile.mktemp(suffix='.R'))
+    tmp_r.write_text(r_script, encoding='utf-8')
+
+    # ── Locate Rscript ────────────────────────────────────────────────────────
+    rscript = shutil.which('Rscript') or shutil.which('Rscript.exe')
+    if rscript is None:
+        for _pat in (
+            r'C:\Program Files\R\R-*\bin\Rscript.exe',
+            r'C:\Program Files\R\R-*\bin\x64\Rscript.exe',
+        ):
+            _m = sorted(_glob.glob(_pat))
+            if _m:
+                rscript = _m[-1]
+                break
+
+    if rscript is None:
+        print("ERROR: 'Rscript' not found. Install R and add to PATH.")
+        tmp_csv.unlink(missing_ok=True)
+        tmp_r.unlink(missing_ok=True)
+        return {}
+
+    r_output = ''
+    try:
+        proc = subprocess.run(
+            [rscript, '--vanilla', str(tmp_r)],
+            capture_output=True, text=True, timeout=300,
+        )
+        r_output = proc.stdout
+        r_stderr = proc.stderr.strip()
+        if proc.returncode != 0:
+            print(f"R exited with code {proc.returncode}.")
+        if r_stderr:
+            non_trivial = [
+                ln for ln in r_stderr.splitlines()
+                if not ln.startswith('Loading') and ln.strip()
+            ]
+            if non_trivial:
+                print("R messages:\n" + '\n'.join(non_trivial))
+    except FileNotFoundError:
+        print("ERROR: 'Rscript' not found. Install R and add to the system PATH.")
+        return {}
+    except subprocess.TimeoutExpired:
+        print("ERROR: R script timed out after 300 s.")
+        return {}
+    finally:
+        tmp_csv.unlink(missing_ok=True)
+        tmp_r.unlink(missing_ok=True)
+
+    # ── Parse ATS p-values from machine-readable line ─────────────────────────
+    import re as _re
+    _pv_match = _re.search(
+        r'__ATS_PVALS_WD__ Condition=(\S+) Weekday=(\S+) Interaction=(\S+)',
+        r_output,
+    )
+    ats_pvalues = {}
+    if _pv_match:
+        try:
+            ats_pvalues = {
+                'Condition':           float(_pv_match.group(1)),
+                'Weekday':             float(_pv_match.group(2)),
+                'Condition:Weekday':   float(_pv_match.group(3)),
+            }
+        except ValueError:
+            pass
+    # Strip the machine-readable line before display/save
+    r_output_clean = _re.sub(r'__ATS_PVALS_WD__[^\n]*\n?', '', r_output)
+
+    print(r_output_clean)
+
+    # ── Save report ───────────────────────────────────────────────────────────
+    report_path = None
+    if r_output.strip() and output_dir is not None:
+        os.makedirs(output_dir, exist_ok=True)
+        _ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        report_path = os.path.join(
+            output_dir, f'nparld_condition_weekday_{measure}_{_ts}.txt'
+        )
+        header_lines = [
+            '=' * 72,
+            f'nparLD: {measure} -- Condition x Weekday (F1-LD-F1 nonparametric ANOVA)',
+            '=' * 72,
+            f'Generated   : {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
+            f'Measure     : {measure}',
+            f'Conditions  : {", ".join(str(c) for c in condition_levels)}',
+            f'Weekdays    : {_WD_ORDER}',
+            f'N subjects  : {n_subjects} (complete cases across all 4 weekdays)',
+            '',
+            'Design      : F1-LD-F1 (one between-subjects x one within-subjects factor)',
+            'Between     : Condition  (starting_condition)',
+            'Within      : Weekday    (Monday / Tuesday / Thursday / Friday)',
+            'Response    : Per-animal per-weekday mean of measure (across all sessions)',
+            '',
+            'Statistics  : ANOVA-Type Statistic (ATS, chi-sq approx.) -- primary',
+            '              Box approximation of ATS -- secondary',
+            '              Wald-Type Statistic (WTS) -- reference only',
+            'Post-hoc    : Between-condition: pairwise Mann-Whitney U, Holm corrected',
+            '              Per-weekday     : pairwise Mann-Whitney U at each weekday, Holm corrected',
+            '              Across-weekday  : pairwise Wilcoxon signed-rank (paired by animal, condition-agnostic), Holm corrected',
+            '',
+            'R output:',
+            '-' * 72,
+            '',
+        ]
+        with open(report_path, 'w', encoding='utf-8') as _fout:
+            _fout.write('\n'.join(header_lines) + r_output_clean)
+        print(f"\n[OK] nparLD weekday report saved -> {report_path}")
+
+    return {
+        'r_output': r_output_clean,
+        'report_path': report_path,
+        'n_subjects': n_subjects,
+        'conditions': condition_levels,
+        'weekdays': _WD_ORDER,
+        'ats_pvalues': ats_pvalues,
+        'measure': measure,
+    }
+
+
+def _run_nparld_weekday_menu(all_results, output_dir=None):
+    """Interactive CLI menu to run nparLD Condition x Weekday ANOVA."""
+    _WD_MEASURES = [
+        'hits',
+        'sensitivity',
+        'average_speed',
+        'lick_count',
+        'avg_cap',
+        'rewards_per_bout',
+        'lick_after_reward_prop',
+        'dprime',
+        'total_distance',
+        'immobility_prop',
+    ]
+    print('\n' + '=' * 60)
+    print('nparLD: Condition x Weekday nonparametric ANOVA')
+    print('Within factor: Monday / Tuesday / Thursday / Friday')
+    print('Response: per-animal per-weekday mean (across all sessions)')
+    print('=' * 60)
+    print('Available measures:')
+    for idx, m in enumerate(_WD_MEASURES, 1):
+        print(f'  {idx:2d}. {m}')
+    print('   0. Run all measures')
+    print('  -1. Cancel / return')
+
+    while True:
+        try:
+            choice = input('Select measure(s) — single number, comma-separated list, 0, or -1: ').strip()
+        except EOFError:
+            return
+
+        if choice == '-1':
+            return
+
+        selected_measures = []
+        if choice == '0':
+            selected_measures = list(_WD_MEASURES)
+        else:
+            try:
+                indices = [int(x.strip()) for x in choice.split(',')]
+            except ValueError:
+                print('  Invalid input. Enter a number or comma-separated numbers.')
+                continue
+            invalid = [i for i in indices if not (1 <= i <= len(_WD_MEASURES))]
+            if invalid:
+                print(f'  Out-of-range: {invalid}. Please enter numbers between 1 and {len(_WD_MEASURES)}.')
+                continue
+            selected_measures = [_WD_MEASURES[i - 1] for i in indices]
+
+        all_wd_results = []
+        for m in selected_measures:
+            print(f'\n--- Running nparLD (weekday) for: {m} ---')
+            res = run_nparld_condition_weekday_r(
+                all_results, measure=m, output_dir=output_dir
+            )
+            if res and res.get('ats_pvalues'):
+                all_wd_results.append(res)
+        # BH FDR correction across DVs when ≥2 DVs ran
+        if len(all_wd_results) >= 2:
+            _write_nparld_bh_fdr_summary(
+                all_wd_results, output_dir,
+                effects=['Condition', 'Weekday', 'Condition:Weekday'],
+                filename_tag='weekday_bh_fdr_summary',
+            )
+        return
+
+
+def _ask_top_level_mode(root):
+    """Ask whether to run a single-cohort analysis or an across-cohort comparison.
+
+    Returns 'single', 'across', or None if the dialog is dismissed.
+    """
+    result = [None]
+    dialog = tk.Toplevel(root)
+    dialog.title('Analysis Mode')
+    dialog.resizable(False, False)
+    dialog.grab_set()
+
+    tk.Label(
+        dialog,
+        text='Choose analysis scope:',
+        font=('Arial', 11, 'bold'),
+    ).pack(padx=24, pady=(18, 8))
+
+    def _choose(mode):
+        result[0] = mode
+        dialog.destroy()
+
+    btn_frame = tk.Frame(dialog)
+    btn_frame.pack(padx=24, pady=(4, 18))
+    tk.Button(
+        btn_frame, text='Single-Cohort Analysis', width=26,
+        command=lambda: _choose('single'),
+    ).pack(side='left', padx=8)
+    tk.Button(
+        btn_frame, text='Across-Cohort Comparison', width=26,
+        command=lambda: _choose('across'),
+    ).pack(side='left', padx=8)
+
+    dialog.update_idletasks()
+    dialog.geometry(
+        f"+{root.winfo_screenwidth() // 2 - dialog.winfo_reqwidth() // 2}"
+        f"+{root.winfo_screenheight() // 2 - dialog.winfo_reqheight() // 2}"
+    )
+    root.wait_window(dialog)
+    return result[0]
+
+
+# =============================================================================
+# ACROSS-COHORT COMPARISON PIPELINE
+# =============================================================================
+
+def _cohort_prefix(animal_id: str) -> str:
+    """Return the alphabetic prefix of an animal ID (e.g. 'CAH' from 'CAH1')."""
+    import re
+    m = re.match(r'^([A-Za-z]+)', animal_id.strip())
+    return m.group(1).upper() if m else animal_id.strip()
+
+
+def _load_master_csv(path: str) -> dict:
+    """Read a cohort master CSV and return {animal_id: {sex, starting_condition}}."""
+    df = pd.read_csv(path)
+    df.columns = df.columns.str.strip()
+    df['animal_id'] = df['animal_id'].str.strip()
+    df['sex'] = df['sex'].str.strip().str.lower()
+    df['starting_condition'] = df['starting_condition'].str.strip()
+    info = {}
+    for _, row in df.iterrows():
+        info[row['animal_id']] = {
+            'sex': row['sex'],
+            'starting_condition': row['starting_condition'],
+        }
+    return info
+
+
+def _across_cohort_summary_stats(all_file_paths, combined_animal_info, output_dir=None):
+    """Compute per-mouse and per-group averages of hits and distances across sessions.
+
+    Groups mice into four categories:  <Cohort1> 0%,  <Cohort1> 2%,
+                                        <Cohort2> 0%,  <Cohort2> 2%.
+
+    For each mouse  : mean hits per session, mean distance per session (m).
+    For each group  : mean ± SEM of the per-mouse averages.
+
+    Parameters
+    ----------
+    all_file_paths      : list of str  — paths to all mouse *_data.csv files
+    combined_animal_info: dict         — {animal_id: {sex, starting_condition, cohort}}
+    output_dir          : str or None  — if given, CSVs are saved here
+
+    Returns
+    -------
+    (mouse_df, group_df) — both as pandas DataFrames
+
+    Notes
+    -----
+    analyze_mouse_data is called **separately per cohort** so that the
+    within-function missing-data report only compares dates inside the same
+    cohort.  Running both cohorts in a single call would cause every CAH mouse
+    to show all RV session dates as "NO SESSION" (and vice versa) because the
+    cohorts ran ~3 months apart.
+    """
+    # ── Partition files by cohort ─────────────────────────────────────────────
+    cohort_buckets: dict = {}   # {cohort_label: {'paths': [], 'markers': [], 'conditions': []}}
+    for fp in all_file_paths:
+        aid = os.path.basename(fp).split('_')[0]
+        info = combined_animal_info.get(aid)
+        if info is None:
+            print(f"  [WARNING] {aid} not in combined_animal_info — skipping")
+            continue
+        cohort = info['cohort']
+        if cohort not in cohort_buckets:
+            cohort_buckets[cohort] = {'paths': [], 'markers': [], 'conditions': []}
+        cohort_buckets[cohort]['paths'].append(fp)
+        cohort_buckets[cohort]['markers'].append('s' if info['sex'] == 'male' else 'o')
+        cohort_buckets[cohort]['conditions'].append(info['starting_condition'])
+
+    if not cohort_buckets:
+        print("  [ERROR] No valid data files found.")
+        return None, None
+
+    # ── Run analyze_mouse_data once per cohort ────────────────────────────────
+    all_results = []
+    for cohort_label, bucket in cohort_buckets.items():
+        n = len(bucket['paths'])
+        print(f"\nRunning session-level analysis for cohort '{cohort_label}' "
+              f"({n} mice, no plots)…")
+        *_, cohort_results, _ = analyze_mouse_data(
+            bucket['paths'], bucket['markers'], bucket['conditions'],
+            transitions_csv_path=None,
+            selected_plots=frozenset(),
+        )
+        all_results.extend(cohort_results)
+
+    # ── Per-mouse averages ────────────────────────────────────────────────────
+    rows = []
+    for result in all_results:
+        aid = result['mouse']
+        info = combined_animal_info.get(aid, {})
+        cohort    = info.get('cohort', _cohort_prefix(aid))
+        condition = result['starting_condition']
+        group     = f"{cohort} {condition}"
+        sex       = result.get('sex', info.get('sex', ''))
+
+        hits_arr = np.array(result['hits'], dtype=float)
+        dist_arr = np.array(result['total_distances'], dtype=float)  # mm
+        larp_vals = pd.to_numeric(
+            result['df'].get('lick_after_reward_prop', pd.Series(dtype=float)),
+            errors='coerce').dropna().values
+
+        rows.append({
+            'animal_id':                        aid,
+            'cohort':                           cohort,
+            'condition':                        condition,
+            'group':                            group,
+            'sex':                              sex,
+            'n_sessions':                       int(np.sum(~np.isnan(hits_arr))),
+            'avg_hits_per_session':             float(np.nanmean(hits_arr)),
+            'avg_distance_m_per_session':       float(np.nanmean(dist_arr) / 1000.0),
+            'avg_lick_after_reward_prop':       float(np.mean(larp_vals)) if len(larp_vals) > 0 else float('nan'),
+        })
+
+    mouse_df = pd.DataFrame(rows).sort_values(['group', 'animal_id']).reset_index(drop=True)
+
+    # ── Group averages (mean ± SEM across mice) ───────────────────────────────
+    def _sem(x):
+        n = x.notna().sum()
+        return x.std(ddof=1) / np.sqrt(n) if n > 1 else float('nan')
+
+    group_df = (
+        mouse_df.groupby('group', sort=True)
+        .agg(
+            cohort=('cohort', 'first'),
+            condition=('condition', 'first'),
+            n_mice=('animal_id', 'count'),
+            mean_hits_per_session=('avg_hits_per_session', 'mean'),
+            sem_hits_per_session=('avg_hits_per_session', _sem),
+            mean_distance_m_per_session=('avg_distance_m_per_session', 'mean'),
+            sem_distance_m_per_session=('avg_distance_m_per_session', _sem),
+        )
+        .reset_index()
+    )
+
+    # ── Console output ────────────────────────────────────────────────────────
+    print(f"\n{'═' * 74}")
+    print("  ACROSS-COHORT SUMMARY — Per-Mouse Averages Across Sessions")
+    print(f"{'═' * 74}")
+    hdr = (f"  {'Animal':12s}  {'Group':12s}  {'Sex':6s}  "
+           f"{'N Sess':>6s}  {'Avg Hits/Sess':>14s}  {'Avg Dist/Sess (m)':>18s}")
+    print(hdr)
+    print(f"  {'─'*12}  {'─'*12}  {'─'*6}  {'─'*6}  {'─'*14}  {'─'*18}")
+    prev_group = None
+    for _, r in mouse_df.iterrows():
+        if r['group'] != prev_group and prev_group is not None:
+            print()          # blank line between groups
+        prev_group = r['group']
+        print(f"  {r['animal_id']:12s}  {r['group']:12s}  {r['sex']:6s}  "
+              f"{int(r['n_sessions']):6d}  "
+              f"{r['avg_hits_per_session']:14.2f}  "
+              f"{r['avg_distance_m_per_session']:18.2f}")
+
+    print(f"\n{'─' * 74}")
+    print("  GROUP AVERAGES  (mean ± SEM across mice within group)")
+    print(f"{'─' * 74}")
+    ghdr = (f"  {'Group':12s}  {'N Mice':>7s}  "
+            f"{'Hits/Sess (mean±SEM)':>22s}  {'Dist/Sess m (mean±SEM)':>24s}")
+    print(ghdr)
+    print(f"  {'─'*12}  {'─'*7}  {'─'*22}  {'─'*24}")
+    for _, r in group_df.iterrows():
+        hits_str = f"{r['mean_hits_per_session']:.2f} ± {r['sem_hits_per_session']:.2f}"
+        dist_str = f"{r['mean_distance_m_per_session']:.2f} ± {r['sem_distance_m_per_session']:.2f}"
+        print(f"  {r['group']:12s}  {int(r['n_mice']):7d}  {hits_str:>22s}  {dist_str:>24s}")
+    print(f"{'═' * 74}\n")
+
+    # ── Save CSVs ─────────────────────────────────────────────────────────────
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        per_mouse_path = os.path.join(output_dir, f'across_cohort_per_mouse_{ts}.csv')
+        group_path     = os.path.join(output_dir, f'across_cohort_group_averages_{ts}.csv')
+        mouse_df.to_csv(per_mouse_path, index=False)
+        group_df.to_csv(group_path,     index=False)
+        print(f"  Saved per-mouse table  → {per_mouse_path}")
+        print(f"  Saved group averages   → {group_path}\n")
+
+    return mouse_df, group_df
+
+
+# ── Cohort colour map (used by all across-cohort plots) ───────────────────────
+# Add entries here if new cohort prefixes are introduced.
+_COHORT_COLORS: dict = {
+    'CAH': '#4472c4',   # medium blue
+    'RV':  '#ed7d31',   # orange
+}
+
+def _cohort_color(label: str) -> str:
+    """Return a colour for a cohort label, falling back to purple."""
+    return _COHORT_COLORS.get(label.upper(), '#7f3f98')
+
+
+def _plot_across_cohort_bars(mouse_df, root, output_dir=None):
+    """Produce two bar plots (one per metric) comparing cohorts.
+
+    Plot 1 — Hits per session  : mean ± SEM bar, jittered individual points,
+                                  Mann-Whitney U bracket for CAH vs RV.
+    Plot 2 — Distance per session (m): same layout.
+
+    Parameters
+    ----------
+    mouse_df   : DataFrame returned by _across_cohort_summary_stats
+                 (columns: animal_id, cohort, avg_hits_per_session,
+                            avg_distance_m_per_session, …)
+    root       : tk.Tk root window (for save dialogs)
+    output_dir : str or None — auto-save destination; None → ask via dialog
+    """
+    from scipy.stats import mannwhitneyu as _mwu
+
+    cohorts = sorted(mouse_df['cohort'].unique())
+    rng     = np.random.default_rng(seed=42)
+
+    metrics = [
+        ('avg_hits_per_session',       'Hits per Session',        'Hits / Session'),
+        ('avg_distance_m_per_session', 'Distance per Session (m)', 'Distance (m)'),
+    ]
+
+    figs = []
+    for col, title, ylabel in metrics:
+        fig, ax = plt.subplots(figsize=plt.rcParams.get('figure.figsize', (4.0, 2.5)))
+
+        cohort_vals: dict[str, np.ndarray] = {}
+        for ci, coh in enumerate(cohorts):
+            vals = mouse_df.loc[mouse_df['cohort'] == coh, col].dropna().to_numpy(float)
+            cohort_vals[coh] = vals
+            mean_v = float(np.mean(vals))
+            sem_v  = float(np.std(vals, ddof=1) / np.sqrt(len(vals))) if len(vals) > 1 else 0.0
+            color  = _cohort_color(coh)
+
+            ax.bar(ci, mean_v, width=0.5, color=color, alpha=0.7,
+                   yerr=sem_v,
+                   error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'),
+                   zorder=2)
+            jitter = (rng.random(len(vals)) - 0.5) * 0.22
+            ax.scatter(ci + jitter, vals,
+                       color=color, edgecolors='black',
+                       linewidths=plt.rcParams['lines.linewidth'],
+                       s=plt.rcParams['lines.markersize'] ** 2, zorder=3)
+
+        # ── MWU significance bracket (CAH vs RV) ─────────────────────────────
+        import itertools as _it_bar
+        pairs = list(_it_bar.combinations(range(len(cohorts)), 2))
+        bracket_results = []
+        for i, j in pairs:
+            v1, v2 = cohort_vals[cohorts[i]], cohort_vals[cohorts[j]]
+            if len(v1) >= 2 and len(v2) >= 2:
+                stat, pval = _mwu(v1, v2, alternative='two-sided')
+                bracket_results.append((i, j, float(stat), float(pval)))
+                print(f'  [{title}] {cohorts[i]} vs {cohorts[j]}: '
+                      f'U={stat:.1f}, p={pval:.4f}')
+
+        all_vals_flat = np.concatenate(list(cohort_vals.values()))
+        y_max = float(np.nanmax(all_vals_flat)) if len(all_vals_flat) else 1.0
+        y_max = max(y_max, ax.get_ylim()[1])
+        step  = y_max * 0.14
+        for bk_idx, (i, j, stat, pval) in enumerate(bracket_results):
+            bk_y = y_max + step * (bk_idx + 1)
+            ax.plot([i, i, j, j],
+                    [bk_y - step * 0.2, bk_y, bk_y, bk_y - step * 0.2],
+                    color='black', linewidth=1.2)
+            ax.text((i + j) / 2.0, bk_y + step * 0.05,
+                    _fmt_p(pval), ha='center', va='bottom', fontsize=9)
+        if bracket_results:
+            ax.set_ylim(bottom=0, top=y_max + step * (len(bracket_results) + 1.8))
+        else:
+            ax.set_ylim(bottom=0)
+
+        ax.set_xticks(np.arange(len(cohorts)))
+        ax.set_xticklabels(cohorts)
+        ax.set_xlabel('Cohort')
+        ax.set_ylabel(f'{ylabel} (Mean \u00b1 SEM)')
+        ax.set_title(f'{title} by Cohort\n(collapsed across all sessions; Mann-Whitney U)')
+        ax.tick_params(axis='both', direction='in')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        fig.tight_layout()
+        figs.append((fig, col, title))
+
+    # ── Show then save ────────────────────────────────────────────────────────
+    plt.show()
+
+    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+    for fig, col, title in figs:
+        if output_dir:
+            save_path = os.path.join(output_dir,
+                                     f'across_cohort_{col}_{ts}.svg')
+            fig.savefig(save_path, format='svg')
+            print(f"  Saved: {save_path}")
+        else:
+            save_path = filedialog.asksaveasfilename(
+                defaultextension='.svg',
+                filetypes=[('SVG files', '*.svg'), ('All files', '*.*')],
+                title=f'Save {title} bar plot as',
+                initialfile=f'across_cohort_{col}.svg',
+            )
+            if save_path:
+                fig.savefig(save_path, format='svg')
+                print(f"  Saved: {save_path}")
+
+
+def _plot_condition_matched_bars(mouse_df, root, output_dir=None):
+    """Condition-matched cohort comparisons.
+
+    Plot 1 — CAH 0% vs RV 0%  : avg_distance_m_per_session
+    Plot 2 — CAH 2% vs RV 2%  : avg_hits_per_session
+
+    Each plot: mean ± SEM bar, jittered individual points, MWU bracket.
+    """
+    from scipy.stats import mannwhitneyu as _mwu
+
+    rng = np.random.default_rng(seed=42)
+
+    # (condition_filter, col, group_labels, title, ylabel, file_stem)
+    comparisons = [
+        ('0%',  'avg_distance_m_per_session',
+         None,   # filled in below
+         'Distance per Session — 0% Condition (CAH vs RV)',
+         'Distance (m)',
+         'cond0pct_distance'),
+        ('2%',  'avg_hits_per_session',
+         None,
+         'Hits per Session — 2% Condition (CAH vs RV)',
+         'Hits / Session',
+         'cond2pct_hits'),
+        ('0%',  'avg_hits_per_session',
+         None,
+         'Hits per Session — 0% Condition (CAH vs RV)',
+         'Hits / Session',
+         'cond0pct_hits'),
+        ('2%',  'avg_distance_m_per_session',
+         None,
+         'Distance per Session — 2% Condition (CAH vs RV)',
+         'Distance (m)',
+         'cond2pct_distance'),
+    ]
+
+    ts   = datetime.now().strftime('%Y%m%d_%H%M%S')
+    figs = []
+
+    for cond, col, _, title, ylabel, stem in comparisons:
+        sub = mouse_df[mouse_df['condition'] == cond].copy()
+        cohorts = sorted(sub['cohort'].unique())
+
+        if len(cohorts) < 2:
+            print(f'  [SKIP] {title}: fewer than 2 cohorts found for condition {cond}')
+            continue
+
+        fig, ax = plt.subplots(figsize=plt.rcParams.get('figure.figsize', (4.0, 2.5)))
+
+        group_vals: dict[str, np.ndarray] = {}
+        for ci, coh in enumerate(cohorts):
+            vals = sub.loc[sub['cohort'] == coh, col].dropna().to_numpy(float)
+            group_vals[coh] = vals
+            mean_v = float(np.mean(vals))
+            sem_v  = float(np.std(vals, ddof=1) / np.sqrt(len(vals))) if len(vals) > 1 else 0.0
+            color  = _cohort_color(coh)
+
+            ax.bar(ci, mean_v, width=0.5, color=color, alpha=0.7,
+                   yerr=sem_v,
+                   error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'),
+                   zorder=2)
+            jitter = (rng.random(len(vals)) - 0.5) * 0.22
+            ax.scatter(ci + jitter, vals,
+                       color=color, edgecolors='black',
+                       linewidths=plt.rcParams['lines.linewidth'],
+                       s=plt.rcParams['lines.markersize'] ** 2, zorder=3)
+
+        # ── MWU bracket ───────────────────────────────────────────────────────
+        import itertools as _it_cm
+        bracket_results = []
+        for i, j in _it_cm.combinations(range(len(cohorts)), 2):
+            v1, v2 = group_vals[cohorts[i]], group_vals[cohorts[j]]
+            if len(v1) >= 2 and len(v2) >= 2:
+                stat, pval = _mwu(v1, v2, alternative='two-sided')
+                bracket_results.append((i, j, float(stat), float(pval)))
+                print(f'  [{title}] {cohorts[i]} vs {cohorts[j]}: '
+                      f'U={stat:.1f}, p={pval:.4f}')
+
+        all_flat = np.concatenate(list(group_vals.values()))
+        y_max = float(np.nanmax(all_flat)) if len(all_flat) else 1.0
+        y_max = max(y_max, ax.get_ylim()[1])
+        step  = y_max * 0.14
+        for bk_idx, (i, j, stat, pval) in enumerate(bracket_results):
+            bk_y = y_max + step * (bk_idx + 1)
+            ax.plot([i, i, j, j],
+                    [bk_y - step * 0.2, bk_y, bk_y, bk_y - step * 0.2],
+                    color='black', linewidth=1.2)
+            ax.text((i + j) / 2.0, bk_y + step * 0.05,
+                    _fmt_p(pval), ha='center', va='bottom', fontsize=9)
+        if bracket_results:
+            ax.set_ylim(bottom=0, top=y_max + step * (len(bracket_results) + 1.8))
+        else:
+            ax.set_ylim(bottom=0)
+
+        ax.set_xticks(np.arange(len(cohorts)))
+        ax.set_xticklabels([f'{c} {cond}' for c in cohorts])
+        ax.set_xlabel('Group')
+        ax.set_ylabel(f'{ylabel} (Mean \u00b1 SEM)')
+        ax.set_title(f'{title}\n(collapsed across all sessions; Mann-Whitney U)')
+        ax.tick_params(axis='both', direction='in')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        fig.tight_layout()
+        figs.append((fig, stem, title))
+
+    plt.show()
+
+    for fig, stem, title in figs:
+        if output_dir:
+            save_path = os.path.join(output_dir, f'{stem}_{ts}.svg')
+            fig.savefig(save_path, format='svg')
+            print(f"  Saved: {save_path}")
+        else:
+            save_path = filedialog.asksaveasfilename(
+                defaultextension='.svg',
+                filetypes=[('SVG files', '*.svg'), ('All files', '*.*')],
+                title=f'Save {title} bar plot as',
+                initialfile=f'{stem}.svg',
+            )
+            if save_path:
+                fig.savefig(save_path, format='svg')
+                print(f"  Saved: {save_path}")
+
+
+def _plot_condition_collapsed_bars(mouse_df, root, output_dir=None):
+    """Compare all 0% mice vs all 2% mice (both cohorts combined).
+
+    Produces two figures:
+      Plot 1 — 0% vs 2%  : avg_hits_per_session
+      Plot 2 — 0% vs 2%  : avg_distance_m_per_session
+
+    Each plot: mean ± SEM bar, jittered individual points, MWU bracket.
+    """
+    from scipy.stats import mannwhitneyu as _mwu
+
+    rng = np.random.default_rng(seed=42)
+    ts  = datetime.now().strftime('%Y%m%d_%H%M%S')
+
+    metrics = [
+        ('avg_hits_per_session',       'Hits per Session (0% vs 2%, all cohorts)',
+         'Hits / Session',             'condition_collapsed_hits'),
+        ('avg_distance_m_per_session', 'Distance per Session (0% vs 2%, all cohorts)',
+         'Distance (m)',               'condition_collapsed_distance'),
+    ]
+
+    conditions = sorted(mouse_df['condition'].unique())   # e.g. ['0%', '2%']
+    cond_colors = {c: _condition_to_color(c) for c in conditions}
+
+    figs = []
+    for col, title, ylabel, stem in metrics:
+        fig, ax = plt.subplots(figsize=plt.rcParams.get('figure.figsize', (4.0, 2.5)))
+
+        cond_vals: dict[str, np.ndarray] = {}
+        for ci, cond in enumerate(conditions):
+            vals = mouse_df.loc[mouse_df['condition'] == cond, col].dropna().to_numpy(float)
+            cond_vals[cond] = vals
+            mean_v = float(np.mean(vals))
+            sem_v  = float(np.std(vals, ddof=1) / np.sqrt(len(vals))) if len(vals) > 1 else 0.0
+            color  = cond_colors[cond]
+
+            ax.bar(ci, mean_v, width=0.5, color=color, alpha=0.7,
+                   yerr=sem_v,
+                   error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'),
+                   zorder=2)
+            jitter = (rng.random(len(vals)) - 0.5) * 0.22
+            ax.scatter(ci + jitter, vals,
+                       color=color, edgecolors='black',
+                       linewidths=plt.rcParams['lines.linewidth'],
+                       s=plt.rcParams['lines.markersize'] ** 2, zorder=3)
+
+        # ── MWU bracket ───────────────────────────────────────────────────────
+        import itertools as _it_cc
+        bracket_results = []
+        for i, j in _it_cc.combinations(range(len(conditions)), 2):
+            v1, v2 = cond_vals[conditions[i]], cond_vals[conditions[j]]
+            if len(v1) >= 2 and len(v2) >= 2:
+                stat, pval = _mwu(v1, v2, alternative='two-sided')
+                bracket_results.append((i, j, float(stat), float(pval)))
+                print(f'  [{title}] {conditions[i]} vs {conditions[j]}: '
+                      f'U={stat:.1f}, p={pval:.4f}')
+
+        all_flat = np.concatenate(list(cond_vals.values()))
+        y_max = float(np.nanmax(all_flat)) if len(all_flat) else 1.0
+        y_max = max(y_max, ax.get_ylim()[1])
+        step  = y_max * 0.14
+        for bk_idx, (i, j, stat, pval) in enumerate(bracket_results):
+            bk_y = y_max + step * (bk_idx + 1)
+            ax.plot([i, i, j, j],
+                    [bk_y - step * 0.2, bk_y, bk_y, bk_y - step * 0.2],
+                    color='black', linewidth=1.2)
+            ax.text((i + j) / 2.0, bk_y + step * 0.05,
+                    _fmt_p(pval), ha='center', va='bottom', fontsize=9)
+        if bracket_results:
+            ax.set_ylim(bottom=0, top=y_max + step * (len(bracket_results) + 1.8))
+        else:
+            ax.set_ylim(bottom=0)
+
+        ax.set_xticks(np.arange(len(conditions)))
+        ax.set_xticklabels(conditions)
+        ax.set_xlabel('Starting Condition')
+        ax.set_ylabel(f'{ylabel} (Mean \u00b1 SEM)')
+        ax.set_title(f'{title}\n(both cohorts combined; Mann-Whitney U)')
+        ax.tick_params(axis='both', direction='in')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        fig.tight_layout()
+        figs.append((fig, stem, title))
+
+    plt.show()
+
+    for fig, stem, title in figs:
+        if output_dir:
+            save_path = os.path.join(output_dir, f'{stem}_{ts}.svg')
+            fig.savefig(save_path, format='svg')
+            print(f"  Saved: {save_path}")
+        else:
+            save_path = filedialog.asksaveasfilename(
+                defaultextension='.svg',
+                filetypes=[('SVG files', '*.svg'), ('All files', '*.*')],
+                title=f'Save {title} bar plot as',
+                initialfile=f'{stem}.svg',
+            )
+            if save_path:
+                fig.savefig(save_path, format='svg')
+                print(f"  Saved: {save_path}")
+
+
+def _plot_lick_reward_prop_0pct(mouse_df, root, output_dir=None):
+    """Bar plot: proportion of reward deliveries with licks — 0% mice only, CAH vs RV.
+
+    Compares avg_lick_after_reward_prop between the two cohorts for mice that
+    started in the 0% condition.  Mean ± SEM bar + jittered individual points
+    + Mann-Whitney U significance bracket.
+    """
+    from scipy.stats import mannwhitneyu as _mwu
+
+    col   = 'avg_lick_after_reward_prop'
+    title = 'Lick-After-Reward Proportion — 0% Condition (CAH vs RV)'
+    ylabel = 'Proportion of Deliveries with Licks'
+    stem  = 'lick_rew_prop_0pct_cohort'
+    ts    = datetime.now().strftime('%Y%m%d_%H%M%S')
+
+    sub = mouse_df[(mouse_df['condition'] == '0%') & mouse_df[col].notna()].copy()
+    cohorts = sorted(sub['cohort'].unique())
+
+    if len(cohorts) < 2:
+        print(f'  [SKIP] {title}: fewer than 2 cohorts for 0% condition')
+        return
+
+    rng = np.random.default_rng(seed=42)
+    fig, ax = plt.subplots(figsize=plt.rcParams.get('figure.figsize', (4.0, 2.5)))
+
+    group_vals: dict[str, np.ndarray] = {}
+    for ci, coh in enumerate(cohorts):
+        vals = sub.loc[sub['cohort'] == coh, col].to_numpy(float)
+        group_vals[coh] = vals
+        mean_v = float(np.mean(vals))
+        sem_v  = float(np.std(vals, ddof=1) / np.sqrt(len(vals))) if len(vals) > 1 else 0.0
+        color  = _cohort_color(coh)
+
+        ax.bar(ci, mean_v, width=0.5, color=color, alpha=0.7,
+               yerr=sem_v,
+               error_kw=dict(elinewidth=0.8, capsize=3, capthick=0.8, ecolor='black'),
+               zorder=2)
+        jitter = (rng.random(len(vals)) - 0.5) * 0.22
+        ax.scatter(ci + jitter, vals,
+                   color=color, edgecolors='black',
+                   linewidths=plt.rcParams['lines.linewidth'],
+                   s=plt.rcParams['lines.markersize'] ** 2, zorder=3)
+
+    # ── MWU bracket ───────────────────────────────────────────────────────────
+    import itertools as _it_lrp
+    bracket_results = []
+    for i, j in _it_lrp.combinations(range(len(cohorts)), 2):
+        v1, v2 = group_vals[cohorts[i]], group_vals[cohorts[j]]
+        if len(v1) >= 2 and len(v2) >= 2:
+            stat, pval = _mwu(v1, v2, alternative='two-sided')
+            bracket_results.append((i, j, float(stat), float(pval)))
+            print(f'  [{title}] {cohorts[i]} vs {cohorts[j]}: '
+                  f'U={stat:.1f}, p={pval:.4f}')
+
+    all_flat = np.concatenate(list(group_vals.values()))
+    y_max = float(np.nanmax(all_flat)) if len(all_flat) else 1.0
+    y_max = max(y_max, ax.get_ylim()[1], 0.5)
+    step  = y_max * 0.14
+    for bk_idx, (i, j, stat, pval) in enumerate(bracket_results):
+        bk_y = y_max + step * (bk_idx + 1)
+        ax.plot([i, i, j, j],
+                [bk_y - step * 0.2, bk_y, bk_y, bk_y - step * 0.2],
+                color='black', linewidth=1.2)
+        ax.text((i + j) / 2.0, bk_y + step * 0.05,
+                _fmt_p(pval), ha='center', va='bottom', fontsize=9)
+    if bracket_results:
+        ax.set_ylim(bottom=0, top=y_max + step * (len(bracket_results) + 1.8))
+    else:
+        ax.set_ylim(bottom=0, top=max(y_max * 1.3, 1.0))
+
+    ax.set_xticks(np.arange(len(cohorts)))
+    ax.set_xticklabels([f'{c} 0%' for c in cohorts])
+    ax.set_xlabel('Group')
+    ax.set_ylabel(f'{ylabel} (Mean \u00b1 SEM)')
+    ax.set_title(f'{title}\n(collapsed across all sessions; Mann-Whitney U)')
+    ax.tick_params(axis='both', direction='in')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    fig.tight_layout()
+
+    plt.show()
+
+    if output_dir:
+        save_path = os.path.join(output_dir, f'{stem}_{ts}.svg')
+        fig.savefig(save_path, format='svg')
+        print(f'  Saved: {save_path}')
+    else:
+        save_path = filedialog.asksaveasfilename(
+            defaultextension='.svg',
+            filetypes=[('SVG files', '*.svg'), ('All files', '*.*')],
+            title=f'Save {title} bar plot as',
+            initialfile=f'{stem}.svg',
+        )
+        if save_path:
+            fig.savefig(save_path, format='svg')
+            print(f'  Saved: {save_path}')
+
+
+def run_across_cohort_pipeline(root):
+    """Interactive pipeline for comparing two cohorts.
+
+    Workflow
+    --------
+    1. Select master CSV for cohort 1  →  derive cohort label from animal ID prefix
+    2. Select data files for cohort 1
+    3. Select master CSV for cohort 2  →  derive cohort label from animal ID prefix
+    4. Select data files for cohort 2
+    5. Merge into a single combined animal_info dict, tagging each animal with
+       its cohort label (e.g. 'CAH', 'RV')
+    6. Print a summary of what was loaded
+    7. [Placeholder] — call across-cohort analysis functions here as they are
+       developed.  The combined data structures passed to those functions are:
+           combined_animal_info  — {animal_id: {sex, starting_condition, cohort}}
+           all_file_paths        — sorted list of all data file paths
+           cohort_labels         — {animal_id: cohort_prefix}
+    """
+    # ── Cohort 1 master CSV ───────────────────────────────────────────────────
+    master_path_1 = filedialog.askopenfilename(
+        title='Cohort 1 — Select master CSV (animal_id, sex, starting_condition)',
+        filetypes=[('CSV files', '*.csv')],
+        initialdir=os.getcwd(),
+    )
+    if not master_path_1:
+        print("No master CSV selected for cohort 1. Exiting across-cohort pipeline.")
+        return
+
+    try:
+        animal_info_1 = _load_master_csv(master_path_1)
+    except Exception as exc:
+        print(f"Error reading cohort 1 master CSV: {exc}")
+        return
+
+    # Derive cohort 1 label from animal IDs
+    cohort_label_1 = _cohort_prefix(next(iter(animal_info_1)))
+    print(f"Cohort 1 label: '{cohort_label_1}'  ({len(animal_info_1)} animals)")
+
+    # ── Cohort 1 data files ───────────────────────────────────────────────────
+    file_paths_1 = filedialog.askopenfilenames(
+        title=f'Cohort 1 ({cohort_label_1}) — Select mouse data files',
+        filetypes=[('CSV files', '*.csv')],
+        initialdir=os.path.dirname(master_path_1),
+    )
+    if not file_paths_1:
+        print("No data files selected for cohort 1. Exiting across-cohort pipeline.")
+        return
+
+    # ── Cohort 2 master CSV ───────────────────────────────────────────────────
+    master_path_2 = filedialog.askopenfilename(
+        title='Cohort 2 — Select master CSV (animal_id, sex, starting_condition)',
+        filetypes=[('CSV files', '*.csv')],
+        initialdir=os.getcwd(),
+    )
+    if not master_path_2:
+        print("No master CSV selected for cohort 2. Exiting across-cohort pipeline.")
+        return
+
+    try:
+        animal_info_2 = _load_master_csv(master_path_2)
+    except Exception as exc:
+        print(f"Error reading cohort 2 master CSV: {exc}")
+        return
+
+    cohort_label_2 = _cohort_prefix(next(iter(animal_info_2)))
+    print(f"Cohort 2 label: '{cohort_label_2}'  ({len(animal_info_2)} animals)")
+
+    # ── Cohort 2 data files ───────────────────────────────────────────────────
+    file_paths_2 = filedialog.askopenfilenames(
+        title=f'Cohort 2 ({cohort_label_2}) — Select mouse data files',
+        filetypes=[('CSV files', '*.csv')],
+        initialdir=os.path.dirname(master_path_2),
+    )
+    if not file_paths_2:
+        print("No data files selected for cohort 2. Exiting across-cohort pipeline.")
+        return
+
+    # ── Merge cohort info ─────────────────────────────────────────────────────
+    combined_animal_info = {}
+    cohort_labels = {}
+
+    for aid, info in animal_info_1.items():
+        combined_animal_info[aid] = {**info, 'cohort': cohort_label_1}
+        cohort_labels[aid] = cohort_label_1
+
+    for aid, info in animal_info_2.items():
+        if aid in combined_animal_info:
+            print(f"  [WARNING] Animal ID '{aid}' appears in both cohorts — "
+                  "cohort 2 entry will overwrite cohort 1.")
+        combined_animal_info[aid] = {**info, 'cohort': cohort_label_2}
+        cohort_labels[aid] = cohort_label_2
+
+    all_file_paths = list(file_paths_1) + list(file_paths_2)
+
+    # ── Summary ───────────────────────────────────────────────────────────────
+    print(
+        f"\n{'─' * 60}\n"
+        f"Across-Cohort Pipeline — Data Loaded Successfully\n"
+        f"{'─' * 60}"
+    )
+    print(f"  Cohort 1 : {cohort_label_1:10s}  {len(file_paths_1):3d} data file(s)")
+    print(f"  Cohort 2 : {cohort_label_2:10s}  {len(file_paths_2):3d} data file(s)")
+    print(f"  Total    :             {len(all_file_paths):3d} data file(s)")
+    print()
+
+    unrecognised = []
+    for fp in all_file_paths:
+        aid = os.path.basename(fp).split('_')[0]
+        entry = combined_animal_info.get(aid)
+        if entry is None:
+            unrecognised.append(aid)
+            continue
+        print(
+            f"  {aid:12s}  cohort={entry['cohort']:6s}  "
+            f"sex={entry['sex']:6s}  "
+            f"condition={entry['starting_condition']}"
+        )
+    if unrecognised:
+        print(f"\n  [WARNING] The following animal IDs were not found in either "
+              f"master CSV and will be skipped: {unrecognised}")
+
+    print(f"\n{'─' * 60}")
+    print("  Across-cohort analysis functions will be added here.")
+    print(f"{'─' * 60}\n")
+
+    # ── Output directory ──────────────────────────────────────────────────────
+    output_dir = filedialog.askdirectory(
+        title='Select output folder for across-cohort results (cancel to skip saving)',
+        initialdir=os.path.dirname(list(file_paths_1)[0]),
+    ) or None
+    if output_dir:
+        print(f"Output folder: {output_dir}")
+    else:
+        print("No output folder selected — results will be printed only.")
+
+    # ── [PLACEHOLDER] — future across-cohort analyses ─────────────────────────
+    # When specific analyses are requested, add function calls below.
+    # All functions should accept:
+    #   all_file_paths        : list of str  — paths to all mouse data CSV files
+    #   combined_animal_info  : dict         — {animal_id: {sex, starting_condition, cohort}}
+    #   cohort_labels         : dict         — {animal_id: cohort_prefix}
+    #   cohort_label_1        : str
+    #   cohort_label_2        : str
+    #   output_dir            : str or None
+
+    # ── Summary stats: hits and distances by group ────────────────────────────
+    mouse_df, group_df = _across_cohort_summary_stats(
+        all_file_paths, combined_animal_info, output_dir=output_dir
+    )
+
+    # ── Bar plots: CAH vs RV for hits/session and dist/session ───────────────
+    if mouse_df is not None:
+        _plot_across_cohort_bars(mouse_df, root, output_dir=output_dir)
+        _plot_condition_matched_bars(mouse_df, root, output_dir=output_dir)
+        _plot_condition_collapsed_bars(mouse_df, root, output_dir=output_dir)
+        _plot_lick_reward_prop_0pct(mouse_df, root, output_dir=output_dir)
+    # ─────────────────────────────────────────────────────────────────────────
+
+
 def main():
     # Create and hide the root window
     root = tk.Tk()
     root.withdraw()
+
+    # ── Top-level scope selection ─────────────────────────────────────────────
+    top_mode = _ask_top_level_mode(root)
+    if top_mode is None:
+        print("No analysis scope selected. Exiting...")
+        return
+
+    if top_mode == 'across':
+        run_across_cohort_pipeline(root)
+        return
+
+    # ── Single-cohort pipeline (original flow) ────────────────────────────────
 
     # Open file dialog to select the master CSV file
     master_csv_path = filedialog.askopenfilename(
@@ -4764,8 +17866,19 @@ def main():
         generate_descriptive_stats_report(all_results, _level_stats_data, output_dir=output_dir)
         return
 
+    # ── WEIGHT CORRELATIONS mode ──────────────────────────────────────────────
+    if mode == 'weight_corr':
+        _run_weight_correlations(root, file_paths, animal_info)
+        return
+
     # ── PLOTS mode ────────────────────────────────────────────────────────────
-    selected_plots = _ask_plot_selection(root)
+    if mode == 'expl':
+        selected_plots = _ask_plot_selection(
+            root, labels=_EXPL_PLOT_LABELS,
+            title='Select Exploratory / Distribution Plots',
+        )
+    else:
+        selected_plots = _ask_plot_selection(root)
     if not selected_plots:
         print("No plots selected. Exiting...")
         return
@@ -4778,7 +17891,23 @@ def main():
                                           'level_dist_condition_excl_last',
                                           'level_bout', 'level_bout_condition',
                                           'level_bout_avg_speed', 'level_bout_avg_speed_condition',
-                                          'level_bout_avg_dist', 'level_bout_avg_dist_condition')):
+                                          'level_bout_avg_dist', 'level_bout_avg_dist_condition',
+                                          'last_level_bar', 'level_survivor',
+                                          'time_to_level2', 'level_sensitivity',
+                                          'epoch_reward_speed_sess_by_level',
+                                          'epoch_delivery_speed_sess_by_level',
+                                          'level_shuffle_zscore',
+                                          'level_shuffle_zscore_line',
+                                          'level_shuffle_zscore_cond',
+                                          'level_punish_shuffle_zscore',
+                                          'level_punish_shuffle_zscore_line',
+                                          'level_punish_shuffle_zscore_cond',
+                                          'level_immobility_prop',
+                                          'level_rew_zone_immobility_prop',
+                                          'level_rew_zone_immobility_prop_cond',
+                                          'level_progression_indiv',
+                                          'level_progression_condition',
+                                          'level_progression_bar')):
         transitions_csv_path = filedialog.askopenfilename(
             title='Select transitions CSV (from level_sorter.py) — cancel to skip level plot',
             filetypes=[('CSV files', '*.csv'), ('All files', '*.*')],
@@ -4790,22 +17919,28 @@ def main():
             print("No transitions CSV selected — level plot will be empty.")
 
     # Analyze data and plot results
-    speed_fig, sensitivity_fig, lick_fig, reward_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, distance_fig, bout_count_fig, avg_bout_count_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_bar_fig, condition_speed_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, epoch_speed_per_mouse_fig, epoch_speed_cond_fig, epoch_cap_per_mouse_fig, epoch_cap_cond_fig, epoch_speed_sess_per_mouse_fig, epoch_speed_sess_cond_fig, epoch_cap_sess_per_mouse_fig, epoch_cap_sess_cond_fig, epoch_speed_early_per_mouse_fig, epoch_speed_late_per_mouse_fig, epoch_speed_early_cond_fig, epoch_speed_late_cond_fig, epoch_cap_early_per_mouse_fig, epoch_cap_late_per_mouse_fig, epoch_cap_early_cond_fig, epoch_cap_late_cond_fig, epoch_speed_early_ev_per_mouse_fig, epoch_speed_late_ev_per_mouse_fig, epoch_speed_early_ev_cond_fig, epoch_speed_late_ev_cond_fig, epoch_cap_early_ev_per_mouse_fig, epoch_cap_late_ev_per_mouse_fig, epoch_cap_early_ev_cond_fig, epoch_cap_late_ev_cond_fig, epoch_speed_sess_cond_clean_fig, epoch_cap_sess_cond_clean_fig, epoch_speed_early_cond_clean_fig, epoch_speed_late_cond_clean_fig, epoch_cap_early_cond_clean_fig, epoch_cap_late_cond_clean_fig, punish_speed_per_mouse_fig, punish_speed_cond_fig, punish_cap_per_mouse_fig, punish_cap_cond_fig, punish_speed_sess_per_mouse_fig, punish_speed_sess_cond_fig, punish_cap_sess_per_mouse_fig, punish_cap_sess_cond_fig, punish_speed_sess_cond_clean_fig, punish_cap_sess_cond_clean_fig, sex_speed_fig, sex_distance_indiv_fig, sex_reward_indiv_fig, epoch_speed_sess_sex_per_mouse_fig, epoch_speed_sess_sex_fig, epoch_cap_sess_sex_per_mouse_fig, epoch_cap_sess_sex_fig, epoch_punish_speed_sess_sex_per_mouse_fig, epoch_punish_speed_sess_sex_fig, epoch_punish_cap_sess_sex_per_mouse_fig, epoch_punish_cap_sess_sex_fig, all_results, _level_stats_data = analyze_mouse_data(
+    # Auto-create a timestamped stats_reports subfolder next to the data files
+    _report_ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+    output_dir = os.path.join(
+        os.path.dirname(os.path.abspath(file_paths[0])),
+        f'stats_reports_{_report_ts}',
+    )
+    speed_fig, sensitivity_fig, lick_fig, reward_fig, lick_reward_ratio_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, avg_sex_speed_fig, distance_fig, immobility_prop_fig, bout_count_fig, avg_bout_count_fig, rewards_per_bout_fig, first_lick_latency_fig, condition_rewards_per_bout_fig, condition_rewards_per_bout_bar_fig, condition_first_lick_latency_fig, condition_first_lick_latency_bar_fig, condition_lick_after_reward_prop_fig, condition_lick_after_reward_prop_bar_fig, condition_lick_after_reward_prop_5s_bar_fig, weekday_reward_bar_fig, weekday_reward_bar_condition_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_lick_reward_ratio_fig, condition_lick_reward_ratio_bar_fig, condition_punish_zone_pct_bar_fig, condition_bar_fig, condition_speed_bar_fig, condition_sensitivity_fig, condition_sensitivity_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_sensitivity_fig, level_immobility_prop_fig, level_rew_zone_immobility_prop_fig, level_rew_zone_immobility_prop_cond_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, last_level_bar_fig, level_survivor_fig, time_to_level2_fig, level_progression_indiv_fig, level_progression_condition_fig, level_progression_bar_fig, epoch_del_speed_per_mouse_fig, epoch_del_speed_cond_fig, epoch_del_cap_per_mouse_fig, epoch_del_cap_cond_fig, epoch_del_lick_per_mouse_fig, epoch_del_lick_cond_fig, epoch_del_cap_diff_entry_fig, epoch_del_cap_diff_065s_fig, epoch_del_lick_diff_065s_fig, condition_shuffle_zscore_fig, condition_shuffle_zscore_bar_fig, level_shuffle_zscore_fig, level_shuffle_zscore_line_fig, level_shuffle_zscore_cond_fig, condition_punish_shuffle_zscore_fig, condition_punish_shuffle_zscore_bar_fig, level_punish_shuffle_zscore_fig, level_punish_shuffle_zscore_line_fig, level_punish_shuffle_zscore_cond_fig, epoch_speed_per_mouse_fig, epoch_speed_cond_fig, epoch_cap_per_mouse_fig, epoch_cap_cond_fig, epoch_speed_sess_per_mouse_fig, epoch_speed_sess_cond_fig, epoch_cap_sess_per_mouse_fig, epoch_cap_sess_cond_fig, epoch_speed_early_per_mouse_fig, epoch_speed_late_per_mouse_fig, epoch_speed_early_cond_fig, epoch_speed_late_cond_fig, epoch_cap_early_per_mouse_fig, epoch_cap_late_per_mouse_fig, epoch_cap_early_cond_fig, epoch_cap_late_cond_fig, epoch_speed_early_ev_per_mouse_fig, epoch_speed_late_ev_per_mouse_fig, epoch_speed_early_ev_cond_fig, epoch_speed_late_ev_cond_fig, epoch_cap_early_ev_per_mouse_fig, epoch_cap_late_ev_per_mouse_fig, epoch_cap_early_ev_cond_fig, epoch_cap_late_ev_cond_fig, epoch_speed_early_ev_cond_clean_fig, epoch_speed_late_ev_cond_clean_fig, epoch_cap_early_ev_cond_clean_fig, epoch_cap_late_ev_cond_clean_fig, epoch_speed_sess_cond_clean_fig, epoch_cap_sess_cond_clean_fig, epoch_speed_early_cond_clean_fig, epoch_speed_late_cond_clean_fig, epoch_cap_early_cond_clean_fig, epoch_cap_late_cond_clean_fig, punish_speed_per_mouse_fig, punish_speed_cond_fig, punish_cap_per_mouse_fig, punish_cap_cond_fig, punish_speed_sess_per_mouse_fig, punish_speed_sess_cond_fig, punish_cap_sess_per_mouse_fig, punish_cap_sess_cond_fig, punish_speed_sess_cond_clean_fig, punish_cap_sess_cond_clean_fig, sex_speed_fig, sex_distance_indiv_fig, sex_reward_indiv_fig, epoch_speed_sess_sex_per_mouse_fig, epoch_speed_sess_sex_fig, epoch_cap_sess_sex_per_mouse_fig, epoch_cap_sess_sex_fig, epoch_punish_speed_sess_sex_per_mouse_fig, epoch_punish_speed_sess_sex_fig, epoch_punish_cap_sess_sex_per_mouse_fig, epoch_punish_cap_sess_sex_fig, epoch_reward_speed_pre_post_fig, epoch_reward_speed_diff_fig, epoch_reward_cap_pre_post_fig, epoch_reward_cap_diff_fig, epoch_reward_speed_pre_post_entry_fig, epoch_reward_speed_diff_entry_fig, epoch_reward_speed_pre_post_entry_1s_fig, epoch_reward_speed_diff_entry_1s_fig, epoch_reward_speed_diff_entry_2s_fig, epoch_reward_lick_count_sess_per_mouse_fig, epoch_reward_lick_count_sess_cond_fig, epoch_reward_lick_count_sess_cond_clean_fig, epoch_reward_lick_diff_entry_065s_fig, epoch_punish_lick_count_sess_per_mouse_fig, epoch_punish_lick_count_sess_cond_fig, epoch_punish_lick_count_sess_cond_clean_fig, epoch_punish_speed_pre_post_fig, epoch_punish_speed_diff_fig, epoch_punish_speed_pre_post_entry_fig, epoch_punish_speed_diff_entry_fig, epoch_punish_speed_diff_entry_2s_fig, epoch_punish_cap_pre_post_fig, epoch_punish_cap_diff_fig, epoch_punish_cap_pre_post_entry_fig, epoch_punish_cap_diff_entry_fig, expl_speed_histogram_fig, expl_speed_distfit_fig, expl_speed_boxplot_fig, expl_speed_rm_anova_resid_fig, expl_cap_histogram_fig, expl_cap_boxplot_fig, expl_cap_rm_anova_resid_fig, expl_cap_distfit_fig, expl_lick_distfit_fig, expl_lick_boxplot_fig, expl_lick_rm_anova_resid_fig, expl_lick_rate_distfit_fig, expl_lick_reward_ratio_distfit_fig, all_results, _level_stats_data = analyze_mouse_data(
         file_paths, markers, starting_conditions,
         transitions_csv_path=transitions_csv_path,
         selected_plots=selected_plots,
+        output_dir=output_dir,
     )
-
-    # All generated figures (None entries are skipped)
     all_figs = [f for f in [
-        speed_fig, sensitivity_fig, lick_fig, reward_fig,
+        speed_fig, sensitivity_fig, lick_fig, reward_fig, lick_reward_ratio_fig,
         false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig,
-        avg_reward_fig, sex_reward_fig,
-        distance_fig, bout_count_fig, avg_bout_count_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig,
+        avg_reward_fig, sex_reward_fig, avg_sex_speed_fig,
+        distance_fig, immobility_prop_fig, bout_count_fig, avg_bout_count_fig, rewards_per_bout_fig, first_lick_latency_fig, condition_rewards_per_bout_fig, condition_rewards_per_bout_bar_fig, condition_first_lick_latency_fig, condition_first_lick_latency_bar_fig, condition_lick_after_reward_prop_fig, condition_lick_after_reward_prop_bar_fig, condition_lick_after_reward_prop_5s_bar_fig, weekday_reward_bar_fig, weekday_reward_bar_condition_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig,
         condition_distance_bar_fig, total_distance_bar_fig,
         avg_lick_rate_fig, sex_lick_rate_fig,
-        condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig,
-        condition_bar_fig, condition_speed_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig,
+        condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_lick_reward_ratio_fig, condition_lick_reward_ratio_bar_fig,
+        condition_punish_zone_pct_bar_fig,
+        condition_bar_fig, condition_speed_bar_fig, condition_sensitivity_fig, condition_sensitivity_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig,
         level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig,
         level_lick_collapsed_fig, level_lick_condition_fig,
         level_dist_collapsed_fig, level_dist_condition_fig,
@@ -4813,6 +17948,25 @@ def main():
         level_bout_collapsed_fig, level_bout_condition_fig,
         level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig,
         level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig,
+        last_level_bar_fig, level_survivor_fig, time_to_level2_fig, level_sensitivity_fig,
+        level_immobility_prop_fig, level_rew_zone_immobility_prop_fig, level_rew_zone_immobility_prop_cond_fig,
+        level_progression_indiv_fig, level_progression_condition_fig, level_progression_bar_fig,
+        epoch_del_speed_per_mouse_fig, epoch_del_speed_cond_fig,
+        epoch_del_cap_per_mouse_fig,   epoch_del_cap_cond_fig,
+        epoch_del_lick_per_mouse_fig,  epoch_del_lick_cond_fig,
+        epoch_del_cap_diff_entry_fig,
+        epoch_del_cap_diff_065s_fig,
+        epoch_del_lick_diff_065s_fig,
+        condition_shuffle_zscore_fig,
+        condition_shuffle_zscore_bar_fig,
+        level_shuffle_zscore_fig,
+        level_shuffle_zscore_line_fig,
+        level_shuffle_zscore_cond_fig,
+        condition_punish_shuffle_zscore_fig,
+        condition_punish_shuffle_zscore_bar_fig,
+        level_punish_shuffle_zscore_fig,
+        level_punish_shuffle_zscore_line_fig,
+        level_punish_shuffle_zscore_cond_fig,
         epoch_speed_per_mouse_fig, epoch_speed_cond_fig,
         epoch_cap_per_mouse_fig, epoch_cap_cond_fig,
         epoch_speed_sess_per_mouse_fig, epoch_speed_sess_cond_fig,
@@ -4828,6 +17982,8 @@ def main():
         epoch_speed_early_ev_cond_fig, epoch_speed_late_ev_cond_fig,
         epoch_cap_early_ev_per_mouse_fig, epoch_cap_late_ev_per_mouse_fig,
         epoch_cap_early_ev_cond_fig, epoch_cap_late_ev_cond_fig,
+        epoch_speed_early_ev_cond_clean_fig, epoch_speed_late_ev_cond_clean_fig,
+        epoch_cap_early_ev_cond_clean_fig, epoch_cap_late_ev_cond_clean_fig,
         punish_speed_per_mouse_fig, punish_speed_cond_fig,
         punish_cap_per_mouse_fig, punish_cap_cond_fig,
         punish_speed_sess_per_mouse_fig, punish_speed_sess_cond_fig,
@@ -4838,6 +17994,43 @@ def main():
         epoch_cap_sess_sex_per_mouse_fig, epoch_cap_sess_sex_fig,
         epoch_punish_speed_sess_sex_per_mouse_fig, epoch_punish_speed_sess_sex_fig,
         epoch_punish_cap_sess_sex_per_mouse_fig, epoch_punish_cap_sess_sex_fig,
+        epoch_reward_speed_pre_post_fig,
+        epoch_reward_speed_diff_fig,
+        epoch_reward_cap_pre_post_fig,
+        epoch_reward_cap_diff_fig,
+        epoch_reward_speed_pre_post_entry_fig,
+        epoch_reward_speed_diff_entry_fig,
+        epoch_reward_speed_pre_post_entry_1s_fig,
+        epoch_reward_speed_diff_entry_1s_fig,
+        epoch_reward_speed_diff_entry_2s_fig,
+        epoch_reward_lick_count_sess_per_mouse_fig,
+        epoch_reward_lick_count_sess_cond_fig,
+        epoch_reward_lick_count_sess_cond_clean_fig,
+        epoch_reward_lick_diff_entry_065s_fig,
+        epoch_punish_lick_count_sess_per_mouse_fig,
+        epoch_punish_lick_count_sess_cond_fig,
+        epoch_punish_lick_count_sess_cond_clean_fig,
+        epoch_punish_speed_pre_post_fig,
+        epoch_punish_speed_diff_fig,
+        epoch_punish_speed_pre_post_entry_fig,
+        epoch_punish_speed_diff_entry_fig,
+        epoch_punish_speed_diff_entry_2s_fig,
+        epoch_punish_cap_pre_post_fig,
+        epoch_punish_cap_diff_fig,
+        epoch_punish_cap_pre_post_entry_fig,
+        epoch_punish_cap_diff_entry_fig,
+        expl_speed_histogram_fig,
+        expl_speed_distfit_fig,
+        expl_speed_boxplot_fig,
+        expl_speed_rm_anova_resid_fig,
+        expl_cap_histogram_fig,
+        expl_cap_boxplot_fig,
+        expl_cap_rm_anova_resid_fig,
+        expl_lick_distfit_fig,
+        expl_lick_boxplot_fig,
+        expl_lick_rm_anova_resid_fig,
+        expl_lick_rate_distfit_fig,
+        expl_lick_reward_ratio_distfit_fig,
     ] if f is not None]
 
     # Configure all figures (add legend only when labeled artists exist, then tight layout)
@@ -4868,15 +18061,29 @@ def main():
         (sensitivity_fig,       'sensitivity',         'Sensitivity plot'),
         (lick_fig,              'lick_count',          'Lick count plot'),
         (reward_fig,            'reward_count',        'Reward count plot'),
+        (lick_reward_ratio_fig, 'lick_reward_ratio',   'Lick count / Reward count ratio plot'),
         (false_alarm_fig,       'false_alarms',        'False alarms plot'),
         (correct_rejection_fig, 'correct_rejections',  'Correct rejections plot'),
         (specificity_fig,       'specificity',         'Specificity plot'),
         (dprime_fig,            'dprime',              "d' plot"),
         (avg_reward_fig,        'avg_reward',          'Average rewards plot'),
         (sex_reward_fig,        'sex_reward',          'Sex-specific average rewards plot'),
+        (avg_sex_speed_fig,     'avg_sex_speed',       'Sex-specific average speed plot'),
         (distance_fig,          'distance',            'Distance per session plot'),
+        (immobility_prop_fig,   'immobility_prop',     'Immobility proportion per session — individual mice'),
         (bout_count_fig,         'bout_count',          'Locomotion bout count plot'),
         (avg_bout_count_fig,     'avg_bout_count',      'Average bout count across all mice plot'),
+        (rewards_per_bout_fig,            'rewards_per_bout',            'Average rewards per locomotion bout per session plot'),
+        (first_lick_latency_fig,              'first_lick_latency',              'Average first-lick latency after reward delivery per session plot'),
+        (condition_rewards_per_bout_fig,  'condition_rewards_per_bout',  'Condition-based rewards per bout plot'),
+        (condition_rewards_per_bout_bar_fig, 'condition_rewards_per_bout_bar', 'Condition rewards per bout collapsed bar chart'),
+        (condition_first_lick_latency_fig,     'condition_first_lick_latency',     'Condition-based first-lick latency line plot'),
+        (condition_first_lick_latency_bar_fig, 'condition_first_lick_latency_bar', 'Condition first-lick latency collapsed bar chart'),
+        (condition_lick_after_reward_prop_fig,     'lick_after_reward_prop',     'Condition: proportion of reward deliveries with licks — line plot'),
+        (condition_lick_after_reward_prop_bar_fig, 'lick_after_reward_prop_bar', 'Condition: proportion of reward deliveries with licks — collapsed bar chart (2 s window)'),
+        (condition_lick_after_reward_prop_5s_bar_fig, 'lick_after_reward_prop_5s_bar', 'Condition: proportion of reward deliveries with licks — collapsed bar chart (5 s window)'),
+        (weekday_reward_bar_fig,             'weekday_reward_bar',             'Weekday reward count bar chart (all mice pooled)'),
+        (weekday_reward_bar_condition_fig,   'weekday_reward_bar_condition',   'Weekday reward count bar chart (by condition)'),
         (bout_avg_speed_fig,     'bout_avg_speed',      'Average speed per locomotion bout plot'),
         (bout_avg_dist_fig,      'bout_avg_dist',       'Average distance per locomotion bout plot'),
         (sex_distance_fig,      'sex_distance',        'Sex-specific distance per session plot'),
@@ -4890,10 +18097,15 @@ def main():
         (condition_bout_count_fig, 'condition_bout_count', 'Condition-based bout count plot'),
         (condition_bout_avg_speed_fig, 'condition_bout_avg_speed', 'Condition-based avg speed per bout plot'),
         (condition_bout_avg_dist_fig,  'condition_bout_avg_dist',  'Condition-based avg distance per bout plot'),
-        (condition_lick_fig,    'condition_lick',      'Condition-based average lick count plot'),
-        (condition_lick_rate_fig, 'condition_lick_rate', 'Condition-based lick rate plot'),
+        (condition_lick_fig,              'condition_lick',              'Condition-based average lick count plot'),
+        (condition_lick_rate_fig,         'condition_lick_rate',         'Condition-based lick rate plot'),
+        (condition_lick_reward_ratio_fig,     'condition_lick_reward_ratio',     'Condition-based lick/reward ratio plot'),
+        (condition_lick_reward_ratio_bar_fig,  'condition_lick_reward_ratio_bar', 'Condition lick/reward ratio collapsed bar chart'),
+        (condition_punish_zone_pct_bar_fig,    'condition_punish_zone_pct_bar',   'Condition % punishment zones collapsed bar chart'),
         (condition_bar_fig,      'condition_bar',       'Condition collapsed bar chart'),
         (condition_speed_bar_fig,'condition_speed_bar', 'Condition speed collapsed bar chart'),
+        (condition_sensitivity_fig,     'condition_sensitivity',     'Condition sensitivity over time (mean ± SEM)'),
+        (condition_sensitivity_bar_fig, 'condition_sensitivity_bar', 'Condition sensitivity collapsed bar chart'),
         (condition_bout_count_bar_fig, 'condition_bout_count_bar', 'Condition bout count collapsed bar chart'),
         (condition_bout_avg_speed_bar_fig, 'condition_bout_avg_speed_bar', 'Condition avg speed per bout bar chart'),
         (condition_bout_avg_dist_bar_fig,  'condition_bout_avg_dist_bar',  'Condition avg distance per bout bar chart'),
@@ -4903,7 +18115,11 @@ def main():
         (level_speed_condition_fig,     'level_speed_condition', 'Level-based average speed — by condition'),
         (level_lick_collapsed_fig,      'level_lick',            'Level-based average lick rate — collapsed'),
         (level_lick_condition_fig,      'level_lick_condition',  'Level-based average lick rate — by condition'),
-        (level_dist_collapsed_fig,      'level_dist',            'Level-based distance — collapsed'),
+        (level_sensitivity_fig,         'level_sensitivity',       'Sensitivity by level — individual mice'),
+        (level_immobility_prop_fig,     'level_immobility_prop',   'Immobility proportion by level — individual mice'),
+        (level_rew_zone_immobility_prop_fig, 'level_rew_zone_immobility_prop', 'Proportion of reward zone time immobile by level — individual mice'),
+        (level_rew_zone_immobility_prop_cond_fig, 'level_rew_zone_immobility_prop_cond', 'Proportion of reward zone time immobile by level — condition mean ± SEM'),
+        (level_dist_collapsed_fig,      'level_dist',              'Level-based distance — collapsed'),
         (level_dist_condition_fig,      'level_dist_condition',  'Level-based distance — by condition'),
         (level_dist_condition_excl_last_fig, 'level_dist_condition_excl_last', 'Level-based distance — by condition, last level excluded'),
         (level_bout_collapsed_fig,   'level_bout',           'Level-based bout count — collapsed'),
@@ -4912,6 +18128,31 @@ def main():
         (level_bout_avg_speed_condition_fig,  'level_bout_avg_speed_condition', 'Level-based avg speed per bout — by condition'),
         (level_bout_avg_dist_collapsed_fig,   'level_bout_avg_dist',            'Level-based avg distance per bout — collapsed'),
         (level_bout_avg_dist_condition_fig,   'level_bout_avg_dist_condition',  'Level-based avg distance per bout — by condition'),
+        (last_level_bar_fig,                  'last_level_bar',                 'Final level reached per mouse bar chart (by condition)'),
+        (level_survivor_fig,                  'level_survivor',                 'Level attainment survivor plot (proportion of mice per level, by condition)'),
+        (time_to_level2_fig,                  'time_to_level2',                 'Cumulative time to first level 1→2 transition — bar chart by condition'),
+        (level_progression_indiv_fig,     'level_progression_indiv',     'Level progression — ending level per session, individual mice'),
+        (level_progression_condition_fig, 'level_progression_condition',  'Level progression — ending level per session, condition mean ± SEM'),
+        (level_progression_bar_fig,       'level_progression_bar',        'Level progression — rate of level change (slope) by condition, collapsed bar chart (Mann-Whitney U)'),
+        (epoch_del_speed_per_mouse_fig, 'epoch_delivery_speed_sess_per_mouse', 'Speed epoch aligned to reward delivery — per mouse'),
+        (epoch_del_speed_cond_fig,      'epoch_delivery_speed_sess_condition',  'Speed epoch aligned to reward delivery — by condition'),
+        (epoch_del_cap_per_mouse_fig,   'epoch_delivery_cap_sess_per_mouse',   'Capacitive epoch aligned to reward delivery — per mouse'),
+        (epoch_del_cap_cond_fig,        'epoch_delivery_cap_sess_condition',   'Capacitive epoch aligned to reward delivery — by condition'),
+        (epoch_del_lick_per_mouse_fig,  'epoch_delivery_lick_sess_per_mouse',  'Lick count epoch aligned to reward delivery — per mouse'),
+        (epoch_del_lick_cond_fig,       'epoch_delivery_lick_sess_condition',  'Lick count epoch aligned to reward delivery — by condition'),
+        (epoch_del_lick_diff_065s_fig,  'epoch_delivery_lick_diff_neg065to0s_vs_0to065s', 'Post- vs pre-delivery lick rate difference by condition (\u00b10.65 s windows, Mann-Whitney U)'),
+        (epoch_del_cap_diff_entry_fig,  'epoch_delivery_cap_diff_entry_neg1to0s_vs_0to1s', 'Post- vs pre-delivery capacitive difference by condition (1 s windows, Mann-Whitney U)'),
+        (epoch_del_cap_diff_065s_fig,   'epoch_delivery_cap_diff_neg065to0s_vs_0to065s',   'Post- vs pre-delivery capacitive difference by condition (\u00b10.65 s windows, Mann-Whitney U)'),
+        (condition_shuffle_zscore_fig,     'condition_shuffle_zscore',     'Zone speed Z-score (reward zone) — line plot by condition (circular-shift permutation)'),
+        (condition_shuffle_zscore_bar_fig, 'condition_shuffle_zscore_bar', 'Zone speed Z-score (reward zone) — collapsed bar chart by condition (Mann-Whitney U)'),
+        (level_shuffle_zscore_fig,         'level_shuffle_zscore',         'Zone speed Z-score (reward zone) by level and condition'),
+        (level_shuffle_zscore_line_fig,    'level_shuffle_zscore_line',    'Zone speed Z-score (reward zone) by level — individual mouse lines'),
+        (level_shuffle_zscore_cond_fig,    'level_shuffle_zscore_cond',    'Zone speed Z-score (reward zone) by level — condition mean \u00b1 SEM line plot'),
+        (condition_punish_shuffle_zscore_fig,     'condition_punish_shuffle_zscore',     'Zone speed Z-score (punishment zone) — line plot by condition'),
+        (condition_punish_shuffle_zscore_bar_fig, 'condition_punish_shuffle_zscore_bar', 'Zone speed Z-score (punishment zone) — collapsed bar chart by condition (Mann-Whitney U)'),
+        (level_punish_shuffle_zscore_fig,         'level_punish_shuffle_zscore',         'Zone speed Z-score (punishment zone) by level and condition'),
+        (level_punish_shuffle_zscore_line_fig,    'level_punish_shuffle_zscore_line',    'Zone speed Z-score (punishment zone) by level — individual mouse lines'),
+        (level_punish_shuffle_zscore_cond_fig,    'level_punish_shuffle_zscore_cond',    'Zone speed Z-score (punishment zone) by level — condition mean \u00b1 SEM line plot'),
         (epoch_speed_per_mouse_fig,      'epoch_reward_speed_per_mouse',           'Speed epoch (event) — per mouse'),
         (epoch_speed_cond_fig,           'epoch_reward_speed_condition',           'Speed epoch (event) — by condition'),
         (epoch_cap_per_mouse_fig,        'epoch_reward_cap_per_mouse',             'Capacitive epoch (event) — per mouse'),
@@ -4942,6 +18183,10 @@ def main():
         (epoch_cap_early_ev_cond_fig,        'epoch_reward_cap_early_ev_condition',   'Capacitive epoch ev (early sessions) — by condition'),
         (epoch_cap_late_ev_per_mouse_fig,    'epoch_reward_cap_late_ev_per_mouse',    'Capacitive epoch ev (late sessions) — per mouse'),
         (epoch_cap_late_ev_cond_fig,         'epoch_reward_cap_late_ev_condition',    'Capacitive epoch ev (late sessions) — by condition'),
+        (epoch_speed_early_ev_cond_clean_fig,  'epoch_reward_speed_early_ev_condition_clean', 'Speed epoch ev (early sessions) — by condition, no individual traces'),
+        (epoch_speed_late_ev_cond_clean_fig,   'epoch_reward_speed_late_ev_condition_clean',  'Speed epoch ev (late sessions) — by condition, no individual traces'),
+        (epoch_cap_early_ev_cond_clean_fig,    'epoch_reward_cap_early_ev_condition_clean',   'Capacitive epoch ev (early sessions) — by condition, no individual traces'),
+        (epoch_cap_late_ev_cond_clean_fig,     'epoch_reward_cap_late_ev_condition_clean',    'Capacitive epoch ev (late sessions) — by condition, no individual traces'),
         (punish_speed_per_mouse_fig,          'epoch_punish_speed_per_mouse',          'Speed epoch (punish, event) — per mouse'),
         (punish_speed_cond_fig,               'epoch_punish_speed_condition',          'Speed epoch (punish, event) — by condition'),
         (punish_cap_per_mouse_fig,            'epoch_punish_cap_per_mouse',            'Capacitive epoch (punish, event) — per mouse'),
@@ -4963,6 +18208,44 @@ def main():
         (epoch_punish_speed_sess_sex_fig,           'epoch_punish_speed_sess_sex',           'Speed epoch (session, punish zone) — by sex'),
         (epoch_punish_cap_sess_sex_per_mouse_fig,   'epoch_punish_cap_sess_sex_per_mouse',   'Capacitive epoch (session, punish zone) — per mouse (sex coloring)'),
         (epoch_punish_cap_sess_sex_fig,             'epoch_punish_cap_sess_sex',             'Capacitive epoch (session, punish zone) — by sex'),
+        (epoch_reward_speed_pre_post_fig,            'epoch_reward_speed_pre_post_0to065s_vs_065to13s',            'Pre/post-reward speed bar chart by condition'),
+        (epoch_reward_speed_diff_fig,                'epoch_reward_speed_diff_0to065s_vs_065to13s',                'Pre-minus-post-reward speed difference by condition'),
+        (epoch_reward_cap_pre_post_fig,              'epoch_reward_cap_pre_post_0to065s_vs_065to13s',              'Pre/post-reward capacitive (z-scored) bar chart by condition'),
+        (epoch_reward_cap_diff_fig,                  'epoch_reward_cap_diff_0to065s_vs_065to13s',                  'Pre-minus-post-reward capacitive difference by condition (Mann-Whitney U)'),
+        (epoch_reward_speed_pre_post_entry_fig,      'epoch_reward_speed_pre_post_entry_neg065to0s_vs_0to065s',      'Pre/post-entry reward zone speed bar chart by condition (0.65 s windows)'),
+        (epoch_reward_speed_diff_entry_fig,          'epoch_reward_speed_diff_entry_neg065to0s_vs_0to065s',          'Pre-minus-post-entry reward zone speed difference by condition (0.65 s windows)'),
+        (epoch_reward_speed_pre_post_entry_1s_fig,   'epoch_reward_speed_pre_post_entry_1s_neg1to0s_vs_0to1s',   'Pre/post-entry reward zone speed bar chart by condition (1 s windows)'),
+        (epoch_reward_speed_diff_entry_1s_fig,       'epoch_reward_speed_diff_entry_1s_neg1to0s_vs_0to1s',       'Pre-minus-post-entry reward zone speed difference by condition (1 s windows)'),
+        (epoch_reward_speed_diff_entry_2s_fig,       'epoch_reward_speed_diff_entry_2s_neg2to0s_vs_0to2s',       'Pre-minus-post-entry reward zone speed difference by condition (2 s windows)'),
+        (epoch_reward_lick_count_sess_per_mouse_fig, 'epoch_reward_lick_count_sess_per_mouse', 'Lick count epoch per mouse (reward zone, session-averaged)'),
+        (epoch_reward_lick_count_sess_cond_fig,      'epoch_reward_lick_count_sess_cond',      'Lick count epoch by condition (reward zone, session-averaged)'),
+        (epoch_reward_lick_count_sess_cond_clean_fig,'epoch_reward_lick_count_sess_cond_clean', 'Lick count epoch by condition only — no individual traces (reward zone, session-averaged)'),
+        (epoch_reward_lick_diff_entry_065s_fig,      'epoch_reward_lick_diff_entry_neg065to0s_vs_0to065s', 'Post-minus-pre zone entry lick rate difference by condition (reward zone, ±0.65 s windows, Mann-Whitney U)'),
+        (epoch_punish_lick_count_sess_per_mouse_fig,  'epoch_punish_lick_count_sess_per_mouse',  'Lick rate epoch per mouse (punishment zone, session-averaged)'),
+        (epoch_punish_lick_count_sess_cond_fig,       'epoch_punish_lick_count_sess_cond',       'Lick rate epoch by condition (punishment zone, session-averaged)'),
+        (epoch_punish_lick_count_sess_cond_clean_fig, 'epoch_punish_lick_count_sess_cond_clean', 'Lick rate epoch by condition only — no individual traces (punishment zone, session-averaged)'),
+        (epoch_punish_speed_pre_post_fig,            'epoch_punish_speed_pre_post_0to065s_vs_065to13s',            'Pre/post-cutoff punishment zone speed bar chart by condition'),
+        (epoch_punish_speed_diff_fig,                'epoch_punish_speed_diff_0to065s_vs_065to13s',                'Pre-minus-post-cutoff punishment zone speed difference by condition'),
+        (epoch_punish_speed_pre_post_entry_fig,      'epoch_punish_speed_pre_post_entry_neg1to0s_vs_0to1s',      'Pre/post-entry punishment zone speed bar chart by condition (1 s windows)'),
+        (epoch_punish_speed_diff_entry_fig,          'epoch_punish_speed_diff_entry_neg1to0s_vs_0to1s',          'Pre-minus-post-entry punishment zone speed difference by condition (1 s windows)'),
+        (epoch_punish_speed_diff_entry_2s_fig,        'epoch_punish_speed_diff_entry_neg2to0s_vs_0to2s',          'Pre-minus-post-entry punishment zone speed difference by condition (2 s windows)'),
+        (epoch_punish_cap_pre_post_fig,              'epoch_punish_cap_pre_post_0to065s_vs_065to13s',              'Pre/post-cutoff punishment zone capacitive (z-scored) bar chart by condition (0.65 s windows)'),
+        (epoch_punish_cap_diff_fig,                  'epoch_punish_cap_diff_0to065s_vs_065to13s',                  'Pre-minus-post-cutoff punishment zone capacitive difference by condition (Mann-Whitney U)'),
+        (epoch_punish_cap_pre_post_entry_fig,        'epoch_punish_cap_pre_post_entry_neg1to0s_vs_0to1s',        'Pre/post-entry punishment zone capacitive (z-scored) bar chart by condition (1 s windows)'),
+        (epoch_punish_cap_diff_entry_fig,            'epoch_punish_cap_diff_entry_neg1to0s_vs_0to1s',            'Pre-minus-post-entry punishment zone capacitive difference by condition (Mann-Whitney U)'),
+        (expl_speed_histogram_fig,                   'expl_speed_histogram',                   'Exploratory: speed histogram (all sessions + per-mouse means)'),
+        (expl_speed_distfit_fig,                     'expl_speed_distfit',                     'Exploratory: Average speed distribution fit (Normal, Log-normal, Gamma)'),
+        (expl_speed_boxplot_fig,                     'expl_speed_boxplot',                     'Exploratory: speed box-and-whisker (per-mouse + overall)'),
+        (expl_speed_rm_anova_resid_fig,              'expl_speed_rm_anova_resid',               'Exploratory: RM ANOVA residual diagnostics'),
+        (expl_cap_histogram_fig,                     'expl_cap_histogram',                     'Exploratory: z-scored mean cap value histogram'),
+        (expl_cap_boxplot_fig,                       'expl_cap_boxplot',                       'Exploratory: z-scored mean cap value box-and-whisker'),
+        (expl_cap_rm_anova_resid_fig,                'expl_cap_rm_anova_resid',                'Exploratory: Capacitive RM ANOVA residual diagnostics'),
+        (expl_cap_distfit_fig,                       'expl_cap_distfit',                       'Exploratory: Capacitive sensor value distribution fit (Normal, Log-normal, Gamma)'),
+        (expl_lick_distfit_fig,                      'expl_lick_distfit',                      'Exploratory: Lick count Poisson vs NB distribution fit'),
+        (expl_lick_boxplot_fig,                      'expl_lick_boxplot',                      'Exploratory: raw lick count box-and-whisker'),
+        (expl_lick_rm_anova_resid_fig,               'expl_lick_rm_anova_resid',               'Exploratory: Raw lick count RM ANOVA residual diagnostics'),
+        (expl_lick_rate_distfit_fig,                 'expl_lick_rate_distfit',                 'Exploratory: Average lick rate distribution fit (Normal, Log-normal, Gamma)'),
+        (expl_lick_reward_ratio_distfit_fig,          'expl_lick_reward_ratio_distfit',          'Exploratory: Lick/reward ratio distribution KDE + normality test'),
     ]
 
     for fig, name, title in plot_configs:
@@ -4975,7 +18258,161 @@ def main():
             initialfile=f"mouse_{name}_comparison_{len(file_paths)}mice.svg"
         )
         if save_path:
-            fig.savefig(save_path, bbox_inches='tight', format='svg')
+            fig.savefig(save_path, format='svg')
             print(f"{title} saved to: {save_path}")
+
+    # ── By-level epoch plots (variable number of figures) ─────────────────────
+    # These are built post-hoc from all_results + transitions CSV so they are
+    # handled in a separate loop rather than the fixed plot_configs list above.
+    _condition_color_map_main = {
+        cond: _condition_to_color(cond)
+        for result in all_results
+        for cond in [result.get('starting_condition', '')]
+    }
+
+    def _ask_level_selection(available_levels, title='Select Levels to Plot'):
+        """Show a Tkinter checklist and return the selected level names."""
+        import tkinter as _tk
+        sel_win = _tk.Toplevel(root)
+        sel_win.title(title)
+        sel_win.grab_set()
+        _tk.Label(sel_win, text='Select levels to include (shared y-axis):').pack(pady=4)
+        frame = _tk.Frame(sel_win)
+        frame.pack(fill='both', expand=True, padx=8)
+        vars_ = {}
+        for lv in available_levels:
+            v = _tk.BooleanVar(value=True)
+            _tk.Checkbutton(frame, text=lv, variable=v).pack(anchor='w')
+            vars_[lv] = v
+        result_holder = []
+        def _ok():
+            result_holder.extend([lv for lv, v in vars_.items() if v.get()])
+            sel_win.destroy()
+        _tk.Button(sel_win, text='OK', command=_ok).pack(pady=6)
+        root.wait_window(sel_win)
+        return result_holder if result_holder else available_levels
+
+    if 'epoch_reward_speed_sess_by_level' in selected_plots and transitions_csv_path:
+        # Discover available levels from transitions CSV first
+        _reward_avail_levels = []
+        try:
+            _tdf = pd.read_csv(transitions_csv_path)
+            def _lsk(n): parts = n.split('_'); return int(parts[-1]) if parts[-1].isdigit() else 999
+            _reward_avail_levels = sorted(
+                {str(lv).replace('.json', '') for lv in _tdf['level'].dropna()}, key=_lsk)
+        except Exception:
+            pass
+        _reward_levels_sel = _ask_level_selection(_reward_avail_levels,
+                                                   'Select Levels — Speed Aligned to Reward Zone Entry') if _reward_avail_levels else None
+        # ── Manual axis limits for reward-entry speed epoch panels ─────────
+        # Set to None to use auto-scaling, or provide a tuple e.g. (0, 30)
+        _REWARD_ENTRY_EPOCH_XLIM = None   # e.g. (-5, 5)
+        _REWARD_ENTRY_EPOCH_YLIM = None   # e.g. (0, 30)
+        _by_lvl_reward = _plot_epoch_panels_by_level(
+            all_results, transitions_csv_path,
+            data_files=file_paths,
+            event_type='reward_entry',
+            ylabel='Treadmill Speed (cm/s)',
+            title_prefix='Speed Aligned to Reward Zone Entry',
+            condition_color_map=_condition_color_map_main,
+            reward_delivery_vline=True,
+            levels_to_include=_reward_levels_sel,
+            xlim=_REWARD_ENTRY_EPOCH_XLIM,
+            ylim=_REWARD_ENTRY_EPOCH_YLIM,
+        )
+    else:
+        _by_lvl_reward = []
+
+    if 'epoch_delivery_speed_sess_by_level' in selected_plots and transitions_csv_path:
+        _delivery_avail_levels = []
+        try:
+            _tdf2 = pd.read_csv(transitions_csv_path)
+            def _lsk2(n): parts = n.split('_'); return int(parts[-1]) if parts[-1].isdigit() else 999
+            _delivery_avail_levels = sorted(
+                {str(lv).replace('.json', '') for lv in _tdf2['level'].dropna()}, key=_lsk2)
+        except Exception:
+            pass
+        _delivery_levels_sel = _ask_level_selection(_delivery_avail_levels,
+                                                     'Select Levels — Speed Aligned to Reward Delivery') if _delivery_avail_levels else None
+        # ── Manual axis limits for reward-delivery speed epoch panels ──────
+        # Set to None to use auto-scaling, or provide a tuple e.g. (0, 30)
+        _REWARD_DELIVERY_EPOCH_XLIM = None   # e.g. (-5, 5)
+        _REWARD_DELIVERY_EPOCH_YLIM = None   # e.g. (0, 30)
+        _by_lvl_delivery = _plot_epoch_panels_by_level(
+            all_results, transitions_csv_path,
+            data_files=file_paths,
+            event_type='delivery',
+            ylabel='Treadmill Speed (cm/s)',
+            title_prefix='Speed Aligned to Reward Delivery',
+            condition_color_map=_condition_color_map_main,
+            reward_delivery_vline=True,
+            levels_to_include=_delivery_levels_sel,
+            xlim=_REWARD_DELIVERY_EPOCH_XLIM,
+            ylim=_REWARD_DELIVERY_EPOCH_YLIM,
+        )
+    else:
+        _by_lvl_delivery = []
+
+    # Show all by-level figures together, then save dialogs one by one
+    for _lvl_name, _fig in _by_lvl_reward + _by_lvl_delivery:
+        _fig.canvas.manager.set_window_title(_lvl_name)
+    plt.show()
+
+    for lvl_name, fig in _by_lvl_reward:
+        save_path = filedialog.asksaveasfilename(
+            defaultextension='.svg',
+            filetypes=[('SVG files', '*.svg'), ('All files', '*.*')],
+            title=f'Save speed epoch — {lvl_name} as',
+            initialfile=f'epoch_reward_speed_sess_{lvl_name}_{len(file_paths)}mice.svg',
+        )
+        if save_path:
+            fig.savefig(save_path, format='svg')
+            print(f"Saved: {save_path}")
+
+    for lvl_name, fig in _by_lvl_delivery:
+        save_path = filedialog.asksaveasfilename(
+            defaultextension='.svg',
+            filetypes=[('SVG files', '*.svg'), ('All files', '*.*')],
+            title=f'Save delivery speed epoch — {lvl_name} as',
+            initialfile=f'epoch_delivery_speed_sess_{lvl_name}_{len(file_paths)}mice.svg',
+        )
+        if save_path:
+            fig.savefig(save_path, format='svg')
+            print(f"Saved: {save_path}")
+
+    # ── Optional nparLD Condition x Week ANOVA ────────────────────────────────
+    # Inject ending_level column into each mouse's results_df if level progression
+    # data is available (requires transitions CSV to have been provided).
+    _prog = (_level_stats_data or {}).get('level_progression') if _level_stats_data else None
+    if _prog:
+        for _res in all_results:
+            _aid = _res['mouse']
+            if _aid in _prog:
+                _pts = _prog[_aid]  # [(session_rank, level_num), ...]
+                _n = len(_res['df'])
+                _levels = [float('nan')] * _n
+                for _rank, _lv in _pts:
+                    _idx = _rank - 1  # session_rank is 1-based
+                    if 0 <= _idx < _n:
+                        _levels[_idx] = float(_lv)
+                _res['df']['ending_level'] = _levels
+    try:
+        _nparld_ans = input(
+            '\nRun nparLD Condition x Week nonparametric ANOVA? [y/n]: '
+        ).strip().lower()
+    except EOFError:
+        _nparld_ans = 'n'
+    if _nparld_ans == 'y':
+        _run_nparld_menu(all_results, output_dir=output_dir)
+
+    try:
+        _nparld_wd_ans = input(
+            '\nRun nparLD Condition x Weekday nonparametric ANOVA? [y/n]: '
+        ).strip().lower()
+    except EOFError:
+        _nparld_wd_ans = 'n'
+    if _nparld_wd_ans == 'y':
+        _run_nparld_weekday_menu(all_results, output_dir=output_dir)
+
 if __name__ == "__main__":
     main()

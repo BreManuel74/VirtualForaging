@@ -69,7 +69,7 @@ def find_clean_start(df, gap_threshold: float, min_clean_elapsed: float) -> int:
 
     # -- Fallback: elapsed_time gap -----------------------------------------
     elapsed = pd.to_numeric(df['elapsed_time'], errors='coerce').values
-    for i in range(1, len(elapsed)):
+    for i in range(1, min(SEARCH_LIMIT, len(elapsed))):
         prev = elapsed[i - 1]
         curr = elapsed[i]
         if np.isnan(prev) or np.isnan(curr):

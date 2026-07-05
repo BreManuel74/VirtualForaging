@@ -1,10 +1,80 @@
 #!/usr/bin/env python3
+
 """
-Infinite Corridor using Panda3D that constantly generates and pops new segments as the user moves forward or backward.
-Currently supports a stop/don't stop mouse behavioral task loaded from KaufmanModule48.
+hallway_running_task.py  |  Sipe Lab – Hallway Phase File (Running Task / Recycle)
 Original Author: Jake Gronemeyer
 Modified and upgraded by: Brenna Manuel
 
+OVERVIEW
+--------
+Infinite-corridor Panda3D application for the running (continuous locomotion)
+behavioral task.  Like hallway_recycle.py it uses the fixed-pool recycling
+strategy for efficient memory usage, but the reward logic is adapted for a
+running task: the animal is rewarded for maintaining movement through the
+corridor rather than stopping.  All core subsystems (serial I/O, TCP, FSM,
+logging) are self-contained within this file.
+
+CORRIDOR & TEXTURE SYSTEM
+--------------------------
+  - Fixed-pool recycling  : wall/floor/ceiling segments are repositioned to the
+                            far end of the pool on each segment crossing
+  - Texture scheduling    : walls alternate between go_texture and stop_texture
+                            at intervals sampled from Gaussian distributions;
+                            stop_texture_probability controls the mix
+  - Zone duration         : segments_until_revert drawn per-zone from
+                            rounded_stay_data or rounded_go_data
+  - Probe stimuli         : temporary neutral textures (neutral_stim_1–4)
+                            applied for probe_duration seconds after a zone
+                            exits; probe_probability gates each probe event
+  - Reward summoner       : reward_summoner() task periodically checks running
+                            speed and issues water rewards during active
+                            locomotion (go-texture zones)
+
+KEY CLASSES
+-----------
+  DataGenerator         – Gaussian segment-count sampler from config
+  CapacitiveData /
+  CapacitiveSensorLogger– dataclass + CSV logger for lick/capacitive readings
+  TreadmillData /
+  TreadmillLogger       – dataclass + CSV logger for encoder distance/speed
+  Corridor              – recycle-strategy corridor; drives texture scheduling
+                          (schedule_texture_change, change_wall_textures,
+                          change_wall_textures_temporarily_once,
+                          revert_temporary_textures, revert_wall_textures)
+                          and logs all events to trial_df CSV
+  FogEffect             – scene fog management
+  SerialInputManager    – Teensy + Arduino serial readers on Panda3D tasks
+  SerialOutputManager   – sends integer reward/puff codes to Arduino
+  RewardOrPuff (FSM)    – Puff / Reward / Neutral FSM; broadcasts "REWARD:"
+                          to run_me_gui.py TCP server on each water delivery
+  RewardCalculator      – computes reward pulse duration from batch calibration
+                          CSV via linear equation
+  TCPStreamClient       – connects to run_me_gui.py TCP server; handles
+                          CHANGE_LEVEL hot-reload without process restart;
+                          resamples Gaussian distributions on level change
+  MousePortal           – main ShowBase; owns all subsystems, per-frame
+                          update() task, set_key() handler, reward_summoner()
+                          task, and signal/window-close cleanup
+
+CONFIG KEYS (JSON level file)
+------------------------------
+  segment_length, corridor_width, wall_height, num_segments
+  left_wall_texture, right_wall_texture, ceiling_texture, floor_texture
+  go_texture, stop_texture, neutral_stim_1–4
+  probe_onset, probe_duration, probe_probability
+  stop_texture_probability, stay_zone_reward_probability
+  base_hallway_data, stay_data, go_data  (Gaussian loc/scale dicts)
+  puff_duration, puff_to_neutral_time, reward_threshold
+  reward_file, teensy_port
+
+LAUNCH
+------
+Spawned as a subprocess by run_me_gui.py.  Reads environment variables:
+  LEVEL_CONFIG_PATH – path to the initial JSON level file
+  TCP_SERVER_PORT   – port of the run_me_gui.py TCP server
+  OUTPUT_DIR        – directory for all output CSVs
+  BATCH_ID          – solenoid calibration identifier
+  TEENSY_PORT       – serial port for the Teensy encoder board
 """
 
 import json
@@ -15,30 +85,27 @@ import time
 import serial
 import random
 import subprocess
-import sys
 import socket
 import threading
 import signal
 import atexit
 import numpy as np
+import pandas as pd
+
 from typing import Any, Dict
 from dataclasses import dataclass
+from datetime import datetime
 
 from direct.showbase.ShowBase import ShowBase
 from direct.task import Task
-from panda3d.core import CardMaker, NodePath, Texture, WindowProperties, Fog, ClockObject
+from panda3d.core import CardMaker, NodePath, Texture, WindowProperties, Fog, GraphicsPipe
+from panda3d.core import StreamReader, ConnectionManager, NetAddress
 from direct.showbase import DirectObject
-import pandas as pd
+from direct.fsm.FSM import FSM
+from global_stopwatch import Stopwatch
 
-# Import shared classes from KaufmanModule
-from KaufmanModule48 import (
-    TrialLogging,
-    DataGenerator,
-    TextureSwapper,
-    RewardOrPuff,
-    RewardCalculator,
-    global_stopwatch,
-)
+# Create a global stopwatch instance
+global_stopwatch = Stopwatch()
 
 def load_config(config_file: str) -> Dict[str, Any]:
     """
@@ -57,6 +124,45 @@ def load_config(config_file: str) -> Dict[str, Any]:
     except Exception as e:
         print(f"Error loading config file {config_file}: {e}")
         sys.exit(1)
+
+class DataGenerator:
+    """
+    A class to generate Gaussian data based on configuration parameters.
+    """
+    def __init__(self, config: Dict[str, Any]) -> None:
+        """
+        Initialize the DataGenerator with configuration.
+
+        Args:
+            config (dict): Configuration dictionary containing Gaussian parameters.
+        """
+        self.config = config
+
+    def generate_gaussian_data(self, key: str, size: int = 250, min_value: float = None) -> np.ndarray:
+        """
+        Generate Gaussian data based on the configuration.
+
+        Args:
+            key (str): The key in the configuration for the Gaussian parameters.
+            size (int): The number of samples to generate.
+            min_value (float): Minimum value to accept (optional).
+
+        Returns:
+            np.ndarray: Rounded Gaussian data.
+        """
+        loc = self.config[key]["loc"]
+        scale = self.config[key]["scale"]
+
+        if min_value is not None:
+            data = []
+            while len(data) < size:
+                sample = np.random.normal(loc=loc, scale=scale)
+                if sample >= min_value:
+                    data.append(sample)
+            return np.round(data)
+        else:
+            data = np.random.normal(loc=loc, scale=scale, size=size)
+            return np.round(data)
         
 @dataclass
 class CapacitiveData:
@@ -169,10 +275,6 @@ class Corridor:
         self.rounded_stay_data = rounded_stay_data
         self.rounded_go_data = rounded_go_data
 
-        # Initialize flags to track wall segments
-        self.segment_flag_key = "segment_flag"
-        self.probe_flag_key = "probe_flag"
-
         self.texture_history = self.base.texture_history
         self.texture_time_history = self.base.texture_time_history
         self.segments_until_revert_history = self.base.segments_until_revert_history
@@ -180,14 +282,10 @@ class Corridor:
         self.probe_texture_history = self.base.probe_texture_history
         self.probe_time_history = self.base.probe_time_history
         self.texture_revert_history = self.base.texture_revert_history
-        # Trial logging references (centralized)
-        self.trial_logger = self.base.trial_logger
-        self.trial_df = self.trial_logger.df
-        self.trial_csv_path = self.trial_logger.csv_path
+        self.trial_df = self.base.trial_df
+        self.trial_df.to_csv = self.base.trial_df.to_csv 
+        self.trial_csv_path = self.base.trial_csv_path
 
-        self.zone_gap = 0  # Initialize zone_gap
-        
-        # Cache config values to avoid repeated dictionary lookups
         self.segment_length: float = config["segment_length"]
         self.corridor_width: float = config["corridor_width"]
         self.wall_height: float = config["wall_height"]
@@ -197,7 +295,6 @@ class Corridor:
         self.ceiling_texture: str = config["ceiling_texture"]
         self.floor_texture: str = config["floor_texture"]
         self.go_texture: str = config["go_texture"]
-        self.cave_texture: str = config.get("cave_texture", "assets/black.png")  # Default cave texture
         self.neutral_stim_1 = config["neutral_stim_1"]
         self.neutral_stim_2 = config["neutral_stim_2"]
         self.neutral_stim_3 = config["neutral_stim_3"]
@@ -211,13 +308,6 @@ class Corridor:
 
         # Create a parent node for all corridor segments.
         self.parent: NodePath = base.render.attachNewNode("corridor")
-        self.view_distance: float = self.segment_length * self.num_segments
-        
-        # Pre-compute half view distance to avoid division in update_corridor
-        self.half_view_distance: float = self.view_distance / 2
-        
-        # Cache the sorting key function to avoid recreating lambdas
-        self._get_y_pos = lambda x: x.getY()
         
         # Separate lists for each face.
         self.left_segments: list[NodePath] = []
@@ -225,185 +315,57 @@ class Corridor:
         self.ceiling_segments: list[NodePath] = []
         self.floor_segments: list[NodePath] = []
         
-        self.build_initial_segments()
+        self.build_segments()
         
-        # Initialize texture swapper and schedule first texture change
-        self.texture_swapper = TextureSwapper(self)
         # Add a task to change textures at a random interval.
-        self.texture_swapper.schedule_texture_change()
+        self.schedule_texture_change()
 
         # Initialize attributes
         self.segments_until_revert = 0  # Ensure this attribute exists
         self.texture_change_scheduled = False  # Flag to track texture change scheduling
 
-        self.current_segment_flag = self.get_segment_flag(self.right_segments[0])
-
-        self.reward_zone_active = False
-        self.stay_zone_reward_probability = config.get("stay_zone_reward_probability", 1)  # Default to 100% if not specified
-
-        self.probe_lock = config.get("probe_lock", False)  # Default to False if not specified
-        self.locked_probe = None
-        probe_textures = [
-        self.neutral_stim_1,
-            self.neutral_stim_2,
-            self.neutral_stim_3,
-            self.neutral_stim_4,
-        ]
-        if self.probe_lock == True:
-            self.locked_probe = random.choice(probe_textures)
-
-        self.cave = config.get("cave", False)  # Default to False if not specified
-
-    def build_initial_segments(self) -> None:
+    def build_segments(self) -> None:
         """ 
-        Build the initial corridor segments centered around the camera.
+        Build the initial corridor segments using CardMaker.
         """
-        start_pos = -(self.num_segments * self.segment_length) / 2
-        for i in range(self.num_segments):
-            position = start_pos + (i * self.segment_length)
-            self._create_segment(position)
-    
-    def _create_segment(self, position: float) -> None:
-        """
-        Create a new corridor segment at the specified position.
-        
-        Parameters:
-            position (float): The Y position where to create the segment
-        """
-        # Create left wall
-        cm_left = CardMaker("left_wall")
-        cm_left.setFrame(0, self.segment_length, 0, self.wall_height)
-        left_node = self.parent.attachNewNode(cm_left.generate())
-        left_node.setPos(-self.corridor_width / 2, position, 0)
-        left_node.setHpr(90, 0, 0)
-        self.apply_texture(left_node, self.left_wall_texture)
-        left_node.setPythonTag(self.segment_flag_key, False)
-        left_node.setPythonTag(self.probe_flag_key, False)
-        self.left_segments.append(left_node)
-        
-        # Create right wall
-        cm_right = CardMaker("right_wall")
-        cm_right.setFrame(0, self.segment_length, 0, self.wall_height)
-        right_node = self.parent.attachNewNode(cm_right.generate())
-        right_node.setPos(self.corridor_width / 2, position, 0)
-        right_node.setHpr(-90, 0, 0)
-        self.apply_texture(right_node, self.right_wall_texture)
-        right_node.setPythonTag(self.segment_flag_key, False)
-        right_node.setPythonTag(self.probe_flag_key, False)
-        self.right_segments.append(right_node)
-        
-        # Create ceiling
-        cm_ceiling = CardMaker("ceiling")
-        cm_ceiling.setFrame(-self.corridor_width / 2, self.corridor_width / 2, 0, self.segment_length)
-        ceiling_node = self.parent.attachNewNode(cm_ceiling.generate())
-        ceiling_node.setPos(0, position, self.wall_height)
-        ceiling_node.setHpr(0, 90, 0)
-        self.apply_texture(ceiling_node, self.ceiling_texture)
-        self.ceiling_segments.append(ceiling_node)
-        
-        # Create floor
-        cm_floor = CardMaker("floor")
-        cm_floor.setFrame(-self.corridor_width / 2, self.corridor_width / 2, 0, self.segment_length)
-        floor_node = self.parent.attachNewNode(cm_floor.generate())
-        floor_node.setPos(0, position, 0)
-        floor_node.setHpr(0, -90, 0)
-        self.apply_texture(floor_node, self.floor_texture)
-        self.floor_segments.append(floor_node)
-
-    def _delete_segment(self, index: int) -> None:
-        """
-        Delete a corridor segment at the specified index.
-        
-        Parameters:
-            index (int): Index of the segment to delete
-        """
-        self.left_segments[index].removeNode()
-        self.right_segments[index].removeNode()
-        self.ceiling_segments[index].removeNode()
-        self.floor_segments[index].removeNode()
-        
-        # Remove from lists
-        del self.left_segments[index]
-        del self.right_segments[index]
-        del self.ceiling_segments[index]
-        del self.floor_segments[index]
-
-    def set_segment_flag(self, node: NodePath, value: bool) -> None:
-        node.setPythonTag(self.segment_flag_key, bool(value))
-
-    def set_probe_flag(self, node: NodePath, value: bool) -> None:
-        node.setPythonTag(self.probe_flag_key, bool(value))
-
-    def get_probe_flag(self, node: NodePath) -> bool:
-        return bool(node.getPythonTag(self.probe_flag_key) or False)
-
-    def get_segment_flag(self, node: NodePath) -> bool:
-        return bool(node.getPythonTag(self.segment_flag_key) or False)
-
-    def update_corridor(self, camera_pos: float) -> None:
-        """
-        Update corridor segments based on camera position.
-        Creates new segments ahead and removes segments that are too far behind.
-        
-        Parameters:
-            camera_pos (float): Current camera Y position
-        """
-        # Calculate the range where segments should exist
-        min_y = camera_pos - (self.view_distance / 2)
-        max_y = camera_pos + (self.view_distance / 2)
-        
-        # Create list for storing new segments' positions
-        positions_to_create = []
-        
-        # Add new segments behind if needed
-        if not self.left_segments or self.left_segments[0].getY() > min_y:
-            prev_pos = (self.left_segments[0].getY() - self.segment_length 
-                    if self.left_segments 
-                    else camera_pos)
-            while prev_pos >= min_y:
-                positions_to_create.append(prev_pos)
-                prev_pos -= self.segment_length
-                
-        # Add new segments ahead if needed
-        if not self.left_segments or self.left_segments[-1].getY() < max_y:
-            next_pos = (self.left_segments[-1].getY() + self.segment_length 
-                    if self.left_segments 
-                    else camera_pos)
-            while next_pos <= max_y:
-                positions_to_create.append(next_pos)
-                next_pos += self.segment_length
-        
-        # Create all new segments
-        for pos in sorted(positions_to_create):
-            self._create_segment(pos)
-        
-        # Remove segments that are too far behind
-        while self.left_segments and self.left_segments[0].getY() < min_y:
-            self._delete_segment(0)
+        for i in range(-self.num_segments // 2, self.num_segments // 2):  # Adjust range to include negative indices
+            segment_start: float = i * self.segment_length
             
-        # Remove segments that are too far ahead
-        while self.left_segments and self.left_segments[-1].getY() > max_y:
-            self._delete_segment(-1)
-        
-        # Keep segments sorted by Y position
-        if self.left_segments:
-            segments = list(zip(self.left_segments, self.right_segments, 
-                            self.ceiling_segments, self.floor_segments))
-            segments.sort(key=lambda x: x[0].getY())
+            # ==== Left Wall:
+            cm_left: CardMaker = CardMaker("left_wall")
+            cm_left.setFrame(0, self.segment_length, 0, self.wall_height)
+            left_node: NodePath = self.parent.attachNewNode(cm_left.generate())
+            left_node.setPos(-self.corridor_width / 2, segment_start, 0)
+            left_node.setHpr(90, 0, 0)
+            self.apply_texture(left_node, self.left_wall_texture)
+            self.left_segments.append(left_node)
             
-            self.left_segments = [s[0] for s in segments]
-            self.right_segments = [s[1] for s in segments]
-            self.ceiling_segments = [s[2] for s in segments]
-            self.floor_segments = [s[3] for s in segments]
-        
-        # Ensure we don't exceed the maximum number of segments
-        num_segs = self.num_segments
-        left_segments = self.left_segments
-        while len(left_segments) > num_segs:
-            if abs(left_segments[0].getY() - camera_pos) > abs(left_segments[-1].getY() - camera_pos):
-                self._delete_segment(0)
-            else:
-                self._delete_segment(-1)
+            # ==== Right Wall:
+            cm_right: CardMaker = CardMaker("right_wall")
+            cm_right.setFrame(0, self.segment_length, 0, self.wall_height)
+            right_node: NodePath = self.parent.attachNewNode(cm_right.generate())
+            right_node.setPos(self.corridor_width / 2, segment_start, 0)
+            right_node.setHpr(-90, 0, 0)
+            self.apply_texture(right_node, self.right_wall_texture)
+            self.right_segments.append(right_node)
+            
+            # ==== Ceiling (Top):
+            cm_ceiling: CardMaker = CardMaker("ceiling")
+            cm_ceiling.setFrame(-self.corridor_width / 2, self.corridor_width / 2, 0, self.segment_length)
+            ceiling_node: NodePath = self.parent.attachNewNode(cm_ceiling.generate())
+            ceiling_node.setPos(0, segment_start, self.wall_height)
+            ceiling_node.setHpr(0, 90, 0)
+            self.apply_texture(ceiling_node, self.ceiling_texture)
+            self.ceiling_segments.append(ceiling_node)
+            
+            # ==== Floor (Bottom):
+            cm_floor: CardMaker = CardMaker("floor")
+            cm_floor.setFrame(-self.corridor_width / 2, self.corridor_width / 2, 0, self.segment_length)
+            floor_node: NodePath = self.parent.attachNewNode(cm_floor.generate())
+            floor_node.setPos(0, segment_start, 0)
+            floor_node.setHpr(0, -90, 0)
+            self.apply_texture(floor_node, self.floor_texture)
+            self.floor_segments.append(floor_node)
             
     def apply_texture(self, node: NodePath, texture_path: str) -> None:
         """
@@ -414,217 +376,270 @@ class Corridor:
         """
         texture: Texture = self.base.loader.loadTexture(texture_path)
         node.setTexture(texture)
-            
-    def get_forward_segments_near(self, count: int) -> tuple[list[NodePath], list[NodePath]]:
+        
+    def recycle_segment(self, direction: str) -> None:
         """
-        Get segments starting from the one behind the camera and then
-        moving forward for the specified count.
-        Camera is between segments 12 and 13 in a 24-segment hallway.
+        Recycle the front segments by repositioning them to the end of the corridor.
+        This is called when the player has advanced by one segment length.
+        """
+        if direction == "forward":
+            # Calculate new base Y position from the last segment in the left wall.
+            new_y: float = self.left_segments[-1].getY() + self.segment_length
+
+            # Recycle left wall segment.
+            left_seg: NodePath = self.left_segments.pop(0)
+            left_seg.setY(new_y)
+            self.left_segments.append(left_seg)
+
+            # Recycle right wall segment.
+            right_seg: NodePath = self.right_segments.pop(0)
+            right_seg.setY(new_y)
+            self.right_segments.append(right_seg)
+
+            # Recycle ceiling segment.
+            ceiling_seg: NodePath = self.ceiling_segments.pop(0)
+            ceiling_seg.setY(new_y)
+            self.ceiling_segments.append(ceiling_seg)
+
+            # Recycle floor segment.
+            floor_seg: NodePath = self.floor_segments.pop(0)
+            floor_seg.setY(new_y)
+            self.floor_segments.append(floor_seg)
+
+        elif direction == "backward":
+            # Calculate new base Y position from the first segment in the left wall.
+            new_y: float = self.left_segments[0].getY() - self.segment_length
+
+            # Recycle left wall segment.
+            left_seg: NodePath = self.left_segments.pop(-1)
+            left_seg.setY(new_y)
+            self.left_segments.insert(0, left_seg)
+
+            # Recycle right wall segment.
+            right_seg: NodePath = self.right_segments.pop(-1)
+            right_seg.setY(new_y)
+            self.right_segments.insert(0, right_seg)
+
+            # Recycle ceiling segment.
+            ceiling_seg: NodePath = self.ceiling_segments.pop(-1)
+            ceiling_seg.setY(new_y)
+            self.ceiling_segments.insert(0, ceiling_seg)
+
+            # Recycle floor segment.
+            floor_seg: NodePath = self.floor_segments.pop(-1)
+            floor_seg.setY(new_y)
+            self.floor_segments.insert(0, floor_seg)
+            
+    def change_wall_textures(self, task: Task = None) -> Task:
+        """
+        Change the textures of the left and right walls to a randomly selected texture.
         
         Parameters:
-            count (int): Number of segments to return
+            task (Task): The Panda3D task instance (optional).
             
         Returns:
-            tuple[list[NodePath], list[NodePath]]: Selected left and right wall segments
+            Task: Continuation signal for the task manager.
         """
-        # Sort both left and right segments by Y position (front to back)
-        sorted_left = sorted(self.left_segments, key=lambda x: x.getY())
-        sorted_right = sorted(self.right_segments, key=lambda x: x.getY())
+        # Define a list of possible wall textures with weighted probabilities
+        # Use configurable probability for stop_texture, remainder for go_texture
+        if random.random() < self.stop_texture_probability:
+            selected_texture = self.stop_texture
+        else:
+            selected_texture = self.go_texture
         
-        # Camera is between segments 12 and 13
-        # Start from segment 12 (behind camera) and take 'count' segments forward
-        start_index = 24
-        end_index = min(start_index + count, len(sorted_left))
-        
-        # Get segments from behind camera forward
-        selected_right = sorted_right[start_index:end_index]
-        
-        # Offset left segments forward by 1 (same as get_forward_segments_far)
-        selected_left = sorted_left[start_index-1:end_index-1]
+        # Append to numpy array
+        self.texture_history = np.append(self.texture_history, str(selected_texture))
 
-        return selected_left, selected_right
-    
-    def get_forward_segments_near_cave(self, count: int, start_index: int) -> tuple[list[NodePath], list[NodePath]]:
+        textures = np.full(len(self.trial_df), np.nan, dtype=object)
+        textures[:len(self.texture_history)] = self.texture_history
+        self.trial_df['texture_history'] = textures
+        self.trial_df.to_csv(self.trial_csv_path, index=False)
+        
+        # Apply the selected texture to the walls
+        for left_node in self.left_segments:
+            self.apply_texture(left_node, selected_texture)
+        for right_node in self.right_segments:
+            self.apply_texture(right_node, selected_texture)
+        
+        # Print the elapsed time since the corridor was initialized
+        elapsed_time = global_stopwatch.get_elapsed_time()
+        self.texture_time_history = np.append(self.texture_time_history, round(elapsed_time, 2))
+        times = np.full(len(self.trial_df), np.nan)
+        times[:len(self.texture_time_history)] = self.texture_time_history
+        self.trial_df['texture_change_time'] = times
+        self.trial_df.to_csv(self.trial_csv_path, index=False)
+        
+        # Determine the stay_or_go_data based on the selected texture
+        if selected_texture == self.go_texture:
+            stay_or_go_data = self.rounded_go_data
+        else:
+            stay_or_go_data = self.rounded_stay_data
+        
+        # Set the counter for segments to revert textures using a random value from stay_or_go_data
+        self.segments_until_revert = int(random.choice(stay_or_go_data))
+        self.base.zone_length = self.segments_until_revert
+        
+        # Write the segments_until_revert value to the trial_data file
+        self.segments_until_revert_history = np.append(self.segments_until_revert_history, int(self.segments_until_revert))
+        length = np.full(len(self.trial_df), np.nan, dtype=float)
+        length[:len(self.segments_until_revert_history)] = self.segments_until_revert_history
+        self.trial_df['segments_until_revert'] = length
+        self.trial_df.to_csv(self.trial_csv_path, index=False)
+        
+        # Return Task.done if task is None
+        return Task.done if task is None else task.done
+
+    def change_wall_textures_temporarily_once(self, task: Task = None) -> Task:
         """
-        Get segments starting from the one behind the camera and then
-        moving forward for the specified count.
-        Camera is between segments 12 and 13 in a 24-segment hallway.
+        Temporarily change the wall textures for 1 second and then revert them back.
+        This method ensures the temporary texture change happens only once.
         
         Parameters:
-            count (int): Number of segments to return
-            start_index (int): Starting index for segments
+            task (Task): The Panda3D task instance (optional).
             
         Returns:
-            tuple[list[NodePath], list[NodePath]]: Selected left and right wall segments
+            Task: Continuation signal for the task manager.
         """
-        # Sort both left and right segments by Y position (front to back)
-        sorted_left = sorted(self.left_segments, key=lambda x: x.getY())
-        sorted_right = sorted(self.right_segments, key=lambda x: x.getY())
-        
-        # Camera is between segments 12 and 13
-        # Start from segment 12 (behind camera) and take 'count' segments forward
-        end_index = min(start_index + count, len(sorted_left))
-        
-        # Get segments from behind camera forward
-        selected_right = sorted_right[start_index:end_index]
-        
-        # Offset left segments forward by 1 (same as get_forward_segments_far)
-        selected_left = sorted_left[start_index-1:end_index-1]
+        # Define a list of possible wall textures
+        temporary_wall_textures = [
+            self.neutral_stim_1,   # Texture 1
+            self.neutral_stim_2,   # Texture 2
+            self.neutral_stim_3,   # Texture 3
+            self.neutral_stim_4,   # Texture 4
+        ]
 
-        return selected_left, selected_right
+        # Randomly select a texture
+        selected_temporary_texture = random.choice(temporary_wall_textures)
 
-    def get_forward_segments_far_reward(self, count: int) -> tuple[list[NodePath], list[NodePath]]:
-        """Get the specified number of segments ahead of the camera for reward texture."""
-        # Sort both left and right segments
-        # Use cached sorting key function
-        get_y = self._get_y_pos
-        sorted_left = sorted(self.left_segments, key=get_y)
-        sorted_right = sorted(self.right_segments, key=get_y)
+        self.probe_texture_history = np.append(self.probe_texture_history, str(selected_temporary_texture))
+
+        probe_textures = np.full(len(self.trial_df), np.nan, dtype=object)
+        probe_textures[:len(self.probe_texture_history)] = self.probe_texture_history
+        self.trial_df['probe_texture_history'] = probe_textures
+        self.trial_df.to_csv(self.trial_csv_path, index=False)
+
+        ## Print the elapsed time since the corridor was initialized
+        elapsed_time = global_stopwatch.get_elapsed_time() 
+        self.probe_time_history = np.append(self.probe_time_history, round(elapsed_time, 2))
         
-        # Take the furthest count right segments normally
-        selected_right = sorted_right[-(count+5):-5]
+        probe_times = np.full(len(self.trial_df), np.nan)
+        probe_times[:len(self.probe_time_history)] = self.probe_time_history
+        self.trial_df['probe_time'] = probe_times
+        self.trial_df.to_csv(self.trial_csv_path, index=False)
+
+        # Apply the selected texture to the walls
+        for left_node in self.left_segments:
+            self.apply_texture(left_node, selected_temporary_texture)
+        for right_node in self.right_segments:
+            self.apply_texture(right_node, selected_temporary_texture)
         
-        # Take left segments one position closer
-        selected_left = sorted_left[-(count+6):-6]
+        # Schedule a task to revert the textures back after 1 second
+        self.base.doMethodLaterStopwatch(self.probe_duration, self.revert_temporary_textures, "RevertWallTextures")
         
-        return selected_left, selected_right
+        # Do not reset the texture_change_scheduled flag here to prevent repeated scheduling
+        return Task.done if task is None else task.done
     
-    def get_forward_segments_far_reward_cave(self, count: int) -> tuple[list[NodePath], list[NodePath]]:
-        """Get the specified number of segments ahead of the camera for reward cave texture."""
-        # Sort both left and right segments
-        # Use cached sorting key function
-        get_y = self._get_y_pos
-        sorted_left = sorted(self.left_segments, key=get_y)
-        sorted_right = sorted(self.right_segments, key=get_y)
+    def revert_temporary_textures(self, task: Task = None) -> Task:
+        """
+        Revert the temporary textures of the left and right walls back to their original textures.
         
-        # Take the furthest count right segments normally
-        selected_right = sorted_right[-(count+1):-1]
+        Parameters:
+            task (Task): The Panda3D task instance (optional).
+            
+        Returns:
+            Task: Continuation signal for the task manager.
+        """
+        # Reapply the original textures to the walls
+        for left_node in self.left_segments:
+            self.apply_texture(left_node, self.left_wall_texture)
+        for right_node in self.right_segments:
+            self.apply_texture(right_node, self.right_wall_texture)
         
-        # Take left segments one position closer
-        selected_left = sorted_left[-(count+2):-2]
-        
-        return selected_left, selected_right
-    
-    def get_forward_segments_far_reward_floor_and_ceiling(self, count: int) -> tuple[list[NodePath], list[NodePath]]:
-        """Get the specified number of floor and ceiling segments ahead of the camera."""
-        # Sort both floor and ceiling segments
-        # Use cached sorting key function
-        get_y = self._get_y_pos
-        sorted_floor = sorted(self.floor_segments, key=get_y)
-        sorted_ceiling = sorted(self.ceiling_segments, key=get_y)
-        
-        # Take the furthest count floor and ceiling segments normally
-        selected_floor = sorted_floor[-(count+1):-1]
-        selected_ceiling = sorted_ceiling[-(count+1):-1]
-        
-        return selected_floor, selected_ceiling  
+        # Return Task.done if task is None
+        return Task.done if task is None else task.done
 
-    def get_forward_segments_far(self, count: int) -> tuple[list[NodePath], list[NodePath]]:
-        """Get the specified number of segments ahead of the camera."""
-        # Sort both left and right segments
-        # Use cached sorting key function
-        get_y = self._get_y_pos
-        sorted_left = sorted(self.left_segments, key=get_y)
-        sorted_right = sorted(self.right_segments, key=get_y)
+    def revert_wall_textures(self, task: Task = None) -> Task:
+        """
+        Revert the textures of the left and right walls to their original textures.
         
-        # Take count segments, positioned 12 segments back from the end
-        selected_right = sorted_right[-(count+16):-16]
-        
-        # Take left segments one position closer
-        selected_left = sorted_left[-(count+17):-17]
-        
-        # # Debug print
-        # print("\nForward Segments Y positions:")
-        # print("Left wall segments:", [round(seg.getY(), 2) for seg in selected_left])
-        # print("Right wall segments:", [round(seg.getY(), 2) for seg in selected_right])
-        
-        return selected_left, selected_right
-    
-    def get_forward_segments_far_probe(self, count: int) -> tuple[list[NodePath], list[NodePath]]:
-        """Get the specified number of segments ahead of the camera for cave texture."""
-        # Sort both left and right segments
-        # Use cached sorting key function
-        get_y = self._get_y_pos
-        sorted_left = sorted(self.left_segments, key=get_y)
-        sorted_right = sorted(self.right_segments, key=get_y)
-        
-        # Take the furthest count right segments normally
-        selected_right = sorted_right[-(count):]
-        
-        # Take left segments one position closer
-        selected_left = sorted_left[-(count):-1]  # Skip last segment
-        
-        return selected_left, selected_right
-    
-    def get_forward_segments_far_probe_revert(self, count: int) -> tuple[list[NodePath], list[NodePath]]:
-        """Get the specified number of segments ahead of the camera for probe revert."""
-        # Sort both left and right segments
-        # Use cached sorting key function
-        get_y = self._get_y_pos
-        sorted_left = sorted(self.left_segments, key=get_y)
-        sorted_right = sorted(self.right_segments, key=get_y)
-        
-        # Take the furthest count right segments normally
-        selected_right = sorted_right[-count:]
-        
-        # Take left segments one position closer
-        selected_left = sorted_left[-(count+1):]  # Skip last segment
-        
-        return selected_left, selected_right
-    
-    def get_forward_segments_far_floor_and_ceiling(self, count: int) -> tuple[list[NodePath], list[NodePath]]:
-        """Get the specified number of floor and ceiling segments ahead of the camera."""
-        # Sort both floor and ceiling segments
-        # Use cached sorting key function
-        get_y = self._get_y_pos
-        sorted_floor = sorted(self.floor_segments, key=get_y)
-        sorted_ceiling = sorted(self.ceiling_segments, key=get_y)
-        
-        # Take the furthest count floor and ceiling segments normally
-        selected_floor = sorted_floor[-(count):]
-        selected_ceiling = sorted_ceiling[-(count):]
-        
-        return selected_floor, selected_ceiling
-    
-    def get_puff_zone_cave_ceiling_floor(self, count: int, start_index: int) -> tuple[list[NodePath], list[NodePath]]:
-        """Get the specified number of floor and ceiling segments ahead of the camera."""
-        # Sort both floor and ceiling segments
-        # Use cached sorting key function
-        get_y = self._get_y_pos
-        sorted_floor = sorted(self.floor_segments, key=get_y)
-        sorted_ceiling = sorted(self.ceiling_segments, key=get_y)
+        Parameters:
+            task (Task): The Panda3D task instance (optional).
+            
+        Returns:
+            Task: Continuation signal for the task manager.
+        """
+        elapsed_time = global_stopwatch.get_elapsed_time()
+        self.texture_revert_history = np.append(self.texture_revert_history, round(elapsed_time, 2))
 
-        end_index = min(start_index + count, len(sorted_floor))
+        revert_times = np.full(len(self.trial_df), np.nan)
+        revert_times[:len(self.texture_revert_history)] = self.texture_revert_history
+        self.trial_df['texture_revert'] = revert_times
+        self.trial_df.to_csv(self.trial_csv_path, index=False)
+
+        # Reapply the original textures to the walls
+        for left_node in self.left_segments:
+            self.apply_texture(left_node, self.left_wall_texture)
+        for right_node in self.right_segments:
+            self.apply_texture(right_node, self.right_wall_texture)
+
+        # Conditional to make probe optional
+        if self.probe:
+            # Configurable chance of calling the probe function
+            if random.random() < self.probe_probability:
+                # Schedule a task to change the wall textures temporarily after reverting
+                self.base.doMethodLaterStopwatch(self.probe_onset, self.change_wall_textures_temporarily_once, "ChangeWallTexturesTemporarilyOnce")
         
-        # Take the furthest count floor and ceiling segments normally
-        selected_floor = sorted_floor[start_index:end_index]
-        selected_ceiling = sorted_ceiling[start_index:end_index]
+        # Return Task.done if task is None
+        return Task.done if task is None else task.done
+
+    def schedule_texture_change(self) -> None:
+        """
+        Schedule the next texture change after a random number of wall segments are recycled.
+        """
+        # Ensure segments_until_revert is initialized
+        if not hasattr(self, 'segments_until_revert'):
+            self.segments_until_revert = 0
+
+        # Randomly determine the number of segments after which to change the texture
+        segments_to_wait = random.choice(self.rounded_base_hallway_data)
+
+        # Append to numpy array
+        self.segments_to_wait_history = np.append(self.segments_to_wait_history, int(segments_to_wait))
+
+        segs = np.full(len(self.trial_df), np.nan)
+        segs[:len(self.segments_to_wait_history)] = self.segments_to_wait_history
+        self.trial_df['segments_to_wait'] = segs
+        self.trial_df.to_csv(self.trial_csv_path, index=False)
         
-        return selected_floor, selected_ceiling
-    
-    def get_middle_segments(self, count: int) -> tuple[list[NodePath], list[NodePath]]:
-        """Get segments centered around the player, using left wall Y positions as reference."""
-        # Sort both left and right segments
-        # Use cached sorting key function
-        get_y = self._get_y_pos
-        sorted_left = sorted(self.left_segments, key=get_y)
-        sorted_right = sorted(self.right_segments, key=get_y)
+        self.segments_until_texture_change = segments_to_wait + self.segments_until_revert
 
-        # Calculate middle index (use bit shift for faster division by 2)
-        middle_left_idx = len(sorted_left) >> 1
-        middle_right_idx = len(sorted_right) >> 1
+    def update_texture_change(self) -> None:
+        """
+        Check if the required number of segments has been recycled and change the texture if needed.
+        """
+        if self.segments_until_texture_change <= 0:
+            # Trigger the texture change
+            self.change_wall_textures(None)
+            
+            # Check if the new texture is the go texture
+            new_front_texture = self.left_segments[0].getTexture().getFilename()
+            if new_front_texture == self.go_texture:
+                # Update the enter_go_time in the MousePortal instance
+                self.base.enter_go_time = global_stopwatch.get_elapsed_time()
+                #print(f"enter_go_time updated to {self.base.enter_go_time:.2f} seconds")
+            elif new_front_texture == self.stop_texture:
+                # Update the enter_stay_time in the MousePortal instance
+                self.base.enter_stay_time = global_stopwatch.get_elapsed_time()
+                #print(f"enter_stay_time updated to {self.base.enter_stay_time:.2f} seconds")
 
-        # Calculate start and end indices to get segments centered around the middle
-        half_count = count >> 1  # count // 2
-        start_left = max(0, middle_left_idx - half_count)
-        end_left = start_left + count
-        start_right = max(0, middle_right_idx - half_count)
-        end_right = start_right + count
+            # Schedule the next texture change
+            self.schedule_texture_change()
 
-        selected_left = sorted_left[start_left:end_left]
-        selected_right = sorted_right[start_right:end_right]
-
-        return selected_left, selected_right  
+        # Check if textures need to be reverted
+        if hasattr(self, 'segments_until_revert') and self.segments_until_revert > 0:
+            self.segments_until_revert -= 1
+            if self.segments_until_revert == 0:
+                self.revert_wall_textures(None)  # Revert textures
 
 class FogEffect:
     """
@@ -651,7 +666,7 @@ class FogEffect:
         self.fog.setExpDensity(density)
         
         # Attach the fog to the root node to affect the entire scene.
-        self.base.render.setFog(self.fog)
+        render.setFog(self.fog)
 
 class SerialInputManager(DirectObject.DirectObject):
     """
@@ -872,6 +887,194 @@ class SerialOutputManager(DirectObject.DirectObject):
             self.serial.close()
             #print("Arduino serial port closed.")
 
+class RewardOrPuff(FSM):
+    """
+    FSM to manage the reward or puff state.
+    """
+    def __init__(self, base: ShowBase, config: Dict[str, Any]) -> None:
+        """
+        Initialize the FSM with the base and configuration.
+
+        Parameters:
+            base (ShowBase): The Panda3D base instance.
+            config (dict): Configuration parameters.
+        """
+        FSM.__init__(self, "RewardOrPuff")
+        self.base = base
+        self.config = config
+        self.puff_duration = config["puff_duration"]
+        self.puff_to_neutral_time = config["puff_to_neutral_time"]
+        self.reward_duration = self.base.reward_duration
+        self.puff_history = self.base.puff_history
+        self.reward_history = self.base.reward_history
+        self.trial_df = self.base.trial_df
+        self.trial_df.to_csv = self.base.trial_df.to_csv 
+        self.trial_csv_path = self.base.trial_csv_path
+        self.accept('puff-event', self.request, ['Puff'])
+        self.accept('reward-event', self.request, ['Reward'])
+        self.accept('neutral-event', self.request, ['Neutral'])
+
+    def enterPuff(self):
+        """
+        Enter the Puff state.
+        """
+        # Combine 1 and puff_duration into a single integer
+        signal = int(f"1{self.puff_duration}")
+        self.base.serial_output.send_signal(signal)
+
+        self.puff_history = np.append(self.puff_history, round(global_stopwatch.get_elapsed_time(), 2))
+        puff_times = np.full(len(self.trial_df), np.nan)
+        puff_times[:len(self.puff_history)] = self.puff_history
+        self.trial_df['puff_event'] = puff_times
+        self.trial_df.to_csv(self.trial_csv_path, index=False)
+
+        self.base.doMethodLaterStopwatch(self.puff_to_neutral_time, self._transitionToNeutral, 'return-to-neutral')
+
+    def exitPuff(self):
+        """
+        Exit the Puff state.
+        """
+        #print("Exiting Puff state")
+        
+    def enterReward(self):
+        """
+        Enter the Reward state.
+        
+        """
+        signal = int(f"2{self.reward_duration}")
+        #print(signal)
+        self.base.serial_output.send_signal(signal)
+
+        self.reward_history = np.append(self.reward_history, round(global_stopwatch.get_elapsed_time(), 2))
+        reward_times = np.full(len(self.trial_df), np.nan)
+        reward_times[:len(self.reward_history)] = self.reward_history
+        self.trial_df['reward_event'] = reward_times
+        self.trial_df.to_csv(self.trial_csv_path, index=False)
+
+        # Send reward message through TCP client if connected
+        if hasattr(self.base, 'tcp_client') and self.base.tcp_client:
+            self.base.tcp_client.send_data("REWARD:")
+
+        self.base.doMethodLaterStopwatch(1.0, self._transitionToNeutral, 'return-to-neutral')
+
+    def exitReward(self):
+        """
+        Exit the Reward state."""
+        #print("Exiting Reward state.")
+
+    def enterNeutral(self):
+        """
+        Enter the Neutral state."""
+        #print("Entering Neutral state: waiting...")
+
+    def exitNeutral(self):
+        """
+        Exit the Neutral state."""
+        #print("Exiting Neutral state.")
+
+    def _transitionToNeutral(self, task):
+        """
+        Transition to the Neutral state.
+        - For the Reward state: Only transition if the wall texture is the original wall texture.
+        - For the Puff state: Transition directly without checking the wall texture.
+        """
+        # Get the current texture of the left wall
+        current_texture = self.base.corridor.left_segments[0].getTexture().getFilename()
+
+        if self.state == 'Reward':
+            self.request('Neutral')
+        elif self.state == 'Puff':
+            self.request('Neutral')
+
+        return Task.done
+
+class RewardCalculator:
+    """
+    A new class that initializes with ShowBase and a configuration file.
+    """
+    def __init__(self, base: ShowBase, config: Dict[str, Any]) -> None:
+        """
+        Initialize the class with ShowBase and load the configuration.
+
+        Parameters:
+            base (ShowBase): The Panda3D base instance.
+            config (Dict[str, Any]): Configuration dictionary.
+        """
+        self.base = base
+        self.config = config
+        self.reward_file = config["reward_file"]
+
+    def read_csv_to_dataframe(self) -> pd.DataFrame:
+        """
+        Read the reward CSV file (specified by the reward_file attribute) and load its contents into a pandas DataFrame.
+
+        Returns:
+            pd.DataFrame: The loaded DataFrame.
+        """
+        try:
+            df = pd.read_csv(self.reward_file)  # Use the reward_file attribute as the path
+            return df
+        except Exception as e:
+            print(f"Error reading CSV file {self.reward_file}: {e}")
+            return pd.DataFrame()  # Return an empty DataFrame on failure
+
+    def extract_linear_data(self, batch_id: int) -> pd.DataFrame:
+        """
+        Extract the y = mx + b data from the DataFrame for a specific batch_id.
+
+        Assumes the CSV file has columns: 'dt', 'w', 'dw', 'b0', 'b1', 'batch_id',
+        where 'b0' is the slope (m) and 'b1' is the y-intercept (b).
+
+        Parameters:
+            batch_id (int): The batch ID to filter the data.
+
+        Returns:
+            pd.DataFrame: A DataFrame with renamed columns filtered by batch_id.
+        """
+        try:
+            df = self.read_csv_to_dataframe()
+            if {'dt', 'w', 'dw', 'b0', 'b1', 'batch_id'}.issubset(df.columns):
+                # Filter the DataFrame by batch_id
+                df = df[df['batch_id'] == batch_id]
+
+                # Rename the columns
+                df = df.rename(columns={
+                    'dt': 'time',
+                    'w': 'water_volumes',
+                    'dw': 'delta_water_volumes',
+                    'b0': 'slope',
+                    'b1': 'intercept'
+                })
+                return df[['time', 'water_volumes', 'delta_water_volumes', 'slope', 'intercept']]
+            else:
+                print("CSV file does not contain the required columns: 'dt', 'w', 'dw', 'b0', 'b1', 'batch_id'.")
+                return pd.DataFrame()  # Return an empty DataFrame if columns are missing
+        except Exception as e:
+            print(f"Error extracting linear data: {e}")
+            return pd.DataFrame()  # Return an empty DataFrame on failure
+        
+    def calculate_x(self, y: float, slope: float, intercept: float) -> float:
+        """
+        Calculate the x value for a given y using the linear equation y = mx + b.
+
+        Parameters:
+            y (float): The y value (reward amount) to plug into the equation.
+            slope (float): The slope (m) of the line.
+            intercept (float): The y-intercept (b) of the line.
+
+        Returns:
+            float: The calculated x value.
+        """
+        try:
+            if slope == 0:
+                raise ValueError("Slope cannot be zero for a valid linear equation.")
+            x = (y - intercept) / slope
+            #print(x)
+            return x
+        except Exception as e:
+            print(f"Error calculating x for y={y}, slope={slope}, intercept={intercept}: {e}")
+            return None
+
 class TCPStreamClient(DirectObject.DirectObject):
     """
     TCP client to receive data from run_me.py TCP server.
@@ -1012,8 +1215,11 @@ class TCPStreamClient(DirectObject.DirectObject):
         try:
             print(f"Changing level to: {level_file}")
             
+            # Get levels folder from environment variable, default to "Levels"
+            levels_folder = os.environ.get("LEVELS_FOLDER", "Levels")
+            
             # Construct full path to level file
-            level_path = os.path.join("Levels", level_file)
+            level_path = os.path.join(levels_folder, level_file)
             
             if not os.path.exists(level_path):
                 print(f"Level file not found: {level_path}")
@@ -1284,7 +1490,9 @@ class MousePortal(ShowBase):
             min_value=self.cfg["go_zone_min_value"]
         )
 
-        # Initialize histories
+        self.trial_csv_path = os.path.join(os.environ.get("OUTPUT_DIR"), f"{int(time.time())}trial_log.csv")
+
+        max_trials = 10000
         self.segments_to_wait_history = np.array([], dtype=int)
         self.texture_history = np.array([], dtype=str)
         self.texture_time_history = np.array([], dtype=float)
@@ -1295,17 +1503,39 @@ class MousePortal(ShowBase):
         self.puff_history = np.array([], dtype=float)
         self.reward_history = np.array([], dtype=float)
 
-        # Set up centralized TrialLogging
-        output_dir = os.environ.get("OUTPUT_DIR")
-        self.trial_logger = TrialLogging(output_dir)
-        self.trial_logger.set_initial_distributions(
-            self.rounded_base_hallway_data,
-            self.rounded_stay_data,
-            self.rounded_go_data,
-        )
-        # Back-compat attributes
-        self.trial_df = self.trial_logger.df
-        self.trial_csv_path = self.trial_logger.csv_path
+        trial_df = pd.DataFrame({
+            'rounded_base_hallway_data': np.full(max_trials, np.nan),
+            'rounded_stay_data': np.full(max_trials, np.nan),
+            'rounded_go_data': np.full(max_trials, np.nan),
+            'segments_to_wait': np.full(max_trials, np.nan),
+            'texture_history': np.full(max_trials, np.nan, dtype=object),
+            'texture_change_time': np.full(max_trials, np.nan),
+            'segments_until_revert': np.full(max_trials, np.nan),
+            'texture_revert': np.full(max_trials, np.nan),
+            'probe_texture_history': np.full(max_trials, np.nan, dtype=object),
+            'probe_time': np.full(max_trials, np.nan),
+            'puff_event': np.full(max_trials, np.nan, dtype=object),
+            'reward_event': np.full(max_trials, np.nan, dtype=object),
+        })
+        trial_df.to_csv(self.trial_csv_path, index=False)
+        self.trial_df = trial_df
+
+        # Save initial distributions to the dataframe
+        # Extend arrays to match dataframe length if needed
+        base_data = np.full(len(self.trial_df), np.nan)
+        base_data[:len(self.rounded_base_hallway_data)] = self.rounded_base_hallway_data
+        self.trial_df['rounded_base_hallway_data'] = base_data
+        
+        stay_data = np.full(len(self.trial_df), np.nan)
+        stay_data[:len(self.rounded_stay_data)] = self.rounded_stay_data
+        self.trial_df['rounded_stay_data'] = stay_data
+        
+        go_data = np.full(len(self.trial_df), np.nan)
+        go_data[:len(self.rounded_go_data)] = self.rounded_go_data
+        self.trial_df['rounded_go_data'] = go_data
+        
+        # Save the updated dataframe with initial distributions
+        self.trial_df.to_csv(self.trial_csv_path, index=False)
 
         # Retrieve the reward_amount and batch_id from the configuration
         reward_amount = self.cfg.get("reward_amount", 0.0)
@@ -1356,34 +1586,37 @@ class MousePortal(ShowBase):
         wp.setUndecorated(True)
         self.win.requestProperties(wp)
         
-        # Cache cfg for faster access throughout initialization
-        cfg = self.cfg
-        
         # Initialize camera parameters
         self.camera_position: float = 0.0
         self.camera_velocity: float = 0.0
-        self.speed_scaling: float = cfg.get("speed_scaling", 5.0)
-        self.camera_height: float = cfg.get("camera_height", 2.0)  
+        self.speed_scaling: float = self.cfg.get("speed_scaling", 5.0)
+        self.camera_height: float = self.cfg.get("camera_height", 2.0)  
         self.camera.setPos(0, self.camera_position, self.camera_height)
         self.camera.setHpr(0, 0, 0)
         
+        # Set up key mapping for keyboard input
+        self.key_map: Dict[str, bool] = {"forward": False, "backward": False}
+        self.accept("arrow_up", self.set_key, ["forward", True])
+        self.accept("arrow_up-up", self.set_key, ["forward", False])
+        self.accept("arrow_down", self.set_key, ["backward", True])
+        self.accept("arrow_down-up", self.set_key, ["backward", False])
         self.accept('escape', self.userExit)
 
         # Set up shared Arduino serial connection
         self.arduino_serial = serial.Serial(
-            cfg["arduino_port"],
-            cfg["arduino_baudrate"],
+            self.cfg["arduino_port"],
+            self.cfg["arduino_baudrate"],
             timeout=1
         )
 
         # Set up treadmill input
         self.treadmill = SerialInputManager(
             os.environ.get("TEENSY_PORT"),
-            teensy_baudrate=cfg["teensy_baudrate"],
+            teensy_baudrate=self.cfg["teensy_baudrate"],
             arduino_serial=self.arduino_serial,  # Pass the shared instance
             messenger=self.messenger,
-            test_mode=cfg.get("test_mode", False),
-            test_csv_path= r'Kaufman_Project/BM15/Session 28/beh/1754413096treadmill.csv'
+            test_mode=self.cfg.get("test_mode", False),
+            test_csv_path= r'C:\Users\Sipe_Lab\Desktop\MousePortal\1756831893treadmill.csv'
         )
 
         # Set up serial output to Arduino
@@ -1394,19 +1627,19 @@ class MousePortal(ShowBase):
         # Create corridor geometry and pass Gaussian data
         self.corridor: Corridor = Corridor(
             base=self,
-            config=cfg,
+            config=self.cfg,
             rounded_base_hallway_data=self.rounded_base_hallway_data,
             rounded_stay_data=self.rounded_stay_data,
             rounded_go_data=self.rounded_go_data
         )
-        self.segment_length: float = cfg["segment_length"]
+        self.segment_length: float = self.cfg["segment_length"]
         
         # Initialize the RewardOrPuff FSM
         self.fsm = RewardOrPuff(self, self.cfg)
         self.zone_length = 0
 
         # Variable to track movement since last recycling
-        self.distance_since_last_segment: float = 0.0
+        self.distance_since_recycle: float = 0.0
         
         # Movement speed (units per second)
         self.movement_speed: float = 10.0
@@ -1420,11 +1653,11 @@ class MousePortal(ShowBase):
         # Add the update task
         self.taskMgr.add(self.update, "updateTask")
 
-        self.fog_color = tuple(cfg["fog_color"])
+        self.fog_color = tuple(self.cfg["fog_color"])
         # Initialize fog effect
         self.fog_effect = FogEffect(
             self,
-            density=cfg["fog_density"],
+            density=self.cfg["fog_density"],
             fog_color=self.fog_color)
         
         # Set up task chain for serial input
@@ -1463,27 +1696,9 @@ class MousePortal(ShowBase):
 
         # Initialize TCP client for dynamic level changing
         self.tcp_client = TCPStreamClient(self)
+        self.time_spent_at_zero_speed = self.cfg["time_spent_at_zero_speed"]
 
-        # Puff and reward 0-speed times (cached for performance)
-        self.time_spent_at_zero_speed = cfg["time_spent_at_zero_speed"]
-        self.puff_zero_speed_time = cfg["puff_zero_speed_time"]
-        
-        # Cache timing and scaling values for update loop to avoid repeated config lookups
-        self.treadmill_speed_scaling = cfg["treadmill_speed_scaling"]
-        self.reward_time = cfg["reward_time"]
-        self.puff_time = cfg["puff_time"]
-        
-        # Initialize variables for tracking current texture and flag
-        self.current_texture = self.corridor.right_segments[0].getTexture().getFilename()
-        self.current_segment_flag = self.corridor.get_segment_flag(self.corridor.right_segments[0])
-        self.active_stay_zone = False
-        self.active_puff_zone = False
-        self.fsm.current_state = 'Neutral'  # Start in neutral state
-        self.exit = True
-        # Track last frame's current texture to detect re-entries reliably
-        self.prev_current_texture = self.current_texture
-        # Track whether we just re-entered a special zone (so exit shouldn't schedule probe again)
-        self.reentry_pending = False
+        self.reward_requested = False
 
     def _signal_handler(self, signum, frame):
         """Handle system signals for graceful shutdown."""
@@ -1503,6 +1718,16 @@ class MousePortal(ShowBase):
             return Task.cont
         base.taskMgr.add(wrapper, name)
 
+    def set_key(self, key: str, value: bool) -> None:
+        """
+        Update the key state for the given key.
+        
+        Parameters:
+            key (str): The key identifier.
+            value (bool): True if pressed, False if released.
+        """
+        self.key_map[key] = value
+        
     def update(self, task: Task) -> Task:
         """
         Update the camera's position based on user input and recycle corridor segments
@@ -1514,164 +1739,76 @@ class MousePortal(ShowBase):
         Returns:
             Task: Continuation signal for the task manager.
         """
-        dt: float = ClockObject.getGlobalClock().getDt()
+        dt: float = globalClock.getDt()
         move_distance: float = 0.0
         
-        # Cache frequently accessed values to reduce attribute lookups
-        corridor = self.corridor
-        segment_length = self.segment_length
-        treadmill_speed = self.treadmill.data.speed
+        # Update camera velocity based on key input
+        if self.key_map["forward"]:
+            self.camera_velocity = self.speed_scaling
+        elif self.key_map["backward"]:
+            self.camera_velocity = -self.speed_scaling
+        else:
+            self.camera_velocity = 0.0
         
-        self.camera_velocity = (int(treadmill_speed) / self.treadmill_speed_scaling)
+        self.camera_velocity = (int(self.treadmill.data.speed) / self.cfg["treadmill_speed_scaling"])
 
         # Update camera position (movement along the Y axis)
         self.camera_position += self.camera_velocity * dt
         move_distance = self.camera_velocity * dt
         self.camera.setPos(0, self.camera_position, self.camera_height)
-
-        # Update corridor
-        corridor.update_corridor(self.camera_position)
-
-        # Cache texture constants for fast comparison
-        stop_texture = corridor.stop_texture
-        go_texture = corridor.go_texture
-        right_wall_texture = corridor.right_wall_texture
-        cave_texture = corridor.cave_texture
         
-        # Get current segments at camera position using get_middle_segments
-        middle_left, middle_right = corridor.get_middle_segments(4)
-        if middle_right:  # Using right wall instead of left
-            self.current_texture = middle_right[2].getTexture().getFilename()
-            self.former_texture = middle_right[1].getTexture().getFilename()
-            self.current_segment_flag = corridor.get_segment_flag(middle_right[2])
-
-            if self.current_texture == stop_texture and self.current_segment_flag == True:
-                self.enter_stay_time = global_stopwatch.get_elapsed_time()
-                self.texture_time_history = np.append(self.texture_time_history, round(self.enter_stay_time, 2))
-                self.trial_logger.log_stay_texture_change_time(round(self.enter_stay_time, 2))
-                self.active_stay_zone = True
-                self.exit = True
-                #print(f"Entered STAY zone at time: {self.enter_stay_time}")
-                for node in corridor.right_segments:
-                    corridor.set_segment_flag(node, False)
-
-            # If we re-enter a special zone (GO or STOP) from neutral, allow a new exit log later
-            if ((self.prev_current_texture == right_wall_texture or self.prev_current_texture == cave_texture)
-                and (self.current_texture == go_texture or self.current_texture == stop_texture)
-                and self.exit == False):
-                self.exit = True
-                self.reentry_pending = True
-                # Re-log this re-entry time to GO/STAY-specific change column
-                elapsed_time = global_stopwatch.get_elapsed_time()
-                self.texture_time_history = np.append(self.texture_time_history, round(elapsed_time, 2))
-                if self.current_texture == go_texture:
-                    self.trial_logger.log_go_texture_change_time(round(elapsed_time, 2))
-                elif self.current_texture == stop_texture:
-                    self.trial_logger.log_stay_texture_change_time(round(elapsed_time, 2))
-                
-
-            if ((self.prev_current_texture == go_texture or self.prev_current_texture == stop_texture)
-                and (self.current_texture == right_wall_texture or self.current_texture == cave_texture) and self.exit == True):
-                if self.reentry_pending:
-                    #print("self.reentry pending is true")
-                    # Log revert time locally without triggering probe again
-                    elapsed_time = global_stopwatch.get_elapsed_time()
-                    self.texture_revert_history = np.append(self.texture_revert_history, round(elapsed_time, 2))
-                    # Use prev_current_texture to determine which column to log
-                    if self.prev_current_texture == go_texture:
-                        self.trial_logger.log_go_texture_revert_time(round(elapsed_time, 2))
-                    elif self.prev_current_texture == stop_texture:
-                        self.trial_logger.log_stay_texture_revert_time(round(elapsed_time, 2))
-                else:
-                    # First exit for this zone: use centralized handler (may schedule probe)
-                    corridor.texture_swapper.exit_special_zones()
-                    #print("called exit_special_zones()")
-                #print("Exited a zone")
-                self.reentry_pending = False
-                self.exit = False
-            
-            # Update previous texture at the end of evaluation
-            self.prev_current_texture = self.current_texture
-                
-        # Keep track of segments passed in either direction
+        # Recycle corridor segments when the camera moves beyond one segment length
         if move_distance > 0:
-            self.distance_since_last_segment += move_distance
-            while self.distance_since_last_segment >= segment_length:
-                # Count a segment passed in forward direction
-                self.distance_since_last_segment -= segment_length
-                corridor.segments_until_texture_change -= 1
-                corridor.texture_swapper.update_texture_change()
+            self.distance_since_recycle += move_distance
+            while self.distance_since_recycle >= self.segment_length:
+                # Recycle the segment in the forward direction
+                self.corridor.recycle_segment(direction="forward")
+                self.distance_since_recycle -= self.segment_length
+                self.corridor.segments_until_texture_change -= 1
+                self.corridor.update_texture_change()
 
-                if self.current_texture == go_texture and self.active_puff_zone == True:
+                # Check if the new front segment has the stay or go textures
+                new_front_texture = self.corridor.left_segments[0].getTexture().getFilename()
+                if new_front_texture == self.corridor.go_texture:
                     self.segments_with_go_texture += 1
                     #print(f"New segment with go texture counted: {self.segments_with_go_texture}")
-                elif self.current_texture == stop_texture and self.active_stay_zone == True:
+                elif new_front_texture == self.corridor.stop_texture:
                     self.segments_with_stay_texture += 1
-                    #print(f"STAY zone - Segments: {self.segments_with_stay_texture}")
-
+                    #print(f"New segment with stay texture counted: {self.segments_with_stay_texture}")
+        
         elif move_distance < 0:
-            self.distance_since_last_segment += move_distance
-            while self.distance_since_last_segment <= -segment_length:
-                # Count a segment passed in backward direction
-                self.distance_since_last_segment += segment_length
-                corridor.segments_until_texture_change += 1
-                corridor.texture_swapper.update_texture_change()
+            self.distance_since_recycle += move_distance
+            while self.distance_since_recycle <= -self.segment_length:
+                self.corridor.recycle_segment(direction="backward")
+                self.distance_since_recycle += self.segment_length
 
         # Log movement data (timestamp, distance, speed)
         self.treadmill_logger.log(self.treadmill.data)
 
         # FSM state transition logic
-        # Cache FSM state and timing values to avoid repeated lookups
-        fsm_state = self.fsm.state
-        reward_time = self.reward_time
-        puff_time = self.puff_time
+        # Dynamically get the current texture of the left wall
+        selected_texture = self.corridor.left_segments[0].getTexture().getFilename()
+        self.reward_time = self.cfg["reward_time"]
+        self.puff_time = self.cfg["puff_time"]
 
         # Get the elapsed time from the global stopwatch
         current_time = global_stopwatch.get_elapsed_time()
 
-        # Track when treadmill speed becomes 0 and reset if speed is not 0
-        if treadmill_speed == 0:
-            if self.speed_zero_start_time is None:
-                self.speed_zero_start_time = current_time
+        if selected_texture == self.corridor.stop_texture:
+            if self.fsm.state != 'Reward' and not self.reward_requested:
+                #print(self.zone_length)
+                self.reward_requested = True
+                self.doMethodLaterStopwatch(0.6, self.reward_summoner, 'Reward')
+        elif selected_texture == self.corridor.go_texture:
+            self.reward_requested = False  # Reset if we enter go texture
         else:
-            self.speed_zero_start_time = None
-
-        #print(self.current_texture)
-
-        if self.current_texture == stop_texture and self.active_stay_zone == True:
-            #print(self.zone_length)
-            # Check if speed has been 0 for set time
-            speed_zero_duration = (self.speed_zero_start_time is not None and 
-                                       current_time >= self.speed_zero_start_time + self.time_spent_at_zero_speed)
-            # Check if enough time has been spent in the zone
-            meets_time_requirement = current_time >= self.enter_stay_time + (reward_time * self.zone_length)
-            
-            if (self.segments_with_stay_texture <= self.zone_length and 
-                fsm_state != 'Reward' and
-                corridor.reward_zone_active == True and 
-                (speed_zero_duration or meets_time_requirement)):  # Either condition can trigger reward
-                #print("Requesting Reward state")
-                self.fsm.request('Reward')
-                self.active_stay_zone = False  # Reset stay zone flag after requesting reward
-
-        elif self.current_texture == go_texture and self.active_puff_zone == True:
-            #print(self.zone_length)
-            # Check if speed has been 0 for set time
-            speed_zero_duration = (self.speed_zero_start_time is not None and 
-                                       current_time >= self.speed_zero_start_time + self.puff_zero_speed_time)
-            # Check if enough time has been spent in the zone
-            meets_time_requirement = current_time >= self.enter_go_time + (puff_time * self.zone_length)
-
-            if (self.segments_with_go_texture <= self.zone_length and 
-                fsm_state != 'Puff' and 
-                (speed_zero_duration or meets_time_requirement)):
-                #print("Requesting Puff state")
-                self.fsm.request('Puff')
-                self.active_puff_zone = False  # Reset puff zone flag after requesting puff
-
-        else:
+            # Only reset when we're truly in neutral zone (not stop or go)
             self.segments_with_go_texture = 0 
             self.segments_with_stay_texture = 0
+            self.reward_requested = False  # Reset when leaving stop texture zone
+            if self.fsm.state != 'Neutral':
+                #print("Requesting Neutral state")
+                self.fsm.request('Neutral')
         
         return Task.cont
 
@@ -1709,6 +1846,11 @@ class MousePortal(ShowBase):
             self.treadmill.close()
         if self.serial_output:
             self.serial_output.close()
+
+    def reward_summoner(self, task=None):
+        """Trigger a reward event."""
+        self.fsm.request('Reward')
+        return Task.done
 
 if __name__ == "__main__":
     config_path = os.environ.get("LEVEL_CONFIG_PATH")

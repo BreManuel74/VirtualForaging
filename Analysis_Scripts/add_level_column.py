@@ -47,8 +47,8 @@ def batch_process_all_animals():
     print("=" * 60)
     
     # Set paths
-    base_path = r'c:\Users\Brenna\OneDrive - The Pennsylvania State University\Desktop\KaufmanProject\MousePortal'
-    log_base_path = r'C:\Users\Brenna\OneDrive - The Pennsylvania State University\Desktop\KaufmanProject\MousePortal\Progress_Reports'
+    base_path = r'C:\Users\brema\OneDrive_The Pennsylvania State University\OneDrive - The Pennsylvania State University\Desktop\KaufmanProject\MousePortal'
+    log_base_path = r'C:\Users\brema\OneDrive_The Pennsylvania State University\OneDrive - The Pennsylvania State University\Desktop\KaufmanProject\MousePortal\Progress_Reports'
     
     print(f"Base path: {base_path}")
     print(f"Log base path: {log_base_path}")

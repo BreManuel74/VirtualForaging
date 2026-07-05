@@ -1,7 +1,78 @@
 """
-A GUI application to control and monitor a Panda3D game application for behavioral experiments.
-Implements a TCP server for communication, process management, and real-time updates.
+================================================================================
+  *** MAIN FILE — RUN THIS TO START THE HALLWAY BEHAVIORAL EXPERIMENT ***
+================================================================================
+
+run_me_gui.py  |  Sipe Lab – VirtualForaging Hallway Controller
 Original Author: Brenna Manuel
+
+OVERVIEW
+--------
+Tkinter-based GUI application that launches and controls the virtual-hallway
+Panda3D behavioral experiment.  This is the single entry point for running a
+session: it spins up a TCP server, spawns the Panda3D game subprocess, tracks
+rewards in real time, and logs all session data to a CSV progress report.
+
+GUI PANELS
+----------
+  Setup
+    - Animal Name, Batch ID, Teensy COM port, Output directory
+    - Progress Report selector  : loads existing per-animal _log.csv files from
+                                  Progress_Reports/ and resumes the last level
+                                  and reward count automatically
+    - Levels Folder selector    : browse to any folder containing level_N.json
+                                  files (defaults to "Levels/")
+    - Phase File selector       : auto-detects all hallway*.py files in the
+                                  working directory for selection
+    - Start Session button      : validates all fields, then launches the session
+
+  Level Control
+    - Current Level display     : shows the active level filename
+    - Reward counter            : live count of rewards received this level
+    - Previous / Next Level     : manually step backward or forward through the
+                                  ordered JSON level sequence
+    - List Levels               : prints the full ordered level list to the console
+    - Stop Session              : gracefully shuts down all subsystems
+
+  Console Output
+    - Scrolled text log of all session events
+    - Manual command entry field (also bound to Enter key) for sending raw
+      commands to the Panda3D game over the TCP connection
+
+CORE SUBSYSTEMS
+---------------
+  TCPDataServer
+    - Binds to a random free port and passes it to the game via TCP_SERVER_PORT
+    - Receives "REWARD:" messages from the game and increments the reward count
+    - Sends "CHANGE_LEVEL:<file>" commands to trigger in-game level transitions
+    - Reward threshold is read from each level's JSON (reward_threshold field)
+      and cached to avoid repeated disk I/O; when reached, the next level is
+      loaded automatically
+    - All socket I/O runs on daemon background threads; callbacks are posted to
+      the Tkinter main thread via root.after() for thread safety
+
+  Session Management
+    - Launches the selected hallway*.py script as a subprocess with a full set
+      of environment variables (LEVEL_CONFIG_PATH, TCP_SERVER_PORT, OUTPUT_DIR,
+      BATCH_ID (solenoid calibration identifier), TEENSY_PORT, LEVELS_FOLDER)
+    - On stop, signals thorcam (stop_recording.flag), waits for video output
+      confirmation, then tears down the TCP server and Panda3D process in order
+    - Uses psutil for recursive process-tree termination when available; falls
+      back to subprocess.terminate()/kill() otherwise
+
+  Progress Reporting
+    - Per-animal CSV log (Progress_Reports/<animal>_log.csv) with columns:
+      Date, Time, Level, Batch ID
+    - Session-end row records the final reward count for seamless resumption
+    - On next session start, the last log entry is parsed to restore the
+      exact level and reward count where the animal left off
+
+DEPENDENCIES
+------------
+  Standard library : os, sys, subprocess, csv, socket, threading, time, atexit,
+                     signal, datetime, tkinter
+  Third-party      : psutil (optional – enables process-tree kill)
+================================================================================
 """
 
 import os
