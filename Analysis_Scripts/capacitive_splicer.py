@@ -18,16 +18,25 @@ def splice_capacitive_files(file_a: str, file_b: str, output_path: str) -> None:
     df_a = pd.read_csv(file_a)
     df_b = pd.read_csv(file_b)
 
-    # Determine longer vs shorter by row count
-    if len(df_a) >= len(df_b):
+    print(f"File 1 ({len(df_a)} rows): {os.path.basename(file_a)}")
+    print(f"File 2 ({len(df_b)} rows): {os.path.basename(file_b)}")
+
+    base_choice = messagebox.askquestion(
+        "Choose Base File",
+        f"Which file should be the BASE (the one appended TO)?\n\n"
+        f"Yes = File 1: {os.path.basename(file_a)}\n"
+        f"No  = File 2: {os.path.basename(file_b)}"
+    )
+
+    if base_choice == "yes":
         longer, shorter = df_a.copy(), df_b.copy()
         longer_name, shorter_name = file_a, file_b
     else:
         longer, shorter = df_b.copy(), df_a.copy()
         longer_name, shorter_name = file_b, file_a
 
-    print(f"Longer file  ({len(longer)} rows): {os.path.basename(longer_name)}")
-    print(f"Shorter file ({len(shorter)} rows): {os.path.basename(shorter_name)}")
+    print(f"Base file   ({len(longer)} rows): {os.path.basename(longer_name)}")
+    print(f"Appended file ({len(shorter)} rows): {os.path.basename(shorter_name)}")
 
     # Offsets: last values of the longer file
     elapsed_offset = longer["elapsed_time"].iloc[-1]
