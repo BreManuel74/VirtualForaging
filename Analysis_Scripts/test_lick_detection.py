@@ -1,27 +1,44 @@
 """
 Test Script for Lick Detection Algorithm
 
-This script allows you to test the lick detection algorithm on any capacitive CSV file.
-It will load the data, run the full detection pipeline, and display visualizations
-along with summary statistics.
+This script opens a folder-picker dialog, finds every CSV file whose name contains
+"capacitive", and runs the full lick detection pipeline on each file sequentially,
+displaying visualizations and summary statistics along the way.
 
 Usage:
-    python test_lick_detection.py path/to/your/file.csv
-    
-    Or run without arguments and you'll be prompted to enter the file path.
+    python test_lick_detection.py
+    (a folder selection window will pop up)
 
 Expected CSV format:
     - Must have columns: arduino_timestamp, elapsed_time, and capacitive_value
     - Time column will be derived (elapsed_time or arduino_timestamp/1000)
 """
 
-import sys
 import os
+import glob
+import tkinter as tk
+from tkinter import filedialog
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from scipy import stats
 import lick_detection_algorithm as lda
+
+
+def select_folder():
+    """Open a tkinter dialog for the user to pick a folder."""
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes('-topmost', True)
+    folder = filedialog.askdirectory(title="Select folder containing capacitive CSV files")
+    root.destroy()
+    return folder
+
+
+def find_capacitive_csv_files(folder_path):
+    """Find all CSV files in folder_path whose filename contains 'capacitive' (case-insensitive)."""
+    all_csvs = glob.glob(os.path.join(folder_path, "*.csv"))
+    return sorted(f for f in all_csvs if 'capacitive' in os.path.basename(f).lower())
 
 
 def load_and_prepare_data(csv_path):
@@ -148,35 +165,17 @@ def print_summary_statistics(df_normalized, events_df, bout_dict, threshold, ili
         print(f"  Range: {ili_array.min():.3f}s - {ili_array.max():.3f}s")
 
 
-def main():
-    """Main execution function."""
+def process_file(csv_path, threshold=None, ili_cutoff=0.3, auto_save=False, output_dir=None):
+    """Run the full lick detection pipeline and visualizations for a single CSV file."""
     print("\n" + "="*60)
-    print("LICK DETECTION ALGORITHM - TEST SCRIPT")
+    print(f"PROCESSING: {os.path.basename(csv_path)}")
     print("="*60)
-    
-    # Get CSV file path
-    if len(sys.argv) > 1:
-        csv_path = sys.argv[1]
-    else:
-        csv_path = input("\nEnter path to CSV file: ").strip().strip('"').strip("'")
-    
-    if not os.path.exists(csv_path):
-        print(f"\n✗ File not found: {csv_path}")
-        return
-    
+
     # Load and prepare data
     df = load_and_prepare_data(csv_path)
     if df is None:
         return
-    
-    # Get parameters (with defaults)
-    print("\n" + "-"*60)
-    threshold_input = input("Enter detection threshold [default=dynamic (KDE valley)]: ").strip()
-    threshold = float(threshold_input) if threshold_input else None
-    
-    ili_cutoff_input = input("Enter ILI cutoff for bouts in seconds [default=0.3]: ").strip()
-    ili_cutoff = float(ili_cutoff_input) if ili_cutoff_input else 0.3
-    
+
     # Run lick detection
     df_normalized, events_df, kde_value, bout_dict, threshold = run_lick_detection(
         df, threshold=threshold, ili_cutoff=ili_cutoff
@@ -240,7 +239,9 @@ def main():
         ax_bot.plot(x_eval, density_vals, color='darkorange', linewidth=2, label='KDE density')
 
         from scipy.signal import find_peaks as _fp
-        MIN_DEVIATION_GAP = 10.0  # must match _kde_valley_search default
+        MIN_GAP_FWHM_MULTIPLIER = 2.0  # must match _compute_kde_valley_threshold default
+        MIN_GAP_FLOOR = 4.5
+        MIN_GAP_CEILING = 15.0
         peaks_idx, _ = _fp(density_vals)
         if len(peaks_idx) > 0:
             noise_peak = peaks_idx[0]
@@ -252,12 +253,8 @@ def main():
             ax_bot.axhline(half_max, color='gray', linestyle=':', linewidth=1,
                            alpha=0.6, label='Half-max (FWHM level)')
 
-            # Min deviation gap boundary (10 deviation units past noise peak)
-            gap_x = noise_peak_x + MIN_DEVIATION_GAP
-            ax_bot.axvline(gap_x, color='darkorchid', linestyle=':', linewidth=1.5,
-                           alpha=0.8, label=f'Min gap boundary (+{MIN_DEVIATION_GAP:.0f}): {gap_x:.4f}')
-
-            # Find FWHM right edge
+            # Find FWHM right edge first — the min gap is derived from its width,
+            # not from a percentile of the full (noise-contaminated) deviation array
             right_half = density_vals[noise_peak:]
             below_half = np.where(right_half < half_max)[0]
             if len(below_half) > 0:
@@ -265,6 +262,14 @@ def main():
                 fwhm_right_x = x_eval[fwhm_right_idx]
                 ax_bot.axvline(fwhm_right_x, color='goldenrod', linestyle='--', linewidth=1.5,
                                label=f'FWHM noise edge: {fwhm_right_x:.4f}')
+
+                fwhm_half_width = fwhm_right_x - noise_peak_x
+                MIN_DEVIATION_GAP = np.clip(
+                    MIN_GAP_FWHM_MULTIPLIER * fwhm_half_width, MIN_GAP_FLOOR, MIN_GAP_CEILING
+                )
+                gap_x = noise_peak_x + MIN_DEVIATION_GAP
+                ax_bot.axvline(gap_x, color='darkorchid', linestyle=':', linewidth=1.5,
+                               alpha=0.8, label=f'Min gap boundary (+{MIN_DEVIATION_GAP:.1f}): {gap_x:.4f}')
 
                 # Fallback = max(FWHM, gap) — mirrors the algorithm fix
                 fallback_x = max(fwhm_right_x, gap_x)
@@ -314,27 +319,73 @@ def main():
     plt.show()
     print("✓ Histogram + KDE diagnostic plot displayed")
 
-    # Ask if user wants to save the figure
-    save_input = input("\nSave figure? (y/n) [default=n]: ").strip().lower()
-    if save_input in ['y', 'yes']:
-        # Default output filename in the current working directory
-        default_output = os.path.join(os.getcwd(), os.path.splitext(filename)[0] + '_lick_analysis.svg')
-        output_path = input(f"Enter output path [default={default_output}]: ").strip()
-        
-        if not output_path:
-            output_path = default_output
-        
+    # Save or prompt to save the figure
+    save = auto_save
+    if not auto_save:
+        save_input = input("\nSave figure? (y/n) [default=n]: ").strip().lower()
+        save = save_input in ['y', 'yes']
+
+    if save:
+        default_dir = output_dir if output_dir else os.getcwd()
+        default_output = os.path.join(default_dir, os.path.splitext(filename)[0] + '_lick_analysis.svg')
+        output_path = default_output
+        if not auto_save:
+            output_path_input = input(f"Enter output path [default={default_output}]: ").strip()
+            if output_path_input:
+                output_path = output_path_input
+
         # Ensure .svg extension
         if not output_path.lower().endswith('.svg'):
             output_path += '.svg'
-        
+
         try:
             fig.savefig(output_path, format='svg', bbox_inches='tight')
             print(f"✓ Figure saved to: {output_path}")
         except Exception as e:
             print(f"✗ Error saving figure: {e}")
-    
+
     print(f"\nAnalysis complete for: {filename}")
+    print("="*60 + "\n")
+
+
+def main():
+    """Main execution function: select a folder, then process every capacitive CSV in it."""
+    print("\n" + "="*60)
+    print("LICK DETECTION ALGORITHM - BATCH TEST SCRIPT")
+    print("="*60)
+
+    print("\nSelect a folder containing capacitive CSV files...")
+    folder_path = select_folder()
+    if not folder_path:
+        print("\n✗ No folder selected. Exiting.")
+        return
+
+    csv_files = find_capacitive_csv_files(folder_path)
+    if not csv_files:
+        print(f"\n✗ No CSV files containing 'capacitive' found in: {folder_path}")
+        return
+
+    print(f"\n✓ Found {len(csv_files)} capacitive CSV file(s) in: {folder_path}")
+    for f in csv_files:
+        print(f"  - {os.path.basename(f)}")
+
+    # Get parameters once (applied to every file)
+    print("\n" + "-"*60)
+    threshold_input = input("Enter detection threshold [default=dynamic (KDE valley)]: ").strip()
+    threshold = float(threshold_input) if threshold_input else None
+
+    ili_cutoff_input = input("Enter ILI cutoff for bouts in seconds [default=0.3]: ").strip()
+    ili_cutoff = float(ili_cutoff_input) if ili_cutoff_input else 0.3
+
+    auto_save_input = input("Auto-save figures for every file? (y/n) [default=n]: ").strip().lower()
+    auto_save = auto_save_input in ['y', 'yes']
+
+    for csv_path in csv_files:
+        process_file(csv_path, threshold=threshold, ili_cutoff=ili_cutoff,
+                      auto_save=auto_save, output_dir=folder_path)
+
+    print("\n" + "="*60)
+    print(f"BATCH COMPLETE: processed {len(csv_files)} file(s)")
     print("="*60 + "\n")
 
 

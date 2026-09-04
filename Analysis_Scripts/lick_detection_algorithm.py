@@ -139,7 +139,7 @@ def compute_KDE_normalizations(df: pd.DataFrame, column: str, kde_value: float) 
 def _kde_valley_search(x: np.ndarray, density: np.ndarray, min_deviation_gap: float = 10.0):
     """Shared valley-search logic for _compute_kde_valley_threshold.
 
-    Returns (valley_x, fwhm_x) where valley_x is the deepest valley past the
+    Returns (valley_x, fwhm_x) where valley_x is the earliest valid valley past the
     noise FWHM, and fwhm_x is the FWHM right edge (fallback). Either may be None.
 
     Two guards prevent spurious valleys inside the noise distribution:
@@ -153,6 +153,15 @@ def _kde_valley_search(x: np.ndarray, density: np.ndarray, min_deviation_gap: fl
     2. Post-valley signal peak: a genuine noise/signal boundary must have a
        signal peak rising after the valley. If only a decaying tail follows, the
        "valley" is a noise-tail artefact and is rejected.
+
+    The earliest (not deepest) qualifying valley is chosen. If lick amplitudes are
+    bimodal (e.g. a population of strong licks ~20 deviation units above a weaker
+    population), the density can show noise -> weak-lick -> strong-lick bumps, and
+    the valley between the two lick bumps is often deeper than the noise/signal
+    valley. Picking the deepest valley would then push the threshold above the
+    weak-lick population, misclassifying it as noise. Picking the earliest
+    qualifying valley anchors the threshold at the true noise/signal boundary
+    regardless of how many signal sub-populations exist above it.
     """
     peaks, _ = find_peaks(density)
     if len(peaks) == 0:
@@ -191,19 +200,26 @@ def _kde_valley_search(x: np.ndarray, density: np.ndarray, min_deviation_gap: fl
     if len(valleys_relative) == 0:
         return None, fallback_x
 
-    valley_densities = post_search_density[valleys_relative]
-    deepest_valley_rel = valleys_relative[np.argmin(valley_densities)]
-    valley_idx = search_start + deepest_valley_rel
+    # Walk valleys in ascending (earliest-first) order rather than picking the
+    # deepest one — see docstring for why this guards against heterogeneous
+    # lick-amplitude sub-populations. Guard 2 (post-valley signal peak) is
+    # applied to each candidate until one qualifies.
+    for valley_rel in np.sort(valleys_relative):
+        valley_idx = search_start + valley_rel
+        post_valley_peaks, _ = find_peaks(density[valley_idx:])
+        if len(post_valley_peaks) > 0:
+            return float(x[valley_idx]), fwhm_x
 
-    # Guard 2: a genuine boundary must have a signal peak rising after the valley.
-    post_valley_peaks, _ = find_peaks(density[valley_idx:])
-    if len(post_valley_peaks) == 0:
-        return None, fallback_x
-
-    return float(x[valley_idx]), fwhm_x
+    return None, fallback_x
 
 
-def _compute_kde_valley_threshold(deviations: np.ndarray, min_deviation_gap: float = 10.0) -> float:
+def _compute_kde_valley_threshold(
+    deviations: np.ndarray,
+    min_deviation_gap: float = None,
+    min_gap_fraction: float = 0.2,
+    min_gap_floor: float = 3.0,
+    min_gap_ceiling: float = 15.0
+) -> float:
     """Find the noise/signal boundary using FWHM-gated KDE valley detection.
 
     Uses a two-pass strategy to handle both normal sessions (many licks) and
@@ -223,8 +239,27 @@ def _compute_kde_valley_threshold(deviations: np.ndarray, min_deviation_gap: flo
     Falls back to the FWHM right edge (outer noise boundary) when no valley is
     found in either pass. For zero-lick sessions, falls back to max/2.
 
+    The minimum deviation gap (see _kde_valley_search) no longer defaults to a
+    fixed constant. A fixed gap of ~10 works for files where lick deviations
+    reach large magnitudes, but is too large for files where raw capacitance
+    never rises far above baseline (e.g. max capacitance < 200) — there, the
+    gap can skip past the entire lick population and only the FWHM/fallback
+    threshold gets used. Instead, each pass computes its own gap as
+    `min_gap_fraction` of that pass's eval-range scale (the 99.5th percentile
+    for Pass 1, the data max for Pass 2), clamped to [min_gap_floor,
+    min_gap_ceiling] so a single outlier deviation value can't stretch or
+    collapse the gap to an unsafe extreme. Pass an explicit `min_deviation_gap`
+    to opt out of this scaling and use a fixed absolute gap instead.
+
     Parameters:
         deviations: 1-D array of non-negative deviation values
+        min_deviation_gap: Fixed absolute gap override. If None (default), the
+            gap is auto-scaled per pass via `min_gap_fraction` and clamped to
+            [min_gap_floor, min_gap_ceiling].
+        min_gap_fraction: Fraction of each pass's eval-range scale used as the
+            gap when min_deviation_gap is None (default 0.2).
+        min_gap_floor: Minimum allowed adaptive gap (default 3.0).
+        min_gap_ceiling: Maximum allowed adaptive gap (default 15.0).
 
     Returns:
         Threshold value (float)
@@ -237,8 +272,12 @@ def _compute_kde_valley_threshold(deviations: np.ndarray, min_deviation_gap: flo
         kde = stats.gaussian_kde(clean, bw_method='scott')
 
         # --- Pass 1: standard range (works for sessions with many licks) ---
-        x1 = np.linspace(0, np.percentile(clean, 99.5), 1000)
-        valley1, fwhm1 = _kde_valley_search(x1, kde(x1), min_deviation_gap=min_deviation_gap)
+        p995 = np.percentile(clean, 99.5)
+        x1 = np.linspace(0, p995, 1000)
+        gap1 = min_deviation_gap if min_deviation_gap is not None else np.clip(
+            min_gap_fraction * p995, min_gap_floor, min_gap_ceiling
+        )
+        valley1, fwhm1 = _kde_valley_search(x1, kde(x1), min_deviation_gap=gap1)
         if valley1 is not None:
             return valley1
 
@@ -247,7 +286,10 @@ def _compute_kde_valley_threshold(deviations: np.ndarray, min_deviation_gap: flo
         data_max = float(clean.max())
         if data_max > x1[-1] * 1.05:
             x2 = np.linspace(0, data_max, 3000)
-            valley2, fwhm2 = _kde_valley_search(x2, kde(x2), min_deviation_gap=min_deviation_gap)
+            gap2 = min_deviation_gap if min_deviation_gap is not None else np.clip(
+                min_gap_fraction * data_max, min_gap_floor, min_gap_ceiling
+            )
+            valley2, fwhm2 = _kde_valley_search(x2, kde(x2), min_deviation_gap=gap2)
             if valley2 is not None:
                 return valley2
             # Use FWHM from the extended pass if available
@@ -265,7 +307,10 @@ def detect_events_above_threshold(
     df: pd.DataFrame,
     column: str = 'capacitive_value',
     threshold: float = None,
-    min_deviation_gap: float = 10.0
+    min_deviation_gap: float = None,
+    min_gap_fraction: float = 0.2,
+    min_gap_floor: float = 4.5,
+    min_gap_ceiling: float = 15.0
 ) -> tuple:
     """Detect time points where KDE normalized deviation exceeds the threshold.
     
@@ -283,6 +328,13 @@ def detect_events_above_threshold(
         column: Name of the capacitive column (default: 'capacitive_value')
         threshold: Threshold value for peak detection. If None (default), calculates dynamically
                    using KDE valley detection (falls back to max_deviation / 2 if unimodal)
+        min_deviation_gap: Fixed absolute minimum-gap override passed to the valley search.
+                   If None (default), the gap is auto-scaled per file via `min_gap_fraction`,
+                   clamped to [min_gap_floor, min_gap_ceiling].
+        min_gap_fraction: Fraction of the file's own deviation-range scale used as the
+                   minimum gap when min_deviation_gap is None (default 0.2).
+        min_gap_floor: Minimum allowed adaptive gap (default 3.0).
+        min_gap_ceiling: Maximum allowed adaptive gap (default 15.0).
         
     Returns:
         Tuple of (DataFrame, threshold_used) where:
@@ -329,7 +381,13 @@ def detect_events_above_threshold(
     
     # Calculate dynamic threshold if not provided
     if threshold is None:
-        threshold = _compute_kde_valley_threshold(clean_deviations.values, min_deviation_gap=min_deviation_gap)
+        threshold = _compute_kde_valley_threshold(
+            clean_deviations.values,
+            min_deviation_gap=min_deviation_gap,
+            min_gap_fraction=min_gap_fraction,
+            min_gap_floor=min_gap_floor,
+            min_gap_ceiling=min_gap_ceiling
+        )
     
     # Find peaks in the deviation signal using scipy.signal.find_peaks
     peaks, _ = find_peaks(clean_deviations, height=threshold, distance=1)

@@ -23,8 +23,23 @@ import sys
 import os
 import numpy as np
 import pandas as pd
+import matplotlib
+
+# Interactive widgets (buttons, key/mouse events, SpanSelector) require a GUI
+# backend. Non-interactive/inline backends (e.g. the Jupyter/VS Code notebook
+# "inline" backend) only render static images and silently ignore all mouse
+# and key events, which looks exactly like "the buttons don't work".
+if not matplotlib.get_backend().lower().startswith(('qt', 'tk', 'wx', 'gtk', 'macosx')):
+    for _candidate in ('QtAgg', 'TkAgg'):
+        try:
+            matplotlib.use(_candidate)
+            break
+        except Exception:
+            continue
+
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
+from matplotlib.widgets import SpanSelector, Button
 
 
 # ---------------------------------------------------------------------------
@@ -125,11 +140,20 @@ def plot_spike_regions(df: pd.DataFrame,
                        regions: list[tuple[float, float]],
                        spike_threshold: float,
                        min_duration_s: float,
-                       filename: str) -> plt.Figure:
+                       filename: str,
+                       interactive: bool = True) -> tuple[plt.Figure, list]:
     """
     Two-panel figure:
       Top:    Raw capacitive signal with spike regions shaded red.
       Bottom: Cleaned signal (spike rows removed).
+
+    If interactive=True, click-drag on the top panel to mark additional
+    regions (shaded blue) that the automated detector missed. Use the
+    "Select: OFF/ON" button to arm/disarm dragging (so the toolbar's zoom/pan
+    keeps working) and the "Undo last" button to remove the most recent
+    selection. Returns (fig, manual_regions) where manual_regions is a list
+    populated live as selections are made — read it after plt.show() returns
+    (i.e. after the window is closed) for the final set.
     """
     time_raw = df['Time_sec'].values
     cap_raw  = df['capacitive_value'].values
@@ -147,20 +171,102 @@ def plot_spike_regions(df: pd.DataFrame,
     )
 
     # ── Top: raw + highlighted spikes ───────────────────────────────────────
-    ax_top.plot(time_raw, cap_raw, color='steelblue', linewidth=0.6, alpha=0.8,
-                label='Raw signal')
-    ax_top.axhline(spike_threshold, color='darkorange', linestyle='--', linewidth=1.2,
-                   label=f'Spike threshold: {spike_threshold}')
-    for t_start, t_end in regions:
-        ax_top.axvspan(t_start, t_end, color='red', alpha=0.25)
+    def _draw_raw_panel():
+        ax_top.cla()
+        ax_top.plot(time_raw, cap_raw, color='steelblue', linewidth=0.6, alpha=0.8,
+                    label='Raw signal')
+        ax_top.axhline(spike_threshold, color='darkorange', linestyle='--', linewidth=1.2,
+                       label=f'Spike threshold: {spike_threshold}')
+        for t_start, t_end in regions:
+            ax_top.axvspan(t_start, t_end, color='red', alpha=0.25)
+        for t_start, t_end in manual_regions:
+            ax_top.axvspan(t_start, t_end, color='dodgerblue', alpha=0.3)
+        ax_top.set_ylabel('Capacitive value', fontsize=10)
+        title = ("Raw signal — use the Select button, then drag to mark a region"
+                  if interactive else 'Raw signal — spike regions highlighted')
+        ax_top.set_title(title, fontsize=10)
+        ax_top.legend(handles=legend_handles, fontsize=9)
+        ax_top.spines['top'].set_visible(False)
+        ax_top.spines['right'].set_visible(False)
 
     spike_patch = mpatches.Patch(color='red', alpha=0.4, label=f'Spike regions ({len(regions)})')
-    ax_top.legend(handles=[ax_top.get_lines()[0], ax_top.get_lines()[1], spike_patch],
-                  fontsize=9)
-    ax_top.set_ylabel('Capacitive value', fontsize=10)
-    ax_top.set_title('Raw signal — spike regions highlighted', fontsize=10)
-    ax_top.spines['top'].set_visible(False)
-    ax_top.spines['right'].set_visible(False)
+    legend_handles = [
+        plt.Line2D([0], [0], color='steelblue', linewidth=1.5, label='Raw signal'),
+        plt.Line2D([0], [0], color='darkorange', linestyle='--', label=f'Spike threshold: {spike_threshold}'),
+        spike_patch,
+    ]
+
+    manual_regions: list = []
+
+    if interactive:
+        legend_handles.append(mpatches.Patch(color='dodgerblue', alpha=0.4,
+                                              label='Manual regions (use Select/Undo buttons)'))
+
+        def _on_select(xmin, xmax):
+            if xmax <= xmin:
+                return
+            manual_regions.append((float(xmin), float(xmax)))
+            _draw_raw_panel()
+            fig.canvas.draw_idle()
+            print(f"  + Manual region added: {xmin:.2f}s – {xmax:.2f}s  "
+                  f"(total manual: {len(manual_regions)})")
+
+        try:
+            span = SpanSelector(ax_top, _on_select, 'horizontal', useblit=True,
+                                 props=dict(alpha=0.3, facecolor='dodgerblue'),
+                                 interactive=False, button=1)
+        except TypeError:
+            span = SpanSelector(ax_top, _on_select, 'horizontal', useblit=True,
+                                 rectprops=dict(alpha=0.3, facecolor='dodgerblue'),
+                                 interactive=False, button=1)
+
+        # Start with selection OFF so the toolbar's zoom/pan (left-click drag)
+        # works normally. Clicking "Select: OFF" arms the selector (drag to
+        # mark a region); clicking it again disarms it so zoom/pan resumes —
+        # both features use left-click drag, so they can't be active at once.
+        # A clickable button is used instead of a keyboard shortcut since key
+        # events don't reliably reach the canvas across backends/platforms.
+        span.active = False
+
+        # Reserve room above the top axes for the two control buttons
+        # (applied via tight_layout's rect below, not subplots_adjust, so it
+        # isn't undone by the tight_layout() call at the end of this function).
+        ax_toggle = fig.add_axes([0.72, 0.94, 0.12, 0.04])
+        ax_undo = fig.add_axes([0.85, 0.94, 0.12, 0.04])
+        btn_toggle = Button(ax_toggle, 'Select: OFF')
+        btn_undo = Button(ax_undo, 'Undo last')
+
+        def _on_toggle_clicked(event):
+            span.active = not span.active
+            if span.active:
+                # The toolbar's zoom/pan tools hold the canvas widgetlock once
+                # engaged (even after you're done dragging), which blocks the
+                # SpanSelector from ever receiving drag events again. Release
+                # it here so selection actually works after zooming/panning.
+                toolbar = getattr(fig.canvas, 'toolbar', None)
+                mode = getattr(toolbar, 'mode', None) if toolbar is not None else None
+                mode_name = getattr(mode, 'name', str(mode) if mode else '')
+                if mode_name == 'ZOOM':
+                    toolbar.zoom()
+                elif mode_name == 'PAN':
+                    toolbar.pan()
+            btn_toggle.label.set_text(f"Select: {'ON' if span.active else 'OFF'}")
+            mode = 'ON — drag to mark a region' if span.active else 'OFF — toolbar zoom/pan enabled'
+            print(f"  Region-select mode: {mode}")
+            fig.canvas.draw_idle()
+
+        def _on_undo_clicked(event):
+            if manual_regions:
+                manual_regions.pop()
+                _draw_raw_panel()
+                fig.canvas.draw_idle()
+                print(f"  - Removed last manual region  (remaining: {len(manual_regions)})")
+
+        btn_toggle.on_clicked(_on_toggle_clicked)
+        btn_undo.on_clicked(_on_undo_clicked)
+        fig._spike_widgets = (span, btn_toggle, btn_undo)  # keep references alive
+
+    _draw_raw_panel()
 
     # ── Bottom: cleaned signal ───────────────────────────────────────────────
     ax_bot.plot(time_clean, cap_clean, color='mediumseagreen', linewidth=0.6, alpha=0.9,
@@ -169,13 +275,13 @@ def plot_spike_regions(df: pd.DataFrame,
                    label=f'Spike threshold: {spike_threshold}')
     ax_bot.set_xlabel('Time (s)', fontsize=10)
     ax_bot.set_ylabel('Capacitive value', fontsize=10)
-    ax_bot.set_title('Cleaned signal (spike rows removed)', fontsize=10)
+    ax_bot.set_title('Cleaned signal (auto-detected regions removed)', fontsize=10)
     ax_bot.legend(fontsize=9)
     ax_bot.spines['top'].set_visible(False)
     ax_bot.spines['right'].set_visible(False)
 
-    plt.tight_layout()
-    return fig
+    plt.tight_layout(rect=(0, 0, 1, 0.92) if interactive else (0, 0, 1, 1))
+    return fig, manual_regions
 
 
 # ---------------------------------------------------------------------------
@@ -186,6 +292,8 @@ def main():
     print("\n" + "="*60)
     print("CAPACITIVE BASELINE SPIKE TRIMMER")
     print("="*60)
+    print(f"Matplotlib backend: {matplotlib.get_backend()}  "
+          f"(must be an interactive GUI backend, e.g. TkAgg/QtAgg, for buttons/selection to work)")
 
     # ── File path ────────────────────────────────────────────────────────────
     if len(sys.argv) > 1:
@@ -237,11 +345,22 @@ def main():
     print(f"{'─'*40}")
 
     # ── Plot ─────────────────────────────────────────────────────────────────
-    fig = plot_spike_regions(df, regions, spike_threshold, min_duration_s, filename)
+    fig, manual_regions = plot_spike_regions(df, regions, spike_threshold, min_duration_s, filename)
+    print("\nTip: region-select mode starts OFF so the toolbar's zoom/pan works normally.")
+    print("     Click the 'Select: OFF' button to arm selection, then click-drag to mark a region.")
+    print("     Click it again to disarm and go back to zooming/panning.")
+    print("     Click 'Undo last' to remove the most recent selection. Close the window when done.")
     plt.show()
     print("✓ Plot displayed")
 
-    if not regions:
+    if manual_regions:
+        print(f"\n  Manual regions added : {len(manual_regions)}")
+        for i, (t0, t1) in enumerate(manual_regions, 1):
+            print(f"    [{i}]  {t0:.2f}s – {t1:.2f}s  (duration: {t1-t0:.2f}s)")
+
+    all_regions = regions + manual_regions
+
+    if not all_regions:
         print("\nNothing to trim — exiting.")
         return
 
@@ -251,7 +370,7 @@ def main():
         print("No file saved.")
         return
 
-    df_clean = remove_spike_regions(df, regions)
+    df_clean = remove_spike_regions(df, all_regions)
     rows_removed = len(df) - len(df_clean)
     print(f"  Rows removed : {rows_removed}  ({rows_removed/len(df)*100:.1f}%)")
     print(f"  Rows kept    : {len(df_clean)}")
@@ -283,7 +402,7 @@ def main():
         except Exception as e:
             print(f"✗ Figure save failed: {e}")
 
-    print(f"\nDone. {len(regions)} region(s) trimmed  |  {rows_removed} rows removed.")
+    print(f"\nDone. {len(all_regions)} region(s) trimmed  |  {rows_removed} rows removed.")
     print("="*60 + "\n")
 
 
