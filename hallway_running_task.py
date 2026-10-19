@@ -941,9 +941,6 @@ class RewardOrPuff(FSM):
         Enter the Reward state.
         
         """
-        signal = int(f"2{self.reward_duration}")
-        #print(signal)
-        self.base.serial_output.send_signal(signal)
 
         self.reward_history = np.append(self.reward_history, round(global_stopwatch.get_elapsed_time(), 2))
         reward_times = np.full(len(self.trial_df), np.nan)
@@ -954,6 +951,10 @@ class RewardOrPuff(FSM):
         # Send reward message through TCP client if connected
         if hasattr(self.base, 'tcp_client') and self.base.tcp_client:
             self.base.tcp_client.send_data("REWARD:")
+
+        signal = int(f"2{self.reward_duration}")
+        #print(signal)
+        self.base.serial_output.send_signal(signal)    
 
         self.base.doMethodLaterStopwatch(1.0, self._transitionToNeutral, 'return-to-neutral')
 

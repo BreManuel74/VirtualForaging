@@ -121,7 +121,7 @@ class TCPDataServer:
         self.reward_callback = None
         self._reward_lock = threading.Lock()
         # Add socket timeout
-        self._socket_timeout = 0.05
+        self._socket_timeout = 1.0
         # Cache for reward thresholds to avoid repeated file I/O
         self._threshold_cache = {}
 
