@@ -150,8 +150,8 @@ plt.rcParams.update({
     "legend.fontsize": 7.5,
     "figure.titlesize": 10,
     "lines.linewidth": 0.9,
-    "lines.markersize": 3,
-    "figure.figsize": (4, 2.5), #5, 2.5 ; 6, 2.5 for survivor ; 5.5, 2.5 weekday, 3.5, 3 time to first transition
+    "lines.markersize": 4,
+    "figure.figsize": (5, 2.5), #5, 2.5 ; 6, 2.5 for survivor ; 5.5, 2.5 weekday, 3.5, 3 time to first transition
 })
 import sys
 import pickle
@@ -225,13 +225,13 @@ SESSION_CACHE_DIR = os.path.join(script_dir, '.session_cache')
 if not os.path.exists(SESSION_CACHE_DIR):
     os.makedirs(SESSION_CACHE_DIR)
 
-_SESSION_CACHE_VERSION = 13  # bump this to invalidate all cached sessions after code changes
+_SESSION_CACHE_VERSION = 14  # bump this to invalidate all cached sessions after code changes
 
 # ── Levels-analysis treadmill/lick cache (separate from main session cache) ───
 _LEVELS_SESS_CACHE_DIR = os.path.join(SESSION_CACHE_DIR, 'levels')
 if not os.path.exists(_LEVELS_SESS_CACHE_DIR):
     os.makedirs(_LEVELS_SESS_CACHE_DIR)
-_LEVELS_CACHE_VERSION = 4  # bump to invalidate levels cache independently
+_LEVELS_CACHE_VERSION = 5  # bump to invalidate levels cache independently
 
 # ── Diagnostic mode ───────────────────────────────────────────────────────────
 # Set to True to print per-trial matching, lick-latency, and lick-prop traces
@@ -1255,14 +1255,19 @@ def _compute_zone_zscore_window(
 # ── RV-cohort helpers ─────────────────────────────────────────────────────────
 
 def _is_rv_cohort(mouse_name: str) -> bool:
-    """Return True if *mouse_name* belongs to the RV cohort.
+    """Return True if *mouse_name* belongs to the RV cohort (or follows its plot formats).
 
     RV mice are identified by the naming prefix 'RV' (case-insensitive),
-    e.g. RV1, RV2, RV10.  Their reward delivery time relative to zone entry
+    e.g. RV1, RV2, RV10.  Mice named 'C' followed directly by a digit
+    (e.g. C1, C12 — but not 'CAH1', since 'A' isn't a digit) also follow the
+    RV plot formats. Their reward delivery time relative to zone entry
     is variable (not the fixed 0.65 s used for other cohorts), so downstream
     calculations must use the actual matched delivery time instead.
     """
-    return str(mouse_name).upper().startswith('RV')
+    name = str(mouse_name).upper()
+    if name.startswith('RV'):
+        return True
+    return len(name) > 1 and name[0] == 'C' and name[1].isdigit()
 
 
 def _match_rewards_to_zones(trial_log_df, max_window_s: float = 30.0):
@@ -3096,6 +3101,8 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
                     n_with_lv = len(_surv_cond_lvl_mice[cond].get(lv, set()))
                     proportions.append(n_with_lv / n_total if n_total > 0 else 0.0)
                 color = _surv_color_map.get(cond, 'steelblue')
+                # 'pre' so each level's proportion ends exactly at its own tick
+                # (N-1, N] instead of bleeding into the next level's region [N, N+1)
                 ax_surv.step(x_numeric, proportions, where='post',
                              color=color, linewidth=2, label=f'{cond} (n={n_total})')
 
@@ -3103,7 +3110,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
             ax_surv.set_ylabel('Proportion of Mice')
             ax_surv.set_ylim(bottom=0, top=1)
             ax_surv.set_xlim(left=0, right=40)
-            ax_surv.set_xticks(range(0, 41, 5))
+            ax_surv.set_xticks(range(0, 40, 5))
             ax_surv.set_title('Level Attainment')
             leg = ax_surv.legend(title='Starting Condition', loc='lower right',
                                  frameon=False,
@@ -3253,8 +3260,8 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
                             alpha=0.8)
             ax_lpi.set_xlabel('Session')
             ax_lpi.set_ylabel('Ending Level')
-            ax_lpi.set_ylim(0, 14)
-            ax_lpi.set_yticks(range(0, 15, 2))
+            ax_lpi.set_ylim(0, 12)
+            ax_lpi.set_yticks(range(0, 13, 2))
             ax_lpi.set_xlim(0, 13)
             ax_lpi.set_xticks(range(1, 14, 1))
             ax_lpi.set_title('Level Progression — Individual Mice')
@@ -3312,7 +3319,8 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
                 ax_lpc.set_title('Level Progression \u2014 Condition Mean \u00b1 SEM')
                 ax_lpc.set_xlim(0, 13)
                 ax_lpc.set_xticks(range(1, 14))
-                ax_lpc.set_ylim(0, 25)
+                ax_lpc.set_ylim(0, 12)
+                ax_lpc.set_yticks(range(0, 13, 2))
                 ax_lpc.tick_params(axis='both', direction='in')
                 ax_lpc.spines['top'].set_visible(False)
                 ax_lpc.spines['right'].set_visible(False)
@@ -4812,7 +4820,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     bout_avg_speed_fig    = plt.figure(figsize=(12, 6)) if 'bout_avg_speed'     in selected_plots else None
     bout_avg_dist_fig     = plt.figure(figsize=(12, 6)) if 'bout_avg_dist'      in selected_plots else None
     sex_speed_fig         = plt.figure(figsize=(12, 6)) if 'sex_speed'          in selected_plots else None
-    sex_distance_indiv_fig= plt.figure(figsize=(12, 6)) if 'sex_distance_indiv' in selected_plots else None
+    sex_distance_indiv_fig= plt.figure(figsize=plt.rcParams['figure.figsize']) if 'sex_distance_indiv' in selected_plots else None
     sex_reward_indiv_fig  = plt.figure(figsize=(12, 6)) if 'sex_reward_indiv'   in selected_plots else None
     colors = generate_colors(len(data_files))  # Generate colors based on number of mice
     
@@ -6083,7 +6091,8 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             plt.figure(sex_distance_indiv_fig.number)
             _dist_m = df_r['total_distance'] / 1000.0
             plt.plot(day_numbers, _dist_m,
-                f'{markers[mouse_name]}-', color=_sex_color, markersize=8, label=mouse_name)
+                f'{markers[mouse_name]}-', color=_sex_color,
+                markersize=plt.rcParams['lines.markersize'], label='_nolegend_')
 
         if sex_reward_indiv_fig is not None:
             plt.figure(sex_reward_indiv_fig.number)
@@ -6313,8 +6322,8 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.tick_params(axis='both', direction='in')
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
-        ax.set_ylim(bottom=0, top=150)
-        ax.set_yticks(range(0, 151, 50))
+        ax.set_ylim(bottom=0, top=600)
+        ax.set_yticks(range(0, 601, 200))
         ax.set_xlim(left=0, right=13)
         ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
@@ -6455,12 +6464,24 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax.tick_params(axis='both', direction='in')
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
-        ax.set_ylim(bottom=0)
-        ax.set_xlim(left=0.5, right=max_day + 0.5)
+        ax.set_ylim(bottom=0, top=200)
+        ax.set_yticks(range(0, 201, 50))
+        ax.set_xlim(left=0, right=13)
         ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
         ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
         ax.tick_params(axis='x', which='minor', direction='in')
         ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+        _sex_legend_handles = [
+            Line2D([0], [0], marker='s', color='green', linestyle='-',
+                   markerfacecolor='green', markeredgecolor='green',
+                   markersize=plt.rcParams['lines.markersize'],
+                   linewidth=plt.rcParams['lines.linewidth'], label='Male'),
+            Line2D([0], [0], marker='o', color='purple', linestyle='-',
+                   markerfacecolor='purple', markeredgecolor='purple',
+                   markersize=plt.rcParams['lines.markersize'],
+                   linewidth=plt.rcParams['lines.linewidth'], label='Female'),
+        ]
+        ax.legend(handles=_sex_legend_handles, title='Sex', loc='upper left', frameon=False)
 
     # Configure sex-colored reward rate plot
     if sex_reward_indiv_fig is not None:
@@ -7628,6 +7649,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax_wdbar.set_xlabel('Training Day')
         ax_wdbar.set_ylabel('Reward Count')
         ax_wdbar.set_ylim(bottom=0, top=60)
+        ax_wdbar.set_yticks(np.arange(0, 61, 20))
         ax_wdbar.tick_params(axis='both', direction='in')
         ax_wdbar.spines['top'].set_visible(False)
         ax_wdbar.spines['right'].set_visible(False)
@@ -7685,6 +7707,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax_wdcbar.set_xlabel('Training Day')
         ax_wdcbar.set_ylabel('Reward Count')
         ax_wdcbar.set_ylim(bottom=0, top=40)
+        ax_wdcbar.set_yticks(np.arange(0, 41, 10))
         ax_wdcbar.tick_params(axis='both', direction='in')
         ax_wdcbar.spines['top'].set_visible(False)
         ax_wdcbar.spines['right'].set_visible(False)
@@ -11729,8 +11752,8 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                 hierarchy='session',
                 show_individual_traces=False,
             )
-            epoch_speed_sess_cond_clean_fig.axes[0].set_ylim(0, 15)
-            epoch_speed_sess_cond_clean_fig.axes[0].set_yticks([0, 5, 10, 15])
+            epoch_speed_sess_cond_clean_fig.axes[0].set_ylim(-3, 15)
+            epoch_speed_sess_cond_clean_fig.axes[0].set_yticks([-3, 0, 3, 6, 9, 12, 15])
             epoch_speed_sess_cond_clean_fig.axes[0].set_xlim(-5,5)
             epoch_speed_sess_cond_clean_fig.axes[0].set_xticks([-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5])
             _leg = epoch_speed_sess_cond_clean_fig.axes[0].get_legend()
@@ -13736,21 +13759,24 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                 _ax_rde.set_xticklabels(_conds_rde)
                 _ax_rde.set_ylabel('Speed difference (cm/s)\n[post-entry \u2212 pre-entry]')
                 _ax_rde.set_xlabel('Condition')
-                if _all_rde_vals:
-                    _ymax_rde = float(np.nanmax(_all_rde_vals))
-                    _ymin_rde = float(np.nanmin(_all_rde_vals))
-                    _pad_rde  = max(abs(_ymax_rde), abs(_ymin_rde)) * 0.12 or 0.5
-                    _ax_rde.set_ylim(_ymin_rde - _pad_rde, _ymax_rde + _pad_rde)
+                # Manually fixed y limits (do not autoscale to data).
+                _ylim_fixed_rde = (-6, 2)
+                _ax_rde.set_ylim(*_ylim_fixed_rde)
                 _ax_rde.tick_params(axis='both', direction='in')
                 _ax_rde.spines['top'].set_visible(False)
                 _ax_rde.spines['right'].set_visible(False)
 
                 # ── Mann-Whitney U tests for all condition pairs ───────────
+                # Brackets are packed into the headroom between the highest data
+                # point and the fixed y-limit top, so they never push the axis
+                # beyond the manually set limits above.
                 import itertools as _itertools_rde
                 _pairs_rde = list(_itertools_rde.combinations(range(_n_conds_rde), 2))
-                _ylim_cur_rde = list(_ax_rde.get_ylim())
-                _bracket_step_rde = (_ylim_cur_rde[1] - _ylim_cur_rde[0]) * 0.14
-                _bracket_base_rde = _ylim_cur_rde[1]
+                _data_top_rde = float(np.nanmax(_all_rde_vals)) if _all_rde_vals else _ylim_fixed_rde[1]
+                _headroom_rde = max(_ylim_fixed_rde[1] - _data_top_rde, 0.0)
+                _n_brackets_rde = max(len(_pairs_rde), 1)
+                _bracket_step_rde = _headroom_rde / (_n_brackets_rde + 1)
+                _bracket_base_rde = _data_top_rde
                 for _pi, (_ia, _ib) in enumerate(_pairs_rde):
                     _vals_a_rde = [e[1] for e in _rde_by_cond[_conds_rde[_ia]]]
                     _vals_b_rde = [e[1] for e in _rde_by_cond[_conds_rde[_ib]]]
@@ -13767,9 +13793,9 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                                  color='black')
                     _ax_rde.text((_ia + _ib) / 2, _bh_rde + _bracket_step_rde * 0.05,
                                  _sig_str_rde, ha='center', va='bottom')
-                if _pairs_rde:
-                    _new_top_rde = _bracket_base_rde + _bracket_step_rde * (len(_pairs_rde) + 1.5)
-                    _ax_rde.set_ylim(_ylim_cur_rde[0], _new_top_rde)
+                # Reassert the fixed y limits (drawing brackets/text can trigger
+                # matplotlib autoscale, which we don't want here).
+                _ax_rde.set_ylim(*_ylim_fixed_rde)
 
                 epoch_reward_speed_diff_entry_fig.suptitle(
                     'Post- vs Pre-Zone Entry Speed Difference by Condition (Reward Zone)\n'
