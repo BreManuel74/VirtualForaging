@@ -16,13 +16,99 @@ Expected CSV format:
 
 import os
 import glob
+import pickle
+import hashlib
 import tkinter as tk
 from tkinter import filedialog
-import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from scipy import stats
 import lick_detection_algorithm as lda
+
+# Cache directory for KDE values (same cache used by longitudinal_analysis_new_hallway.py,
+# so a file's KDE baseline only ever needs to be computed once across scripts). Fitting and
+# evaluating a gaussian_kde over an entire raw capacitive signal is the slowest step in this
+# pipeline, so skipping it on repeat runs of the same file is the main speedup here.
+script_dir = os.path.dirname(os.path.abspath(__file__))
+KDE_CACHE_DIR = os.path.join(script_dir, '.kde_cache')
+if not os.path.exists(KDE_CACHE_DIR):
+    os.makedirs(KDE_CACHE_DIR)
+
+
+def get_file_hash(filepath):
+    """Generate a hash based on file path and modification time."""
+    stat = os.stat(filepath)
+    # Use file path, size, and modification time to create unique identifier
+    hash_input = f"{filepath}_{stat.st_size}_{stat.st_mtime}".encode('utf-8')
+    return hashlib.md5(hash_input).hexdigest()
+
+
+def get_cached_kde(capacitive_filepath):
+    """Retrieve cached KDE value for a capacitive file if it exists."""
+    file_hash = get_file_hash(capacitive_filepath)
+    cache_file = os.path.join(KDE_CACHE_DIR, f"{file_hash}.pkl")
+
+    if os.path.exists(cache_file):
+        try:
+            with open(cache_file, 'rb') as f:
+                cached_data = pickle.load(f)
+                return cached_data['kde_value']
+        except Exception as e:
+            # If cache is corrupted, ignore and recalculate
+            print(f"Warning: Cache read failed for {capacitive_filepath}: {e}")
+            return None
+    return None
+
+
+def cache_kde_value(capacitive_filepath, kde_value):
+    """Cache the KDE value for a capacitive file."""
+    file_hash = get_file_hash(capacitive_filepath)
+    cache_file = os.path.join(KDE_CACHE_DIR, f"{file_hash}.pkl")
+
+    try:
+        with open(cache_file, 'wb') as f:
+            pickle.dump({'kde_value': kde_value}, f)
+    except Exception as e:
+        # If caching fails, just continue without caching
+        print(f"Warning: Cache write failed for {capacitive_filepath}: {e}")
+
+
+def _threshold_cache_file(capacitive_filepath, min_gap_floor, min_gap_ceiling, min_gap_fraction):
+    """Build the cache path for a dynamic-threshold result.
+
+    The dynamic KDE-valley threshold search (in detect_events_above_threshold) is the
+    slowest step in the pipeline (fitting/evaluating a gaussian_kde over every deviation
+    sample) and is deterministic for a given file and set of gap parameters, so it is
+    cached the same way as the KDE baseline above, keyed on those parameters as well.
+    """
+    file_hash = get_file_hash(capacitive_filepath)
+    key_input = f"{file_hash}_{min_gap_floor}_{min_gap_ceiling}_{min_gap_fraction}".encode('utf-8')
+    key_hash = hashlib.md5(key_input).hexdigest()
+    return os.path.join(KDE_CACHE_DIR, f"{key_hash}_threshold.pkl")
+
+
+def get_cached_threshold(capacitive_filepath, min_gap_floor, min_gap_ceiling, min_gap_fraction):
+    """Retrieve a cached dynamic threshold for a file + gap-parameter combination."""
+    cache_file = _threshold_cache_file(capacitive_filepath, min_gap_floor, min_gap_ceiling, min_gap_fraction)
+
+    if os.path.exists(cache_file):
+        try:
+            with open(cache_file, 'rb') as f:
+                return pickle.load(f)['threshold']
+        except Exception as e:
+            print(f"Warning: Cache read failed for {capacitive_filepath}: {e}")
+            return None
+    return None
+
+
+def cache_threshold_value(capacitive_filepath, min_gap_floor, min_gap_ceiling, min_gap_fraction, threshold):
+    """Cache a dynamic threshold for a file + gap-parameter combination."""
+    cache_file = _threshold_cache_file(capacitive_filepath, min_gap_floor, min_gap_ceiling, min_gap_fraction)
+
+    try:
+        with open(cache_file, 'wb') as f:
+            pickle.dump({'threshold': threshold}, f)
+    except Exception as e:
+        print(f"Warning: Cache write failed for {capacitive_filepath}: {e}")
 
 
 def select_folder():
@@ -77,19 +163,26 @@ def load_and_prepare_data(csv_path):
     return df
 
 
-def run_lick_detection(df, threshold=None, ili_cutoff=0.3):
+def run_lick_detection(df, csv_path, threshold=None, ili_cutoff=0.3,
+                        min_gap_floor=6.1, min_gap_ceiling=15.0, min_gap_fraction=0.2,
+                        debug=False):
     """Run the complete lick detection pipeline."""
     print("\n" + "="*60)
     print("RUNNING LICK DETECTION ALGORITHM")
     print("="*60)
     
-    # Step 1: Compute KDE
+    # Step 1: Compute KDE (cached per-file, since fitting/evaluating the KDE over the
+    # full raw signal is the slowest step and the result never changes unless the file does)
     print("\n[1/5] Computing KDE baseline...")
-    kde_value = lda.compute_KDE(df, 'capacitive_value')
-    if kde_value is None:
-        print("✗ KDE computation failed")
-        return None, None, None, None
-    print(f"✓ KDE baseline: {kde_value:.4f}")
+    kde_value = get_cached_kde(csv_path)
+    cache_hit = kde_value is not None
+    if not cache_hit:
+        kde_value = lda.compute_KDE(df, 'capacitive_value')
+        if kde_value is None:
+            print("✗ KDE computation failed")
+            return None, None, None, None
+        cache_kde_value(csv_path, kde_value)
+    print(f"✓ KDE baseline: {kde_value:.4f}" + (" (cached)" if cache_hit else ""))
     
     # Step 2: Compute KDE normalizations
     print("\n[2/5] Computing KDE normalizations...")
@@ -98,7 +191,29 @@ def run_lick_detection(df, threshold=None, ili_cutoff=0.3):
     
     # Step 3: Detect events (with dynamic threshold calculation if threshold is None)
     print(f"\n[3/5] Detecting events...")
-    events_df, threshold = lda.detect_events_above_threshold(df_normalized, 'capacitive_value', threshold=threshold)
+    # The dynamic KDE-valley threshold search is the slowest step in the pipeline, so
+    # reuse a cached result for this file + gap-parameter combo when threshold wasn't
+    # explicitly provided (an explicit threshold always bypasses the dynamic search anyway).
+    threshold_cache_hit = False
+    effective_threshold = threshold
+    if effective_threshold is None:
+        cached_threshold = get_cached_threshold(csv_path, min_gap_floor, min_gap_ceiling, min_gap_fraction)
+        if cached_threshold is not None:
+            effective_threshold = cached_threshold
+            threshold_cache_hit = True
+
+    events_df, threshold = lda.detect_events_above_threshold(
+        df_normalized, 'capacitive_value', threshold=effective_threshold,
+        min_gap_floor=min_gap_floor, min_gap_ceiling=min_gap_ceiling,
+        min_gap_fraction=min_gap_fraction, debug=debug
+    )
+
+    if threshold_cache_hit:
+        print(f"✓ Loaded cached dynamic threshold: {threshold:.4f}")
+    elif effective_threshold is None:
+        # We just computed the dynamic threshold fresh; cache it for next time.
+        cache_threshold_value(csv_path, min_gap_floor, min_gap_ceiling, min_gap_fraction, threshold)
+
     n_events = events_df['capacitive_value_event'].sum()
     print(f"✓ Detected {n_events} lick events")
     
@@ -165,7 +280,8 @@ def print_summary_statistics(df_normalized, events_df, bout_dict, threshold, ili
         print(f"  Range: {ili_array.min():.3f}s - {ili_array.max():.3f}s")
 
 
-def process_file(csv_path, threshold=None, ili_cutoff=0.3, auto_save=False, output_dir=None):
+def process_file(csv_path, threshold=None, ili_cutoff=0.3, auto_save=False, output_dir=None,
+                  min_gap_floor=7.0, min_gap_ceiling=15.0, min_gap_fraction=0.2, debug=False):
     """Run the full lick detection pipeline and visualizations for a single CSV file."""
     print("\n" + "="*60)
     print(f"PROCESSING: {os.path.basename(csv_path)}")
@@ -178,7 +294,9 @@ def process_file(csv_path, threshold=None, ili_cutoff=0.3, auto_save=False, outp
 
     # Run lick detection
     df_normalized, events_df, kde_value, bout_dict, threshold = run_lick_detection(
-        df, threshold=threshold, ili_cutoff=ili_cutoff
+        df, csv_path, threshold=threshold, ili_cutoff=ili_cutoff,
+        min_gap_floor=min_gap_floor, min_gap_ceiling=min_gap_ceiling,
+        min_gap_fraction=min_gap_fraction, debug=debug
     )
     
     if events_df is None:
@@ -206,118 +324,6 @@ def process_file(csv_path, threshold=None, ili_cutoff=0.3, auto_save=False, outp
     )
     
     print("\n✓ Visualization displayed")
-
-    # Plot histogram + KDE density overlay for threshold diagnostics
-    print("\n" + "="*60)
-    print("CAPACITIVE VALUE HISTOGRAM (KDE VALLEY DIAGNOSTIC)")
-    print("="*60)
-    deviation_col = 'capacitive_value_deviation'
-    deviations = df_normalized[deviation_col].dropna()
-    # Always use the full data range so rare single-lick events are visible
-    x_max = deviations.max() * 1.02
-    x_eval = np.linspace(0, x_max, 1000)
-
-    fig_hist, (ax_top, ax_bot) = plt.subplots(2, 1, figsize=(9, 8), sharex=True)
-    fig_hist.suptitle(f'KDE Valley Threshold Diagnostic: {filename}', fontsize=13)
-
-    # --- Top panel: histogram ---
-    ax_top.hist(deviations, bins=100, color='steelblue', edgecolor='white',
-                linewidth=0.3, density=True, alpha=0.7, label='Deviation histogram')
-    ax_top.axvline(threshold, color='red', linestyle='--', linewidth=2,
-                   label=f'Valley threshold: {threshold:.4f}')
-    ax_top.set_ylabel('Density', fontsize=11)
-    ax_top.set_title('Deviation Distribution (density-normalised)', fontsize=11)
-    ax_top.legend(fontsize=10)
-    ax_top.spines['top'].set_visible(False)
-    ax_top.spines['right'].set_visible(False)
-
-    # --- Bottom panel: KDE density curve with FWHM boundary and valley marked ---
-    clean = deviations.values[np.isfinite(deviations.values) & (deviations.values >= 0)]
-    try:
-        kde_curve = stats.gaussian_kde(clean, bw_method='scott')
-        density_vals = kde_curve(x_eval)
-        ax_bot.plot(x_eval, density_vals, color='darkorange', linewidth=2, label='KDE density')
-
-        from scipy.signal import find_peaks as _fp
-        MIN_GAP_FWHM_MULTIPLIER = 2.0  # must match _compute_kde_valley_threshold default
-        MIN_GAP_FLOOR = 4.5
-        MIN_GAP_CEILING = 15.0
-        peaks_idx, _ = _fp(density_vals)
-        if len(peaks_idx) > 0:
-            noise_peak = peaks_idx[0]
-            noise_peak_x = x_eval[noise_peak]
-            half_max = density_vals[noise_peak] / 2.0
-
-            ax_bot.axvline(noise_peak_x, color='green', linestyle=':', linewidth=1.5,
-                           label=f'Noise peak: {noise_peak_x:.4f}')
-            ax_bot.axhline(half_max, color='gray', linestyle=':', linewidth=1,
-                           alpha=0.6, label='Half-max (FWHM level)')
-
-            # Find FWHM right edge first — the min gap is derived from its width,
-            # not from a percentile of the full (noise-contaminated) deviation array
-            right_half = density_vals[noise_peak:]
-            below_half = np.where(right_half < half_max)[0]
-            if len(below_half) > 0:
-                fwhm_right_idx = noise_peak + below_half[0]
-                fwhm_right_x = x_eval[fwhm_right_idx]
-                ax_bot.axvline(fwhm_right_x, color='goldenrod', linestyle='--', linewidth=1.5,
-                               label=f'FWHM noise edge: {fwhm_right_x:.4f}')
-
-                fwhm_half_width = fwhm_right_x - noise_peak_x
-                MIN_DEVIATION_GAP = np.clip(
-                    MIN_GAP_FWHM_MULTIPLIER * fwhm_half_width, MIN_GAP_FLOOR, MIN_GAP_CEILING
-                )
-                gap_x = noise_peak_x + MIN_DEVIATION_GAP
-                ax_bot.axvline(gap_x, color='darkorchid', linestyle=':', linewidth=1.5,
-                               alpha=0.8, label=f'Min gap boundary (+{MIN_DEVIATION_GAP:.1f}): {gap_x:.4f}')
-
-                # Fallback = max(FWHM, gap) — mirrors the algorithm fix
-                fallback_x = max(fwhm_right_x, gap_x)
-
-                # Find deepest valley past max(FWHM, gap)
-                search_start_x = fallback_x
-                search_mask = x_eval >= search_start_x
-                if search_mask.any():
-                    search_start_idx = np.where(search_mask)[0][0]
-                    post_search = density_vals[search_start_idx:]
-                    v_rel, _ = _fp(-post_search)
-                    if len(v_rel) > 0:
-                        deepest_rel = v_rel[np.argmin(post_search[v_rel])]
-                        valley_idx = search_start_idx + deepest_rel
-                        # Only accept if signal peak follows
-                        post_v_peaks, _ = _fp(density_vals[valley_idx:])
-                        if len(post_v_peaks) > 0:
-                            ax_bot.axvline(x_eval[valley_idx], color='red', linestyle='--', linewidth=2,
-                                           label=f'Valley (threshold): {x_eval[valley_idx]:.4f}')
-                            ax_bot.scatter([x_eval[valley_idx]], [density_vals[valley_idx]],
-                                           color='red', s=80, zorder=5)
-                        else:
-                            ax_bot.axvline(fallback_x, color='red', linestyle='--', linewidth=2,
-                                           label=f'Fallback threshold: {fallback_x:.4f}')
-                    else:
-                        # No valley found — fallback = max(FWHM, noise_peak + 20)
-                        ax_bot.axvline(fallback_x, color='red', linestyle='--', linewidth=2,
-                                       label=f'Fallback threshold: {fallback_x:.4f}')
-
-            # Mark any signal peaks beyond the noise peak
-            for pk in peaks_idx[1:]:
-                ax_bot.axvline(x_eval[pk], color='purple', linestyle=':', linewidth=1,
-                               alpha=0.6, label=f'Signal peak: {x_eval[pk]:.4f}')
-    except Exception as e:
-        print(f"  (KDE overlay failed: {e})")
-
-    ax_bot.set_xlabel('Normalized Capacitive Deviation  |  (value − KDE) / KDE  |', fontsize=11)
-    ax_bot.set_ylabel('KDE Density', fontsize=11)
-    ax_bot.set_title('KDE Density Curve — Valley Detection', fontsize=11)
-    ax_bot.set_xlim(left=0, right=x_max * 1.02)
-    ax_bot.set_ylim(bottom=0)
-    ax_bot.legend(fontsize=9)
-    ax_bot.spines['top'].set_visible(False)
-    ax_bot.spines['right'].set_visible(False)
-
-    plt.tight_layout()
-    plt.show()
-    print("✓ Histogram + KDE diagnostic plot displayed")
 
     # Save or prompt to save the figure
     save = auto_save
@@ -377,12 +383,18 @@ def main():
     ili_cutoff_input = input("Enter ILI cutoff for bouts in seconds [default=0.3]: ").strip()
     ili_cutoff = float(ili_cutoff_input) if ili_cutoff_input else 0.3
 
+    min_gap_floor = 6.1  # Minimum allowed adaptive gap (noise/signal boundary floor)
+
+    min_gap_ceiling_input = input("Enter maximum adaptive gap ceiling [default=15.0]: ").strip()
+    min_gap_ceiling = float(min_gap_ceiling_input) if min_gap_ceiling_input else 15.0
+
     auto_save_input = input("Auto-save figures for every file? (y/n) [default=n]: ").strip().lower()
     auto_save = auto_save_input in ['y', 'yes']
 
     for csv_path in csv_files:
         process_file(csv_path, threshold=threshold, ili_cutoff=ili_cutoff,
-                      auto_save=auto_save, output_dir=folder_path)
+                      auto_save=auto_save, output_dir=folder_path,
+                      min_gap_floor=min_gap_floor, min_gap_ceiling=min_gap_ceiling)
 
     print("\n" + "="*60)
     print(f"BATCH COMPLETE: processed {len(csv_files)} file(s)")

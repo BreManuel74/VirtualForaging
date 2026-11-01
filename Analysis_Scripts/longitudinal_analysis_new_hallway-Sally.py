@@ -1,4 +1,4 @@
-﻿"""
+"""
 ================================================================================
   *** MAIN ANALYSIS SCRIPT — CITRIC ACID PROJECT ***
 ================================================================================
@@ -1479,6 +1479,7 @@ _ALL_PLOT_KEYS = {
     'avg_lick_rate', 'sex_lick_rate', 'condition_lick_rate', 'condition_lick_bar',
     'level_lick', 'level_lick_condition',
     'level_sensitivity',
+    'level_sensitivity_cohort',
     'level_dist', 'level_dist_condition', 'level_dist_condition_excl_last',
     'bout_count', 'avg_bout_count', 'condition_bout_count', 'condition_bout_count_bar',
     'rewards_per_bout', 'condition_rewards_per_bout', 'condition_rewards_per_bout_bar',
@@ -1493,6 +1494,7 @@ _ALL_PLOT_KEYS = {
     'level_survivor',
     'time_to_level2',
     'level_progression_indiv',
+    'level_progression_indiv_cohort',
     'level_progression_condition',
     'level_progression_bar',
     'lick_after_reward_prop', 'lick_after_reward_prop_bar', 'lick_after_reward_prop_5s_bar',
@@ -1517,7 +1519,7 @@ _ALL_PLOT_KEYS = {
     'epoch_punish_speed', 'epoch_punish_cap',
     'epoch_punish_speed_sess', 'epoch_punish_cap_sess',
     'epoch_punish_speed_sess_clean', 'epoch_punish_cap_sess_clean',
-    'sex_speed', 'sex_distance_indiv', 'sex_reward_indiv',
+    'sex_speed', 'sex_distance_indiv', 'cohort_distance_indiv', 'sex_reward_indiv',
     'epoch_reward_speed_sess_sex', 'epoch_reward_cap_sess_sex',
     'epoch_punish_speed_sess_sex', 'epoch_punish_cap_sess_sex',
     'epoch_reward_speed_pre_post',
@@ -1639,6 +1641,7 @@ _PLOT_LABELS = [
     ('level_lick',            'Level: Average lick rate by level — collapsed (requires transitions CSV)'),
     ('level_lick_condition',  'Level: Average lick rate by level — by condition (requires transitions CSV)'),
     ('level_sensitivity',     'Level: Sensitivity by level — individual mice (requires transitions CSV)'),
+    ('level_sensitivity_cohort', 'Level: Sensitivity by level — individual mice, circle/square by cohort_number (requires transitions CSV)'),
     ('level_dist',            'Level: Distance traveled by level — collapsed (requires transitions CSV)'),
     ('level_dist_condition',  'Level: Distance traveled by level — by condition (requires transitions CSV)'),
     ('level_dist_condition_excl_last', 'Level: Distance traveled by level — by condition, last level excluded (requires transitions CSV)'),
@@ -1652,6 +1655,7 @@ _PLOT_LABELS = [
     ('level_survivor',                 'Level: Survivor plot — proportion of mice that experienced each level, by condition (requires transitions CSV)'),
     ('time_to_level2',                 'Level: Cumulative time (min) until first level 1→2 transition — bar chart by condition (requires transitions CSV)'),
     ('level_progression_indiv',      'Level: Ending level per session — individual mice (requires transitions CSV)'),
+    ('level_progression_indiv_cohort', 'Level: Ending level per session — individual mice, circle/square by cohort_number (requires transitions CSV)'),
     ('level_progression_condition',  'Level: Ending level per session — condition mean ± SEM line plot (requires transitions CSV)'),
     ('level_progression_bar',        'Level: Rate of level change (slope of ending level vs session) — collapsed bar chart by condition (Mann-Whitney U; requires transitions CSV)'),  
     ('bout_avg_speed',               'Individual: Average speed per locomotion bout'),
@@ -1682,6 +1686,7 @@ _PLOT_LABELS = [
     ('epoch_punish_cap_sess_clean',  'Epoch: Capacitive value — punishment zone, session-averaged, by condition only (no individual traces)'),
     ('sex_speed',          'Individual: Average speed over time — colored by sex'),
     ('sex_distance_indiv', 'Individual: Total distance per session — colored by sex (m)'),
+    ('cohort_distance_indiv', 'Individual: Total distance per session — colored by starting condition, circle/square by cohort_number (m)'),
     ('sex_reward_indiv',   'Individual: Reward rate per session — colored by sex (rewards/min)'),
     ('epoch_reward_speed_sess_sex', 'Epoch: Treadmill speed — session-averaged, aligned to reward zone entry (by sex)'),
     ('epoch_reward_cap_sess_sex',   'Epoch: Capacitive value — session-averaged, aligned to reward zone entry (by sex)'),
@@ -1821,7 +1826,7 @@ def _ask_plot_selection(root, labels=None, title='Select Plots to Generate'):
     return frozenset(key for key, var in vars_.items() if var.get())
 
 
-def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, animal_markers=None, selected_plots=None, output_dir=None):
+def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, animal_markers=None, selected_plots=None, output_dir=None, animal_cohort_markers=None):
     """Analyze rewards/min for each level across all mice, split by starting condition.
 
     Uses a transitions CSV (produced by level_sorter.py) to slice each session's
@@ -1856,13 +1861,13 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
     # Load transitions CSV -------------------------------------------------------
     if not transitions_csv_path:
         print("  [WARN] No transitions CSV provided — level plot will be empty.")
-        return plt.figure(figsize=(15, 8)), None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None
+        return plt.figure(figsize=(15, 8)), None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None
     try:
         transitions_df = pd.read_csv(transitions_csv_path)
         transitions_df['date'] = pd.to_datetime(transitions_df['date'])
     except Exception as e:
         print(f"  [ERROR] Cannot read transitions CSV: {e}")
-        return plt.figure(figsize=(15, 8)), None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None
+        return plt.figure(figsize=(15, 8)), None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None
 
     # Build lookup (animal_id, date_normalised) -> {trial_log, capacitive} ------
     session_lookup = {}
@@ -1950,7 +1955,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
                                 cache_kde_value(capacitive_path, kde_val)
                             cap_df = lda.compute_KDE_normalizations(cap_df, 'capacitive_value', kde_val)
                             events_df, _ = lda.detect_events_above_threshold(
-                                cap_df, 'capacitive_value', threshold=None)
+                                cap_df, 'capacitive_value', threshold=None, min_gap_floor=6.1)
                             mask_evt = events_df['capacitive_value_event'] == 1
                             lick_event_times = events_df.loc[mask_evt, 'Time_sec'].values.astype(float)
                     except Exception:
@@ -3226,6 +3231,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
 
     # ── Level progression: ending level per session ────────────────────────────
     level_progression_indiv_fig = None
+    level_progression_indiv_cohort_fig = None
     level_progression_condition_fig = None
     level_progression_bar_fig = None
     _prog_by_animal: dict = {}  # animal_id -> [(session_rank, level_num)]
@@ -3260,8 +3266,8 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
                             alpha=0.8)
             ax_lpi.set_xlabel('Session')
             ax_lpi.set_ylabel('Ending Level')
-            ax_lpi.set_ylim(0, 12)
-            ax_lpi.set_yticks(range(0, 13, 2))
+            ax_lpi.set_ylim(0, 40)
+            ax_lpi.set_yticks(range(0, 41, 5))
             ax_lpi.set_xlim(0, 13)
             ax_lpi.set_xticks(range(1, 14, 1))
             ax_lpi.set_title('Level Progression — Individual Mice')
@@ -3282,6 +3288,47 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
             ax_lpi.legend(handles=_lpi_legend_handles, frameon=False,
                           fontsize=plt.rcParams['legend.fontsize'])
             level_progression_indiv_fig.tight_layout()
+
+        # Individual plot (cohort variant): same as above, but marker shape reflects
+        # cohort_number ('o' = cohort 1, 's' = cohort 2) instead of sex.
+        if 'level_progression_indiv_cohort' in selected_plots:
+            level_progression_indiv_cohort_fig, ax_lpic = plt.subplots(
+                figsize=plt.rcParams['figure.figsize'])
+            for aid, pts in _prog_by_animal.items():
+                cond = _prog_animal_cond.get(aid, 'Unknown')
+                color = cond_color_map.get(cond, 'gray')
+                marker = (animal_cohort_markers or {}).get(aid, 'o')
+                xs = [p[0] for p in pts]
+                ys = [p[1] for p in pts]
+                ax_lpic.plot(xs, ys, f'-{marker}',
+                             color=color,
+                             linewidth=plt.rcParams['lines.linewidth'],
+                             markersize=plt.rcParams['lines.markersize'],
+                             alpha=0.8)
+            ax_lpic.set_xlabel('Session')
+            ax_lpic.set_ylabel('Ending Level')
+            ax_lpic.set_ylim(0, 40)
+            ax_lpic.set_yticks(range(0, 41, 5))
+            ax_lpic.set_xlim(0, 13)
+            ax_lpic.set_xticks(range(1, 14, 1))
+            ax_lpic.set_title('Level Progression — Individual Mice')
+            ax_lpic.tick_params(axis='both', direction='in')
+            ax_lpic.spines['top'].set_visible(False)
+            ax_lpic.spines['right'].set_visible(False)
+            _lpic_legend_handles = [
+                Line2D([0], [0], color=col,
+                       linewidth=plt.rcParams['lines.linewidth'], label=cond)
+                for cond, col in sorted(cond_color_map.items())
+            ]
+            _lpic_legend_handles.append(
+                Line2D([0], [0], color='gray', marker='o', linestyle='None',
+                       markersize=plt.rcParams['lines.markersize'], label='Cohort 1'))
+            _lpic_legend_handles.append(
+                Line2D([0], [0], color='gray', marker='s', linestyle='None',
+                       markersize=plt.rcParams['lines.markersize'], label='Cohort 2'))
+            ax_lpic.legend(handles=_lpic_legend_handles, frameon=False,
+                           fontsize=plt.rcParams['legend.fontsize'])
+            level_progression_indiv_cohort_fig.tight_layout()
 
         # Condition-averaged plot: mean ± SEM per session rank, per condition
         if 'level_progression_condition' in selected_plots:
@@ -3319,8 +3366,8 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
                 ax_lpc.set_title('Level Progression \u2014 Condition Mean \u00b1 SEM')
                 ax_lpc.set_xlim(0, 13)
                 ax_lpc.set_xticks(range(1, 14))
-                ax_lpc.set_ylim(0, 12)
-                ax_lpc.set_yticks(range(0, 13, 2))
+                ax_lpc.set_ylim(0, 25)
+                ax_lpc.set_yticks(range(0, 26, 5))
                 ax_lpc.tick_params(axis='both', direction='in')
                 ax_lpc.spines['top'].set_visible(False)
                 ax_lpc.spines['right'].set_visible(False)
@@ -3478,6 +3525,63 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
                            fontsize=plt.rcParams['legend.fontsize'])
             # tight_layout() omitted — constrained_layout=True handles spacing
 
+    # ── Sensitivity by level — individual mice (cohort variant) ──────────────
+    # Same data/layout as above, but marker shape reflects cohort_number
+    # ('o' = cohort 1, 's' = cohort 2) instead of sex.
+    level_sensitivity_cohort_fig = None
+    if 'level_sensitivity_cohort' in selected_plots:
+        animal_level_sensitivity_c: dict[tuple, float] = {}
+        for (animal_id, level), accum in animal_level_accum.items():
+            opp  = accum.get('level_opportunities', 0)
+            hits = accum.get('level_hits', 0)
+            if opp > 0:
+                animal_level_sensitivity_c[(animal_id, level)] = min(float(hits) / float(opp), 1.0)
+            else:
+                animal_level_sensitivity_c[(animal_id, level)] = float('nan')
+        if animal_level_sensitivity_c:
+            all_lvls_senc = sorted({lv for (_, lv) in animal_level_sensitivity_c}, key=sort_key)
+            all_animals_senc = sorted({an for (an, _) in animal_level_sensitivity_c})
+            level_sensitivity_cohort_fig = plt.figure(figsize=plt.rcParams['figure.figsize'], constrained_layout=True)
+            for animal_id in all_animals_senc:
+                condition = (animal_conditions or {}).get(animal_id, 'Unknown')
+                color = cond_color_map.get(condition, 'gray')
+                marker = (animal_cohort_markers or {}).get(animal_id, 'o')
+                x_vals, y_vals = [], []
+                for lv_idx, lv in enumerate(all_lvls_senc):
+                    val = animal_level_sensitivity_c.get((animal_id, lv))
+                    if val is not None and not np.isnan(val):
+                        x_vals.append(lv_idx + 1)
+                        y_vals.append(val)
+                if x_vals:
+                    plt.plot(x_vals, y_vals, f'-{marker}',
+                             color=color,
+                             linewidth=plt.rcParams['lines.linewidth'],
+                             markersize=plt.rcParams['lines.markersize'])
+            ax_lsenc = plt.gca()
+            ax_lsenc.set_xlim(0, 14)  # adjust manually as needed
+            ax_lsenc.set_xticks(range(0, 15, 2))
+            ax_lsenc.set_title('Sensitivity by Level')
+            ax_lsenc.set_xlabel('Level')
+            ax_lsenc.set_ylabel('Sensitivity')
+            ax_lsenc.set_ylim(0, 1.1)
+            ax_lsenc.tick_params(axis='both', direction='in')
+            ax_lsenc.spines['top'].set_visible(False)
+            ax_lsenc.spines['right'].set_visible(False)
+            # Legend: condition colors + cohort marker shapes
+            _senc_legend_handles = [
+                Line2D([0], [0], color=col, linewidth=plt.rcParams['lines.linewidth'], label=cond)
+                for cond, col in sorted(cond_color_map.items())
+            ]
+            _senc_legend_handles.append(
+                Line2D([0], [0], color='gray', marker='o', linestyle='None',
+                       markersize=plt.rcParams['lines.markersize'], label='Cohort 1'))
+            _senc_legend_handles.append(
+                Line2D([0], [0], color='gray', marker='s', linestyle='None',
+                       markersize=plt.rcParams['lines.markersize'], label='Cohort 2'))
+            ax_lsenc.legend(handles=_senc_legend_handles, frameon=False,
+                            fontsize=plt.rcParams['legend.fontsize'])
+            # tight_layout() omitted — constrained_layout=True handles spacing
+
     # ── Per-level immobility proportion — individual mice ────────────────────
     level_immobility_prop_fig = None
     if 'level_immobility_prop' in (selected_plots or set()) and animal_level_accum:
@@ -3545,7 +3649,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
         'level_progression':             _prog_by_animal,
     } if (condition_level_data or _prog_by_animal) else None
 
-    return level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_sensitivity_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, last_level_bar_fig, level_survivor_fig, time_to_level2_fig, level_progression_indiv_fig, level_progression_condition_fig, level_progression_bar_fig, level_immobility_prop_fig, _level_stats
+    return level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_sensitivity_fig, level_sensitivity_cohort_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, last_level_bar_fig, level_survivor_fig, time_to_level2_fig, level_progression_indiv_fig, level_progression_indiv_cohort_fig, level_progression_condition_fig, level_progression_bar_fig, level_immobility_prop_fig, _level_stats
 
 
 # ── Descriptive statistics report ────────────────────────────────────────────
@@ -4779,10 +4883,14 @@ def _plot_epoch_early_late_panels(all_results, signal_key, ylabel, title_prefix,
     return fig_pm_early, fig_pm_late, fig_cond_early, fig_cond_late
 
 
-def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv_path=None, selected_plots=None, save_lick_plots=False, output_dir=None):
+def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv_path=None, selected_plots=None, save_lick_plots=False, output_dir=None, cohort_markers=None):
     # Create dictionaries to map mouse names to markers and starting conditions
     markers = {os.path.basename(file).split("_")[0]: marker for file, marker in zip(data_files, markers)}
     conditions = {os.path.basename(file).split("_")[0]: condition for file, condition in zip(data_files, starting_conditions)}
+    # cohort_markers: 'o' for cohort_number 1, 's' for cohort_number 2 (used by the
+    # cohort_distance_indiv plot, which keeps starting_condition colors but swaps the
+    # sex-based marker shape for a cohort-based one).
+    cohort_markers = {os.path.basename(file).split("_")[0]: marker for file, marker in zip(data_files, cohort_markers)} if cohort_markers else {}
     if selected_plots is None:
         selected_plots = set(_ALL_PLOT_KEYS)
 
@@ -4821,6 +4929,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     bout_avg_dist_fig     = plt.figure(figsize=(12, 6)) if 'bout_avg_dist'      in selected_plots else None
     sex_speed_fig         = plt.figure(figsize=(12, 6)) if 'sex_speed'          in selected_plots else None
     sex_distance_indiv_fig= plt.figure(figsize=plt.rcParams['figure.figsize']) if 'sex_distance_indiv' in selected_plots else None
+    cohort_distance_indiv_fig = plt.figure(figsize=plt.rcParams['figure.figsize']) if 'cohort_distance_indiv' in selected_plots else None
     sex_reward_indiv_fig  = plt.figure(figsize=(12, 6)) if 'sex_reward_indiv'   in selected_plots else None
     colors = generate_colors(len(data_files))  # Generate colors based on number of mice
     
@@ -5181,7 +5290,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                         cache_kde_value(capacitive_filepath, kde_value)
 
                     cap_df = lda.compute_KDE_normalizations(cap_df, 'capacitive_value', kde_value)
-                    events_df, threshold_used = lda.detect_events_above_threshold(cap_df, 'capacitive_value', threshold=None)
+                    events_df, threshold_used = lda.detect_events_above_threshold(cap_df, 'capacitive_value', threshold=None, min_gap_floor=6.1)
                     lick_count = events_df['capacitive_value_event'].sum()
                     # Store timestamps of detected lick events for epoch analysis
                     _sess_lick_times = events_df.loc[
@@ -6045,6 +6154,15 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             plt.plot(day_numbers, dist_m,
                 f'{markers[mouse_name]}-', color=condition_color, markersize=plt.rcParams['lines.markersize'], label='_no_legend')
 
+        if cohort_distance_indiv_fig is not None:
+            plt.figure(cohort_distance_indiv_fig.number)
+            # convert mm → m; marker shape comes from cohort_number ('o' = cohort 1, 's' = cohort 2)
+            # instead of sex, color still reflects starting_condition.
+            _cohort_marker = cohort_markers.get(mouse_name, 'o')
+            _dist_m_cohort = df_r['total_distance'] / 1000.0
+            plt.plot(day_numbers, _dist_m_cohort,
+                f'{_cohort_marker}-', color=condition_color, markersize=plt.rcParams['lines.markersize'], label='_no_legend')
+
         if immobility_prop_fig is not None:
             plt.figure(immobility_prop_fig.number)
             _immo_vals = pd.to_numeric(df_r.get('immobility_prop', pd.Series(dtype=float)),
@@ -6318,6 +6436,54 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                        label=f'{cond}% Female')
             )
         ax.legend(handles=combined_handles, title="Starting Condition × Sex",
+                  loc="upper left", frameon=False, ncol=1)
+        ax.tick_params(axis='both', direction='in')
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.set_ylim(bottom=0, top=600)
+        ax.set_yticks(range(0, 601, 200))
+        ax.set_xlim(left=0, right=13)
+        ax.xaxis.set_major_locator(plt.MultipleLocator(major_spacing))
+        ax.xaxis.set_minor_locator(plt.MultipleLocator(minor_spacing))
+        ax.tick_params(axis='x', which='minor', direction='in')
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f'{int(x)}'))
+
+    # Configure cohort-based distance plot (same as distance plot, but marker shape
+    # reflects cohort_number instead of sex)
+    if cohort_distance_indiv_fig is not None:
+        plt.figure(cohort_distance_indiv_fig.number)
+        plt.title('Total Distance Moved Per Session')
+        plt.xlabel('Training Day')
+        plt.ylabel('Distance (m)')
+        plt.grid(False)
+        ax = plt.gca()
+
+        # Remove any existing legend artist first
+        old_leg = ax.get_legend()
+        if old_leg is not None:
+            old_leg.remove()
+
+        # Build combined legend showing all starting-condition × cohort combinations
+        combined_handles = []
+        for cond in sorted(condition_color_map.keys()):
+            color = condition_color_map[cond]
+            # Cohort 1 (circle marker)
+            combined_handles.append(
+                Line2D([0], [0], marker='o', color=color, linestyle='-',
+                       markerfacecolor=color, markeredgecolor=color,
+                       markersize=plt.rcParams['lines.markersize'],
+                       linewidth=plt.rcParams['lines.linewidth'],
+                       label=f'{cond}% Cohort 1')
+            )
+            # Cohort 2 (square marker)
+            combined_handles.append(
+                Line2D([0], [0], marker='s', color=color, linestyle='-',
+                       markerfacecolor=color, markeredgecolor=color,
+                       markersize=plt.rcParams['lines.markersize'],
+                       linewidth=plt.rcParams['lines.linewidth'],
+                       label=f'{cond}% Cohort 2')
+            )
+        ax.legend(handles=combined_handles, title="Starting Condition × Cohort",
                   loc="upper left", frameon=False, ncol=1)
         ax.tick_params(axis='both', direction='in')
         ax.spines['top'].set_visible(False)
@@ -15035,9 +15201,11 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     level_bout_avg_dist_collapsed_fig = level_bout_avg_dist_condition_fig = None
     last_level_bar_fig = None
     level_sensitivity_fig = None
+    level_sensitivity_cohort_fig = None
     level_survivor_fig = None
     time_to_level2_fig = None
-    level_progression_indiv_fig = level_progression_condition_fig = level_progression_bar_fig = None
+    level_progression_indiv_fig = level_progression_indiv_cohort_fig = None
+    level_progression_condition_fig = level_progression_bar_fig = None
     _level_stats_data = None
     if transitions_csv_path or any(k in selected_plots for k in ('levels', 'level_speed', 'level_speed_condition',
                                                                    'level_lick', 'level_lick_condition',
@@ -15047,22 +15215,26 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                                                                    'level_bout_avg_speed', 'level_bout_avg_speed_condition',
                                                                    'level_bout_avg_dist', 'level_bout_avg_dist_condition',
                                                                    'last_level_bar', 'level_survivor', 'time_to_level2', 'level_sensitivity',
-                                                                   'level_progression_indiv', 'level_progression_condition', 'level_progression_bar',
+                                                                   'level_sensitivity_cohort',
+                                                                   'level_progression_indiv', 'level_progression_indiv_cohort',
+                                                                   'level_progression_condition', 'level_progression_bar',
                                                                    'level_immobility_prop')):
         level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, \
         level_lick_collapsed_fig, level_lick_condition_fig, \
-        level_sensitivity_fig, \
+        level_sensitivity_fig, level_sensitivity_cohort_fig, \
         level_dist_collapsed_fig, level_dist_condition_fig, \
         level_dist_condition_excl_last_fig, \
         level_bout_collapsed_fig, level_bout_condition_fig, \
         level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, \
         level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, \
         last_level_bar_fig, level_survivor_fig, time_to_level2_fig, \
-        level_progression_indiv_fig, level_progression_condition_fig, level_progression_bar_fig, \
+        level_progression_indiv_fig, level_progression_indiv_cohort_fig, \
+        level_progression_condition_fig, level_progression_bar_fig, \
         level_immobility_prop_fig, \
         _level_stats_data = analyze_levels(
             data_files, transitions_csv_path, animal_conditions=conditions,
             animal_markers=markers,
+            animal_cohort_markers=cohort_markers,
             selected_plots=selected_plots,
             output_dir=output_dir,
         )
@@ -15125,7 +15297,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     # Print weekday alignment table so the user can verify Mon→Tue→Thu→Fri cycle
     print_session_weekday_alignment(all_results)
 
-    return speed_fig, sensitivity_fig, lick_fig, reward_fig, lick_reward_ratio_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, avg_sex_speed_fig, distance_fig, immobility_prop_fig, bout_count_fig, avg_bout_count_fig, rewards_per_bout_fig, first_lick_latency_fig, condition_rewards_per_bout_fig, condition_rewards_per_bout_bar_fig, condition_first_lick_latency_fig, condition_first_lick_latency_bar_fig, condition_lick_after_reward_prop_fig, condition_lick_after_reward_prop_bar_fig, condition_lick_after_reward_prop_5s_bar_fig, weekday_reward_bar_fig, weekday_reward_bar_condition_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_lick_reward_ratio_fig, condition_lick_reward_ratio_bar_fig, condition_punish_zone_pct_bar_fig, condition_bar_fig, condition_speed_bar_fig, condition_sensitivity_fig, condition_sensitivity_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_sensitivity_fig, level_immobility_prop_fig, level_rew_zone_immobility_prop_fig, level_rew_zone_immobility_prop_cond_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, last_level_bar_fig, level_survivor_fig, time_to_level2_fig, level_progression_indiv_fig, level_progression_condition_fig, level_progression_bar_fig, epoch_del_speed_per_mouse_fig, epoch_del_speed_cond_fig, epoch_del_cap_per_mouse_fig, epoch_del_cap_cond_fig, epoch_del_lick_per_mouse_fig, epoch_del_lick_cond_fig, epoch_del_cap_diff_entry_fig, epoch_del_cap_diff_065s_fig, epoch_del_lick_diff_065s_fig, condition_shuffle_zscore_fig, condition_shuffle_zscore_bar_fig, level_shuffle_zscore_fig, level_shuffle_zscore_line_fig, level_shuffle_zscore_cond_fig, condition_punish_shuffle_zscore_fig, condition_punish_shuffle_zscore_bar_fig, level_punish_shuffle_zscore_fig, level_punish_shuffle_zscore_line_fig, level_punish_shuffle_zscore_cond_fig, epoch_speed_per_mouse_fig, epoch_speed_cond_fig, epoch_cap_per_mouse_fig, epoch_cap_cond_fig, epoch_speed_sess_per_mouse_fig, epoch_speed_sess_cond_fig, epoch_cap_sess_per_mouse_fig, epoch_cap_sess_cond_fig, epoch_speed_early_per_mouse_fig, epoch_speed_late_per_mouse_fig, epoch_speed_early_cond_fig, epoch_speed_late_cond_fig, epoch_cap_early_per_mouse_fig, epoch_cap_late_per_mouse_fig, epoch_cap_early_cond_fig, epoch_cap_late_cond_fig, epoch_speed_early_ev_per_mouse_fig, epoch_speed_late_ev_per_mouse_fig, epoch_speed_early_ev_cond_fig, epoch_speed_late_ev_cond_fig, epoch_cap_early_ev_per_mouse_fig, epoch_cap_late_ev_per_mouse_fig, epoch_cap_early_ev_cond_fig, epoch_cap_late_ev_cond_fig, epoch_speed_early_ev_cond_clean_fig, epoch_speed_late_ev_cond_clean_fig, epoch_cap_early_ev_cond_clean_fig, epoch_cap_late_ev_cond_clean_fig, epoch_speed_sess_cond_clean_fig, epoch_cap_sess_cond_clean_fig, epoch_speed_early_cond_clean_fig, epoch_speed_late_cond_clean_fig, epoch_cap_early_cond_clean_fig, epoch_cap_late_cond_clean_fig, punish_speed_per_mouse_fig, punish_speed_cond_fig, punish_cap_per_mouse_fig, punish_cap_cond_fig, punish_speed_sess_per_mouse_fig, punish_speed_sess_cond_fig, punish_cap_sess_per_mouse_fig, punish_cap_sess_cond_fig, punish_speed_sess_cond_clean_fig, punish_cap_sess_cond_clean_fig, sex_speed_fig, sex_distance_indiv_fig, sex_reward_indiv_fig, epoch_speed_sess_sex_per_mouse_fig, epoch_speed_sess_sex_fig, epoch_cap_sess_sex_per_mouse_fig, epoch_cap_sess_sex_fig, epoch_punish_speed_sess_sex_per_mouse_fig, epoch_punish_speed_sess_sex_fig, epoch_punish_cap_sess_sex_per_mouse_fig, epoch_punish_cap_sess_sex_fig, epoch_reward_speed_pre_post_fig, epoch_reward_speed_diff_fig, epoch_reward_cap_pre_post_fig, epoch_reward_cap_diff_fig, epoch_reward_speed_pre_post_entry_fig, epoch_reward_speed_diff_entry_fig, epoch_reward_speed_pre_post_entry_1s_fig, epoch_reward_speed_diff_entry_1s_fig, epoch_reward_speed_diff_entry_2s_fig, epoch_reward_lick_count_sess_per_mouse_fig, epoch_reward_lick_count_sess_cond_fig, epoch_reward_lick_count_sess_cond_clean_fig, epoch_reward_lick_diff_entry_065s_fig, epoch_punish_lick_count_sess_per_mouse_fig, epoch_punish_lick_count_sess_cond_fig, epoch_punish_lick_count_sess_cond_clean_fig, epoch_punish_speed_pre_post_fig, epoch_punish_speed_diff_fig, epoch_punish_speed_pre_post_entry_fig, epoch_punish_speed_diff_entry_fig, epoch_punish_speed_diff_entry_2s_fig, epoch_punish_cap_pre_post_fig, epoch_punish_cap_diff_fig, epoch_punish_cap_pre_post_entry_fig, epoch_punish_cap_diff_entry_fig, expl_speed_histogram_fig, expl_speed_distfit_fig, expl_speed_boxplot_fig, expl_speed_rm_anova_resid_fig, expl_cap_histogram_fig, expl_cap_boxplot_fig, expl_cap_rm_anova_resid_fig, expl_cap_distfit_fig, expl_lick_distfit_fig, expl_lick_boxplot_fig, expl_lick_rm_anova_resid_fig, expl_lick_rate_distfit_fig, expl_lick_reward_ratio_distfit_fig, all_results, _level_stats_data
+    return speed_fig, sensitivity_fig, lick_fig, reward_fig, lick_reward_ratio_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, avg_sex_speed_fig, distance_fig, immobility_prop_fig, bout_count_fig, avg_bout_count_fig, rewards_per_bout_fig, first_lick_latency_fig, condition_rewards_per_bout_fig, condition_rewards_per_bout_bar_fig, condition_first_lick_latency_fig, condition_first_lick_latency_bar_fig, condition_lick_after_reward_prop_fig, condition_lick_after_reward_prop_bar_fig, condition_lick_after_reward_prop_5s_bar_fig, weekday_reward_bar_fig, weekday_reward_bar_condition_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_lick_reward_ratio_fig, condition_lick_reward_ratio_bar_fig, condition_punish_zone_pct_bar_fig, condition_bar_fig, condition_speed_bar_fig, condition_sensitivity_fig, condition_sensitivity_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_sensitivity_fig, level_sensitivity_cohort_fig, level_immobility_prop_fig, level_rew_zone_immobility_prop_fig, level_rew_zone_immobility_prop_cond_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, last_level_bar_fig, level_survivor_fig, time_to_level2_fig, level_progression_indiv_fig, level_progression_indiv_cohort_fig, level_progression_condition_fig, level_progression_bar_fig, epoch_del_speed_per_mouse_fig, epoch_del_speed_cond_fig, epoch_del_cap_per_mouse_fig, epoch_del_cap_cond_fig, epoch_del_lick_per_mouse_fig, epoch_del_lick_cond_fig, epoch_del_cap_diff_entry_fig, epoch_del_cap_diff_065s_fig, epoch_del_lick_diff_065s_fig, condition_shuffle_zscore_fig, condition_shuffle_zscore_bar_fig, level_shuffle_zscore_fig, level_shuffle_zscore_line_fig, level_shuffle_zscore_cond_fig, condition_punish_shuffle_zscore_fig, condition_punish_shuffle_zscore_bar_fig, level_punish_shuffle_zscore_fig, level_punish_shuffle_zscore_line_fig, level_punish_shuffle_zscore_cond_fig, epoch_speed_per_mouse_fig, epoch_speed_cond_fig, epoch_cap_per_mouse_fig, epoch_cap_cond_fig, epoch_speed_sess_per_mouse_fig, epoch_speed_sess_cond_fig, epoch_cap_sess_per_mouse_fig, epoch_cap_sess_cond_fig, epoch_speed_early_per_mouse_fig, epoch_speed_late_per_mouse_fig, epoch_speed_early_cond_fig, epoch_speed_late_cond_fig, epoch_cap_early_per_mouse_fig, epoch_cap_late_per_mouse_fig, epoch_cap_early_cond_fig, epoch_cap_late_cond_fig, epoch_speed_early_ev_per_mouse_fig, epoch_speed_late_ev_per_mouse_fig, epoch_speed_early_ev_cond_fig, epoch_speed_late_ev_cond_fig, epoch_cap_early_ev_per_mouse_fig, epoch_cap_late_ev_per_mouse_fig, epoch_cap_early_ev_cond_fig, epoch_cap_late_ev_cond_fig, epoch_speed_early_ev_cond_clean_fig, epoch_speed_late_ev_cond_clean_fig, epoch_cap_early_ev_cond_clean_fig, epoch_cap_late_ev_cond_clean_fig, epoch_speed_sess_cond_clean_fig, epoch_cap_sess_cond_clean_fig, epoch_speed_early_cond_clean_fig, epoch_speed_late_cond_clean_fig, epoch_cap_early_cond_clean_fig, epoch_cap_late_cond_clean_fig, punish_speed_per_mouse_fig, punish_speed_cond_fig, punish_cap_per_mouse_fig, punish_cap_cond_fig, punish_speed_sess_per_mouse_fig, punish_speed_sess_cond_fig, punish_cap_sess_per_mouse_fig, punish_cap_sess_cond_fig, punish_speed_sess_cond_clean_fig, punish_cap_sess_cond_clean_fig,     sex_speed_fig, sex_distance_indiv_fig, cohort_distance_indiv_fig, sex_reward_indiv_fig, epoch_speed_sess_sex_per_mouse_fig, epoch_speed_sess_sex_fig, epoch_cap_sess_sex_per_mouse_fig, epoch_cap_sess_sex_fig, epoch_punish_speed_sess_sex_per_mouse_fig, epoch_punish_speed_sess_sex_fig, epoch_punish_cap_sess_sex_per_mouse_fig, epoch_punish_cap_sess_sex_fig, epoch_reward_speed_pre_post_fig, epoch_reward_speed_diff_fig, epoch_reward_cap_pre_post_fig, epoch_reward_cap_diff_fig, epoch_reward_speed_pre_post_entry_fig, epoch_reward_speed_diff_entry_fig, epoch_reward_speed_pre_post_entry_1s_fig, epoch_reward_speed_diff_entry_1s_fig, epoch_reward_speed_diff_entry_2s_fig, epoch_reward_lick_count_sess_per_mouse_fig, epoch_reward_lick_count_sess_cond_fig, epoch_reward_lick_count_sess_cond_clean_fig, epoch_reward_lick_diff_entry_065s_fig, epoch_punish_lick_count_sess_per_mouse_fig, epoch_punish_lick_count_sess_cond_fig, epoch_punish_lick_count_sess_cond_clean_fig, epoch_punish_speed_pre_post_fig, epoch_punish_speed_diff_fig, epoch_punish_speed_pre_post_entry_fig, epoch_punish_speed_diff_entry_fig, epoch_punish_speed_diff_entry_2s_fig, epoch_punish_cap_pre_post_fig, epoch_punish_cap_diff_fig, epoch_punish_cap_pre_post_entry_fig, epoch_punish_cap_diff_entry_fig, expl_speed_histogram_fig, expl_speed_distfit_fig, expl_speed_boxplot_fig, expl_speed_rm_anova_resid_fig, expl_cap_histogram_fig, expl_cap_boxplot_fig, expl_cap_rm_anova_resid_fig, expl_cap_distfit_fig, expl_lick_distfit_fig, expl_lick_boxplot_fig, expl_lick_rm_anova_resid_fig, expl_lick_rate_distfit_fig, expl_lick_reward_ratio_distfit_fig, all_results, _level_stats_data
 
 def _run_weight_correlations(root, file_paths, animal_info):
     """Load a weight CSV, match to session data by mouse ID + date, and produce
@@ -17820,13 +17992,17 @@ def main():
         master_df['animal_id'] = master_df['animal_id'].str.strip()
         master_df['sex'] = master_df['sex'].str.strip().str.lower()
         master_df['starting_condition'] = master_df['starting_condition'].str.strip()
-        
+        has_cohort_col = 'cohort_number' in master_df.columns
+        if has_cohort_col:
+            master_df['cohort_number'] = pd.to_numeric(master_df['cohort_number'], errors='coerce')
+
         # Create a dictionary mapping animal_id to sex and starting_condition
         animal_info = {}
         for _, row in master_df.iterrows():
             animal_info[row['animal_id']] = {
                 'sex': row['sex'],
-                'starting_condition': row['starting_condition']
+                'starting_condition': row['starting_condition'],
+                'cohort_number': row['cohort_number'] if has_cohort_col else None,
             }
         
         print(f"Loaded master CSV with {len(animal_info)} animals")
@@ -17855,6 +18031,7 @@ def main():
     # ── Extract markers and starting conditions (shared by both modes) ────────
     markers = []
     starting_conditions = []
+    cohort_markers = []
     for file_path in file_paths:
         mouse_name = os.path.basename(file_path).split("_")[0]
         if mouse_name in animal_info:
@@ -17862,7 +18039,13 @@ def main():
             marker = 's' if sex == 'male' else 'o'
             markers.append(marker)
             starting_conditions.append(animal_info[mouse_name]['starting_condition'])
-            print(f"{mouse_name}: sex={sex}, marker={marker}, condition={animal_info[mouse_name]['starting_condition']}")
+            cohort_num = animal_info[mouse_name].get('cohort_number')
+            # Circle for cohort_number 1, square for cohort_number 2 (defaults to
+            # circle when cohort_number is missing/unrecognised).
+            cohort_marker = 's' if cohort_num == 2 else 'o'
+            cohort_markers.append(cohort_marker)
+            print(f"{mouse_name}: sex={sex}, marker={marker}, condition={animal_info[mouse_name]['starting_condition']}, "
+                  f"cohort_number={cohort_num}, cohort_marker={cohort_marker}")
         else:
             print(f"Warning: {mouse_name} not found in master CSV file. Skipping...")
             continue
@@ -17920,6 +18103,7 @@ def main():
                                           'level_bout_avg_dist', 'level_bout_avg_dist_condition',
                                           'last_level_bar', 'level_survivor',
                                           'time_to_level2', 'level_sensitivity',
+                                          'level_sensitivity_cohort',
                                           'epoch_reward_speed_sess_by_level',
                                           'epoch_delivery_speed_sess_by_level',
                                           'level_shuffle_zscore',
@@ -17932,6 +18116,7 @@ def main():
                                           'level_rew_zone_immobility_prop',
                                           'level_rew_zone_immobility_prop_cond',
                                           'level_progression_indiv',
+                                          'level_progression_indiv_cohort',
                                           'level_progression_condition',
                                           'level_progression_bar')):
         transitions_csv_path = filedialog.askopenfilename(
@@ -17951,17 +18136,18 @@ def main():
         os.path.dirname(os.path.abspath(file_paths[0])),
         f'stats_reports_{_report_ts}',
     )
-    speed_fig, sensitivity_fig, lick_fig, reward_fig, lick_reward_ratio_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, avg_sex_speed_fig, distance_fig, immobility_prop_fig, bout_count_fig, avg_bout_count_fig, rewards_per_bout_fig, first_lick_latency_fig, condition_rewards_per_bout_fig, condition_rewards_per_bout_bar_fig, condition_first_lick_latency_fig, condition_first_lick_latency_bar_fig, condition_lick_after_reward_prop_fig, condition_lick_after_reward_prop_bar_fig, condition_lick_after_reward_prop_5s_bar_fig, weekday_reward_bar_fig, weekday_reward_bar_condition_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_lick_reward_ratio_fig, condition_lick_reward_ratio_bar_fig, condition_punish_zone_pct_bar_fig, condition_bar_fig, condition_speed_bar_fig, condition_sensitivity_fig, condition_sensitivity_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_sensitivity_fig, level_immobility_prop_fig, level_rew_zone_immobility_prop_fig, level_rew_zone_immobility_prop_cond_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, last_level_bar_fig, level_survivor_fig, time_to_level2_fig, level_progression_indiv_fig, level_progression_condition_fig, level_progression_bar_fig, epoch_del_speed_per_mouse_fig, epoch_del_speed_cond_fig, epoch_del_cap_per_mouse_fig, epoch_del_cap_cond_fig, epoch_del_lick_per_mouse_fig, epoch_del_lick_cond_fig, epoch_del_cap_diff_entry_fig, epoch_del_cap_diff_065s_fig, epoch_del_lick_diff_065s_fig, condition_shuffle_zscore_fig, condition_shuffle_zscore_bar_fig, level_shuffle_zscore_fig, level_shuffle_zscore_line_fig, level_shuffle_zscore_cond_fig, condition_punish_shuffle_zscore_fig, condition_punish_shuffle_zscore_bar_fig, level_punish_shuffle_zscore_fig, level_punish_shuffle_zscore_line_fig, level_punish_shuffle_zscore_cond_fig, epoch_speed_per_mouse_fig, epoch_speed_cond_fig, epoch_cap_per_mouse_fig, epoch_cap_cond_fig, epoch_speed_sess_per_mouse_fig, epoch_speed_sess_cond_fig, epoch_cap_sess_per_mouse_fig, epoch_cap_sess_cond_fig, epoch_speed_early_per_mouse_fig, epoch_speed_late_per_mouse_fig, epoch_speed_early_cond_fig, epoch_speed_late_cond_fig, epoch_cap_early_per_mouse_fig, epoch_cap_late_per_mouse_fig, epoch_cap_early_cond_fig, epoch_cap_late_cond_fig, epoch_speed_early_ev_per_mouse_fig, epoch_speed_late_ev_per_mouse_fig, epoch_speed_early_ev_cond_fig, epoch_speed_late_ev_cond_fig, epoch_cap_early_ev_per_mouse_fig, epoch_cap_late_ev_per_mouse_fig, epoch_cap_early_ev_cond_fig, epoch_cap_late_ev_cond_fig, epoch_speed_early_ev_cond_clean_fig, epoch_speed_late_ev_cond_clean_fig, epoch_cap_early_ev_cond_clean_fig, epoch_cap_late_ev_cond_clean_fig, epoch_speed_sess_cond_clean_fig, epoch_cap_sess_cond_clean_fig, epoch_speed_early_cond_clean_fig, epoch_speed_late_cond_clean_fig, epoch_cap_early_cond_clean_fig, epoch_cap_late_cond_clean_fig, punish_speed_per_mouse_fig, punish_speed_cond_fig, punish_cap_per_mouse_fig, punish_cap_cond_fig, punish_speed_sess_per_mouse_fig, punish_speed_sess_cond_fig, punish_cap_sess_per_mouse_fig, punish_cap_sess_cond_fig, punish_speed_sess_cond_clean_fig, punish_cap_sess_cond_clean_fig, sex_speed_fig, sex_distance_indiv_fig, sex_reward_indiv_fig, epoch_speed_sess_sex_per_mouse_fig, epoch_speed_sess_sex_fig, epoch_cap_sess_sex_per_mouse_fig, epoch_cap_sess_sex_fig, epoch_punish_speed_sess_sex_per_mouse_fig, epoch_punish_speed_sess_sex_fig, epoch_punish_cap_sess_sex_per_mouse_fig, epoch_punish_cap_sess_sex_fig, epoch_reward_speed_pre_post_fig, epoch_reward_speed_diff_fig, epoch_reward_cap_pre_post_fig, epoch_reward_cap_diff_fig, epoch_reward_speed_pre_post_entry_fig, epoch_reward_speed_diff_entry_fig, epoch_reward_speed_pre_post_entry_1s_fig, epoch_reward_speed_diff_entry_1s_fig, epoch_reward_speed_diff_entry_2s_fig, epoch_reward_lick_count_sess_per_mouse_fig, epoch_reward_lick_count_sess_cond_fig, epoch_reward_lick_count_sess_cond_clean_fig, epoch_reward_lick_diff_entry_065s_fig, epoch_punish_lick_count_sess_per_mouse_fig, epoch_punish_lick_count_sess_cond_fig, epoch_punish_lick_count_sess_cond_clean_fig, epoch_punish_speed_pre_post_fig, epoch_punish_speed_diff_fig, epoch_punish_speed_pre_post_entry_fig, epoch_punish_speed_diff_entry_fig, epoch_punish_speed_diff_entry_2s_fig, epoch_punish_cap_pre_post_fig, epoch_punish_cap_diff_fig, epoch_punish_cap_pre_post_entry_fig, epoch_punish_cap_diff_entry_fig, expl_speed_histogram_fig, expl_speed_distfit_fig, expl_speed_boxplot_fig, expl_speed_rm_anova_resid_fig, expl_cap_histogram_fig, expl_cap_boxplot_fig, expl_cap_rm_anova_resid_fig, expl_cap_distfit_fig, expl_lick_distfit_fig, expl_lick_boxplot_fig, expl_lick_rm_anova_resid_fig, expl_lick_rate_distfit_fig, expl_lick_reward_ratio_distfit_fig, all_results, _level_stats_data = analyze_mouse_data(
+    speed_fig, sensitivity_fig, lick_fig, reward_fig, lick_reward_ratio_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, avg_sex_speed_fig, distance_fig, immobility_prop_fig, bout_count_fig, avg_bout_count_fig, rewards_per_bout_fig, first_lick_latency_fig, condition_rewards_per_bout_fig, condition_rewards_per_bout_bar_fig, condition_first_lick_latency_fig, condition_first_lick_latency_bar_fig, condition_lick_after_reward_prop_fig, condition_lick_after_reward_prop_bar_fig, condition_lick_after_reward_prop_5s_bar_fig, weekday_reward_bar_fig, weekday_reward_bar_condition_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_lick_reward_ratio_fig, condition_lick_reward_ratio_bar_fig, condition_punish_zone_pct_bar_fig, condition_bar_fig, condition_speed_bar_fig, condition_sensitivity_fig, condition_sensitivity_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_sensitivity_fig, level_sensitivity_cohort_fig, level_immobility_prop_fig, level_rew_zone_immobility_prop_fig, level_rew_zone_immobility_prop_cond_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, last_level_bar_fig, level_survivor_fig, time_to_level2_fig, level_progression_indiv_fig, level_progression_indiv_cohort_fig, level_progression_condition_fig, level_progression_bar_fig, epoch_del_speed_per_mouse_fig, epoch_del_speed_cond_fig, epoch_del_cap_per_mouse_fig, epoch_del_cap_cond_fig, epoch_del_lick_per_mouse_fig, epoch_del_lick_cond_fig, epoch_del_cap_diff_entry_fig, epoch_del_cap_diff_065s_fig, epoch_del_lick_diff_065s_fig, condition_shuffle_zscore_fig, condition_shuffle_zscore_bar_fig, level_shuffle_zscore_fig, level_shuffle_zscore_line_fig, level_shuffle_zscore_cond_fig, condition_punish_shuffle_zscore_fig, condition_punish_shuffle_zscore_bar_fig, level_punish_shuffle_zscore_fig, level_punish_shuffle_zscore_line_fig, level_punish_shuffle_zscore_cond_fig, epoch_speed_per_mouse_fig, epoch_speed_cond_fig, epoch_cap_per_mouse_fig, epoch_cap_cond_fig, epoch_speed_sess_per_mouse_fig, epoch_speed_sess_cond_fig, epoch_cap_sess_per_mouse_fig, epoch_cap_sess_cond_fig, epoch_speed_early_per_mouse_fig, epoch_speed_late_per_mouse_fig, epoch_speed_early_cond_fig, epoch_speed_late_cond_fig, epoch_cap_early_per_mouse_fig, epoch_cap_late_per_mouse_fig, epoch_cap_early_cond_fig, epoch_cap_late_cond_fig, epoch_speed_early_ev_per_mouse_fig, epoch_speed_late_ev_per_mouse_fig, epoch_speed_early_ev_cond_fig, epoch_speed_late_ev_cond_fig, epoch_cap_early_ev_per_mouse_fig, epoch_cap_late_ev_per_mouse_fig, epoch_cap_early_ev_cond_fig, epoch_cap_late_ev_cond_fig, epoch_speed_early_ev_cond_clean_fig, epoch_speed_late_ev_cond_clean_fig, epoch_cap_early_ev_cond_clean_fig, epoch_cap_late_ev_cond_clean_fig, epoch_speed_sess_cond_clean_fig, epoch_cap_sess_cond_clean_fig, epoch_speed_early_cond_clean_fig, epoch_speed_late_cond_clean_fig, epoch_cap_early_cond_clean_fig, epoch_cap_late_cond_clean_fig, punish_speed_per_mouse_fig, punish_speed_cond_fig, punish_cap_per_mouse_fig, punish_cap_cond_fig, punish_speed_sess_per_mouse_fig, punish_speed_sess_cond_fig, punish_cap_sess_per_mouse_fig, punish_cap_sess_cond_fig, punish_speed_sess_cond_clean_fig, punish_cap_sess_cond_clean_fig,     sex_speed_fig, sex_distance_indiv_fig, cohort_distance_indiv_fig, sex_reward_indiv_fig, epoch_speed_sess_sex_per_mouse_fig, epoch_speed_sess_sex_fig, epoch_cap_sess_sex_per_mouse_fig, epoch_cap_sess_sex_fig, epoch_punish_speed_sess_sex_per_mouse_fig, epoch_punish_speed_sess_sex_fig, epoch_punish_cap_sess_sex_per_mouse_fig, epoch_punish_cap_sess_sex_fig, epoch_reward_speed_pre_post_fig, epoch_reward_speed_diff_fig, epoch_reward_cap_pre_post_fig, epoch_reward_cap_diff_fig, epoch_reward_speed_pre_post_entry_fig, epoch_reward_speed_diff_entry_fig, epoch_reward_speed_pre_post_entry_1s_fig, epoch_reward_speed_diff_entry_1s_fig, epoch_reward_speed_diff_entry_2s_fig, epoch_reward_lick_count_sess_per_mouse_fig, epoch_reward_lick_count_sess_cond_fig, epoch_reward_lick_count_sess_cond_clean_fig, epoch_reward_lick_diff_entry_065s_fig, epoch_punish_lick_count_sess_per_mouse_fig, epoch_punish_lick_count_sess_cond_fig, epoch_punish_lick_count_sess_cond_clean_fig, epoch_punish_speed_pre_post_fig, epoch_punish_speed_diff_fig, epoch_punish_speed_pre_post_entry_fig, epoch_punish_speed_diff_entry_fig, epoch_punish_speed_diff_entry_2s_fig, epoch_punish_cap_pre_post_fig, epoch_punish_cap_diff_fig, epoch_punish_cap_pre_post_entry_fig, epoch_punish_cap_diff_entry_fig, expl_speed_histogram_fig, expl_speed_distfit_fig, expl_speed_boxplot_fig, expl_speed_rm_anova_resid_fig, expl_cap_histogram_fig, expl_cap_boxplot_fig, expl_cap_rm_anova_resid_fig, expl_cap_distfit_fig, expl_lick_distfit_fig, expl_lick_boxplot_fig, expl_lick_rm_anova_resid_fig, expl_lick_rate_distfit_fig, expl_lick_reward_ratio_distfit_fig, all_results, _level_stats_data = analyze_mouse_data(
         file_paths, markers, starting_conditions,
         transitions_csv_path=transitions_csv_path,
         selected_plots=selected_plots,
         output_dir=output_dir,
+        cohort_markers=cohort_markers,
     )
     all_figs = [f for f in [
         speed_fig, sensitivity_fig, lick_fig, reward_fig, lick_reward_ratio_fig,
         false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig,
         avg_reward_fig, sex_reward_fig, avg_sex_speed_fig,
-        distance_fig, immobility_prop_fig, bout_count_fig, avg_bout_count_fig, rewards_per_bout_fig, first_lick_latency_fig, condition_rewards_per_bout_fig, condition_rewards_per_bout_bar_fig, condition_first_lick_latency_fig, condition_first_lick_latency_bar_fig, condition_lick_after_reward_prop_fig, condition_lick_after_reward_prop_bar_fig, condition_lick_after_reward_prop_5s_bar_fig, weekday_reward_bar_fig, weekday_reward_bar_condition_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig,
+        distance_fig, immobility_prop_fig, bout_count_fig, avg_bout_count_fig, rewards_per_bout_fig, first_lick_latency_fig, condition_rewards_per_bout_fig, condition_rewards_per_bout_bar_fig, condition_first_lick_latency_fig, condition_first_lick_latency_bar_fig, condition_lick_after_reward_prop_fig, condition_lick_after_reward_prop_bar_fig, condition_lick_after_reward_prop_5s_bar_fig, weekday_reward_bar_fig, weekday_reward_bar_condition_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig, cohort_distance_indiv_fig,
         condition_distance_bar_fig, total_distance_bar_fig,
         avg_lick_rate_fig, sex_lick_rate_fig,
         condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_lick_reward_ratio_fig, condition_lick_reward_ratio_bar_fig,
@@ -17974,9 +18160,9 @@ def main():
         level_bout_collapsed_fig, level_bout_condition_fig,
         level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig,
         level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig,
-        last_level_bar_fig, level_survivor_fig, time_to_level2_fig, level_sensitivity_fig,
+        last_level_bar_fig, level_survivor_fig, time_to_level2_fig, level_sensitivity_fig, level_sensitivity_cohort_fig,
         level_immobility_prop_fig, level_rew_zone_immobility_prop_fig, level_rew_zone_immobility_prop_cond_fig,
-        level_progression_indiv_fig, level_progression_condition_fig, level_progression_bar_fig,
+        level_progression_indiv_fig, level_progression_indiv_cohort_fig, level_progression_condition_fig, level_progression_bar_fig,
         epoch_del_speed_per_mouse_fig, epoch_del_speed_cond_fig,
         epoch_del_cap_per_mouse_fig,   epoch_del_cap_cond_fig,
         epoch_del_lick_per_mouse_fig,  epoch_del_lick_cond_fig,
@@ -18142,6 +18328,7 @@ def main():
         (level_lick_collapsed_fig,      'level_lick',            'Level-based average lick rate — collapsed'),
         (level_lick_condition_fig,      'level_lick_condition',  'Level-based average lick rate — by condition'),
         (level_sensitivity_fig,         'level_sensitivity',       'Sensitivity by level — individual mice'),
+        (level_sensitivity_cohort_fig,  'level_sensitivity_cohort', 'Sensitivity by level — individual mice (circle/square by cohort_number)'),
         (level_immobility_prop_fig,     'level_immobility_prop',   'Immobility proportion by level — individual mice'),
         (level_rew_zone_immobility_prop_fig, 'level_rew_zone_immobility_prop', 'Proportion of reward zone time immobile by level — individual mice'),
         (level_rew_zone_immobility_prop_cond_fig, 'level_rew_zone_immobility_prop_cond', 'Proportion of reward zone time immobile by level — condition mean ± SEM'),
@@ -18158,6 +18345,7 @@ def main():
         (level_survivor_fig,                  'level_survivor',                 'Level attainment survivor plot (proportion of mice per level, by condition)'),
         (time_to_level2_fig,                  'time_to_level2',                 'Cumulative time to first level 1→2 transition — bar chart by condition'),
         (level_progression_indiv_fig,     'level_progression_indiv',     'Level progression — ending level per session, individual mice'),
+        (level_progression_indiv_cohort_fig, 'level_progression_indiv_cohort', 'Level progression — ending level per session, individual mice (circle/square by cohort_number)'),
         (level_progression_condition_fig, 'level_progression_condition',  'Level progression — ending level per session, condition mean ± SEM'),
         (level_progression_bar_fig,       'level_progression_bar',        'Level progression — rate of level change (slope) by condition, collapsed bar chart (Mann-Whitney U)'),
         (epoch_del_speed_per_mouse_fig, 'epoch_delivery_speed_sess_per_mouse', 'Speed epoch aligned to reward delivery — per mouse'),
@@ -18225,6 +18413,7 @@ def main():
         (punish_cap_sess_cond_clean_fig,      'epoch_punish_cap_sess_condition_clean', 'Capacitive epoch (punish, session) — by condition, no individual traces'),
         (sex_speed_fig,          'sex_speed',          'Individual speed plot — by sex'),
         (sex_distance_indiv_fig, 'sex_distance_indiv', 'Individual distance plot — by sex'),
+        (cohort_distance_indiv_fig, 'cohort_distance_indiv', 'Individual distance plot — by starting condition (circle/square by cohort_number)'),
         (sex_reward_indiv_fig,   'sex_reward_indiv',   'Individual reward rate plot — by sex'),
         (epoch_speed_sess_sex_per_mouse_fig, 'epoch_reward_speed_sess_sex_per_mouse', 'Speed epoch (session, reward zone) — per mouse (sex coloring)'),
         (epoch_speed_sess_sex_fig,           'epoch_reward_speed_sess_sex',           'Speed epoch (session, reward zone) — by sex'),

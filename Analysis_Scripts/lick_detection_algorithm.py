@@ -136,7 +136,8 @@ def compute_KDE_normalizations(df: pd.DataFrame, column: str, kde_value: float) 
 # EVENT DETECTION FUNCTIONS
 # ============================================================================
 
-def _kde_valley_search(x: np.ndarray, density: np.ndarray, min_deviation_gap: float = 10.0):
+def _kde_valley_search(x: np.ndarray, density: np.ndarray, min_deviation_gap: float = 10.0,
+                        debug: bool = False):
     """Shared valley-search logic for _compute_kde_valley_threshold.
 
     Returns (valley_x, fwhm_x) where valley_x is the earliest valid valley past the
@@ -165,6 +166,9 @@ def _kde_valley_search(x: np.ndarray, density: np.ndarray, min_deviation_gap: fl
     """
     peaks, _ = find_peaks(density)
     if len(peaks) == 0:
+        if debug:
+            print("    [_kde_valley_search] no interior density peak found "
+                  "(density is monotonic over the eval range) -> (None, None)")
         return None, None
 
     noise_peak_idx = peaks[0]
@@ -176,6 +180,10 @@ def _kde_valley_search(x: np.ndarray, density: np.ndarray, min_deviation_gap: fl
     right_half = density[noise_peak_idx:]
     below_half = np.where(right_half < half_max)[0]
     if len(below_half) == 0:
+        if debug:
+            print(f"    [_kde_valley_search] noise_peak_x={noise_peak_x:.3f}, "
+                  "density never drops below half-max to the right (no FWHM "
+                  "edge in eval range) -> (None, None)")
         return None, None
 
     fwhm_right_idx = noise_peak_idx + below_half[0]
@@ -183,33 +191,61 @@ def _kde_valley_search(x: np.ndarray, density: np.ndarray, min_deviation_gap: fl
     # Fallback is always at least at the minimum gap, even when no valley found.
     fallback_x = max(fwhm_x, min_gap_x)
 
+    if debug:
+        print(f"    [_kde_valley_search] noise_peak_x={noise_peak_x:.3f}, "
+              f"min_deviation_gap={min_deviation_gap:.3f}, min_gap_x={min_gap_x:.3f}, "
+              f"fwhm_x={fwhm_x:.3f}, fallback_x={fallback_x:.3f}")
+
     # Guard 1: enforce minimum deviation-value gap from the noise peak.
     # Find the first index where x >= noise_peak_x + min_deviation_gap.
     gap_indices = np.where(x >= min_gap_x)[0]
     if len(gap_indices) == 0:
         # The required gap extends beyond the eval range entirely.
+        if debug:
+            print("    [_kde_valley_search] required gap extends beyond eval "
+                  f"range -> (None, fallback_x={fallback_x:.3f})")
         return None, fallback_x
     min_gap_idx = gap_indices[0]
 
     search_start = max(fwhm_right_idx, min_gap_idx)
     if search_start >= len(density):
+        if debug:
+            print("    [_kde_valley_search] search_start past end of density "
+                  f"array -> (None, fallback_x={fallback_x:.3f})")
         return None, fallback_x
 
     post_search_density = density[search_start:]
     valleys_relative, _ = find_peaks(-post_search_density)
     if len(valleys_relative) == 0:
+        if debug:
+            print(f"    [_kde_valley_search] search_start_x={x[search_start]:.3f}, "
+                  f"no candidate valleys found after search_start -> "
+                  f"(None, fallback_x={fallback_x:.3f})")
         return None, fallback_x
 
     # Walk valleys in ascending (earliest-first) order rather than picking the
     # deepest one — see docstring for why this guards against heterogeneous
     # lick-amplitude sub-populations. Guard 2 (post-valley signal peak) is
     # applied to each candidate until one qualifies.
+    if debug:
+        candidate_xs = [float(x[search_start + v]) for v in np.sort(valleys_relative)]
+        print(f"    [_kde_valley_search] search_start_x={x[search_start]:.3f}, "
+              f"candidate valley x-values (earliest-first): {candidate_xs}")
     for valley_rel in np.sort(valleys_relative):
         valley_idx = search_start + valley_rel
         post_valley_peaks, _ = find_peaks(density[valley_idx:])
         if len(post_valley_peaks) > 0:
+            if debug:
+                print(f"    [_kde_valley_search] accepted valley at x={x[valley_idx]:.3f} "
+                      "(has a signal peak after it)")
             return float(x[valley_idx]), fwhm_x
+        elif debug:
+            print(f"    [_kde_valley_search] rejected valley at x={x[valley_idx]:.3f} "
+                  "(no signal peak after it, Guard 2 fails)")
 
+    if debug:
+        print(f"    [_kde_valley_search] all candidate valleys rejected by Guard 2 "
+              f"-> (None, fallback_x={fallback_x:.3f})")
     return None, fallback_x
 
 
@@ -218,7 +254,8 @@ def _compute_kde_valley_threshold(
     min_deviation_gap: float = None,
     min_gap_fraction: float = 0.2,
     min_gap_floor: float = 3.0,
-    min_gap_ceiling: float = 15.0
+    min_gap_ceiling: float = 15.0,
+    debug: bool = False
 ) -> float:
     """Find the noise/signal boundary using FWHM-gated KDE valley detection.
 
@@ -266,7 +303,11 @@ def _compute_kde_valley_threshold(
     """
     clean = deviations[np.isfinite(deviations) & (deviations >= 0)]
     if len(clean) < 10:
-        return float(np.nanmax(deviations)) / 2.0
+        fallback = float(np.nanmax(deviations)) / 2.0
+        if debug:
+            print(f"  [_compute_kde_valley_threshold] fewer than 10 clean deviations "
+                  f"({len(clean)}) -> max/2 fallback = {fallback:.3f}")
+        return fallback
 
     try:
         kde = stats.gaussian_kde(clean, bw_method='scott')
@@ -277,8 +318,15 @@ def _compute_kde_valley_threshold(
         gap1 = min_deviation_gap if min_deviation_gap is not None else np.clip(
             min_gap_fraction * p995, min_gap_floor, min_gap_ceiling
         )
-        valley1, fwhm1 = _kde_valley_search(x1, kde(x1), min_deviation_gap=gap1)
+        if debug:
+            print(f"  [_compute_kde_valley_threshold] Pass 1: p995={p995:.3f}, "
+                  f"gap1={gap1:.3f} (min_gap_floor={min_gap_floor}, "
+                  f"min_gap_ceiling={min_gap_ceiling}, min_gap_fraction={min_gap_fraction})")
+        valley1, fwhm1 = _kde_valley_search(x1, kde(x1), min_deviation_gap=gap1, debug=debug)
         if valley1 is not None:
+            if debug:
+                print(f"  [_compute_kde_valley_threshold] RETURN via Pass 1 valley: "
+                      f"{valley1:.3f}")
             return valley1
 
         # --- Pass 2: extended range (catches rare / single-lick edge cases) ---
@@ -289,18 +337,46 @@ def _compute_kde_valley_threshold(
             gap2 = min_deviation_gap if min_deviation_gap is not None else np.clip(
                 min_gap_fraction * data_max, min_gap_floor, min_gap_ceiling
             )
-            valley2, fwhm2 = _kde_valley_search(x2, kde(x2), min_deviation_gap=gap2)
+            if debug:
+                print(f"  [_compute_kde_valley_threshold] Pass 2 triggered: "
+                      f"data_max={data_max:.3f}, gap2={gap2:.3f}")
+            valley2, fwhm2 = _kde_valley_search(x2, kde(x2), min_deviation_gap=gap2, debug=debug)
             if valley2 is not None:
+                if debug:
+                    print(f"  [_compute_kde_valley_threshold] RETURN via Pass 2 valley: "
+                          f"{valley2:.3f}")
                 return valley2
             # Use FWHM from the extended pass if available
             if fwhm2 is not None:
+                if debug:
+                    print(f"  [_compute_kde_valley_threshold] RETURN via Pass 2 "
+                          f"fwhm/fallback: {fwhm2:.3f} (NOTE: this value may be below "
+                          f"min_gap_floor — only Pass 1/2 valleys respect the gap floor)")
                 return fwhm2
+        elif debug:
+            print(f"  [_compute_kde_valley_threshold] Pass 2 skipped: data_max="
+                  f"{data_max:.3f} does not exceed Pass 1 range x {x1[-1]:.3f} * 1.05")
 
         # Fall back to FWHM from Pass 1, then max/2
-        return fwhm1 if fwhm1 is not None else float(np.nanmax(deviations)) / 2.0
+        if fwhm1 is not None:
+            if debug:
+                print(f"  [_compute_kde_valley_threshold] RETURN via Pass 1 "
+                      f"fwhm/fallback: {fwhm1:.3f} (NOTE: this value may be below "
+                      f"min_gap_floor — only Pass 1/2 valleys respect the gap floor)")
+            return fwhm1
+        fallback = float(np.nanmax(deviations)) / 2.0
+        if debug:
+            print(f"  [_compute_kde_valley_threshold] RETURN via max/2 fallback: "
+                  f"{fallback:.3f} (NOTE: this value ignores min_gap_floor entirely — "
+                  f"it means no interior noise peak / FWHM edge was found at all)")
+        return fallback
 
-    except Exception:
-        return float(np.nanmax(deviations)) / 2.0
+    except Exception as exc:
+        fallback = float(np.nanmax(deviations)) / 2.0
+        if debug:
+            print(f"  [_compute_kde_valley_threshold] Exception ({exc!r}) -> "
+                  f"max/2 fallback = {fallback:.3f}")
+        return fallback
 
 
 def detect_events_above_threshold(
@@ -309,8 +385,9 @@ def detect_events_above_threshold(
     threshold: float = None,
     min_deviation_gap: float = None,
     min_gap_fraction: float = 0.2,
-    min_gap_floor: float = 4.5,
-    min_gap_ceiling: float = 15.0
+    min_gap_floor: float = 6.1,
+    min_gap_ceiling: float = 15.0,
+    debug: bool = False
 ) -> tuple:
     """Detect time points where KDE normalized deviation exceeds the threshold.
     
@@ -335,6 +412,9 @@ def detect_events_above_threshold(
                    minimum gap when min_deviation_gap is None (default 0.2).
         min_gap_floor: Minimum allowed adaptive gap (default 3.0).
         min_gap_ceiling: Maximum allowed adaptive gap (default 15.0).
+        debug: If True, prints diagnostic output showing exactly which branch of
+                   the KDE valley search / fallback logic produced the final
+                   threshold (default False).
         
     Returns:
         Tuple of (DataFrame, threshold_used) where:
@@ -381,13 +461,20 @@ def detect_events_above_threshold(
     
     # Calculate dynamic threshold if not provided
     if threshold is None:
+        if debug:
+            print(f"[detect_events_above_threshold] column={column!r}, "
+                  f"min_gap_floor={min_gap_floor}, min_gap_ceiling={min_gap_ceiling}, "
+                  f"min_gap_fraction={min_gap_fraction}, min_deviation_gap={min_deviation_gap}")
         threshold = _compute_kde_valley_threshold(
             clean_deviations.values,
             min_deviation_gap=min_deviation_gap,
             min_gap_fraction=min_gap_fraction,
             min_gap_floor=min_gap_floor,
-            min_gap_ceiling=min_gap_ceiling
+            min_gap_ceiling=min_gap_ceiling,
+            debug=debug
         )
+        if debug:
+            print(f"[detect_events_above_threshold] FINAL threshold = {threshold:.4f}")
     
     # Find peaks in the deviation signal using scipy.signal.find_peaks
     peaks, _ = find_peaks(clean_deviations, height=threshold, distance=1)
