@@ -151,7 +151,7 @@ plt.rcParams.update({
     "figure.titlesize": 10,
     "lines.linewidth": 0.9,
     "lines.markersize": 4,
-    "figure.figsize": (2.5, 2.5), #5, 2.5 ; 6, 2.5 for survivor ; 5.5, 2.5 weekday, 3.5, 3 time to first transition
+    "figure.figsize": (3, 2.5), #5, 2.5 ; 6, 2.5 for survivor ; 5.5, 2.5 weekday, 3.5, 3 time to first transition
 })
 import sys
 import pickle
@@ -1983,6 +1983,73 @@ def _run_rstatix_condition_week_anova_r(weekly_df, condition_levels, week_levels
 # ── end _run_rstatix_condition_week_anova_r ───────────────────────────────────
 
 
+def _write_expl_ols_diagnostics_report(output_dir, column, label, dv_desc,
+                                        n_mice, n_obs,
+                                        resid_mean, resid_var, resid_sd,
+                                        y_var, unexplained, r2, r2_adj, r2_pred,
+                                        sw_stat, sw_p, lev_stat, lev_p,
+                                        n_cooks_flagged, n_lev_flagged,
+                                        extra_text=''):
+    """Write a plain-text OLS assumption-diagnostics report for an exploratory
+    RM-ANOVA-residual measure (speed / capacitive / lick count), to help decide
+    whether an OLS/RM-ANOVA model is statistically appropriate for that measure.
+
+    Mirrors the console diagnostics already printed alongside each
+    expl_*_rm_anova_resid figure, but persists them to a timestamped .txt file
+    in output_dir (same convention as the rstatix condition x week reports).
+    """
+    if not output_dir:
+        return None
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+        _ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        report_path = os.path.join(output_dir, f'ols_diagnostics_{column}_{_ts}.txt')
+        r2_pred_str = f'{r2_pred:.4f}' if not np.isnan(r2_pred) else 'n/a'
+        sw_verdict  = ('Normal (p>0.05)' if (not np.isnan(sw_p) and sw_p > 0.05)
+                       else 'Non-normal (p<=0.05)')
+        lev_verdict = ('Equal variances (p>0.05)' if (not np.isnan(lev_p) and lev_p > 0.05)
+                       else 'Unequal variances (p<=0.05)')
+        lines = [
+            f'OLS Assumption Diagnostics -- {label}',
+            '=' * 72,
+            f'Model DV:          {dv_desc}',
+            f'N mice:            {n_mice}',
+            f'N observations:    {n_obs}',
+            '',
+            f'E[eps]  (mean):    {resid_mean:+.6f}  (~0 by OLS construction)',
+            f'Var(eps) (MSE):    {resid_var:.6f}',
+            f'SD(eps)  (RMSE):   {resid_sd:.6f}',
+            f'Var(Y):            {y_var:.6f}',
+            f'Var(eps)/Var(Y):   {unexplained:.4f}  (= 1 - R^2, unexplained variance fraction)',
+            f'R^2:               {r2:.4f}',
+            f'R^2 adj:           {r2_adj:.4f}',
+            f'R^2 pred (PRESS):  {r2_pred_str}  (leave-one-out; gap vs R^2 indicates overfitting)',
+            '',
+            f'Shapiro-Wilk (residual normality):                 W={sw_stat:.4f}, p={sw_p:.6f}  -> {sw_verdict}',
+            f'Levene (homogeneity of variance across condition):  F={lev_stat:.4f}, p={lev_p:.6f}  -> {lev_verdict}',
+            f"High-influence obs (Cook's D > 4/(n-p)): {n_cooks_flagged}",
+            f'High-leverage obs (h_ii > 2p/n):         {n_lev_flagged}',
+        ]
+        if extra_text:
+            lines += ['', extra_text]
+        lines += [
+            '',
+            'Interpretation guide:',
+            '  - Shapiro-Wilk p > 0.05 and Levene p > 0.05 support the normality and',
+            '    homogeneity-of-variance assumptions behind an OLS/RM-ANOVA model.',
+            '  - A large gap between R^2 and R^2 pred (PRESS) suggests overfitting.',
+            '  - Many high-influence/high-leverage observations suggest results are',
+            '    being driven by a few mice/sessions rather than the overall trend.',
+        ]
+        with open(report_path, 'w', encoding='utf-8') as fh:
+            fh.write('\n'.join(lines) + '\n')
+        print(f'[OK] OLS diagnostics report saved -> {report_path}')
+        return report_path
+    except Exception as save_err:
+        print(f'[WARN] Could not save OLS diagnostics report: {save_err}')
+        return None
+
+
 def _expl_measure_rm_anova_resid_week_fig(all_results, column, label, unit,
                                            transform=None, positive_only=False,
                                            scale=1.0, output_dir=None):
@@ -2318,6 +2385,17 @@ def _expl_measure_rm_anova_resid_week_fig(all_results, column, label, unit,
         except Exception as _save_err:
             print(f'[WARN] Could not save rstatix report: {_save_err}')
 
+        _write_expl_ols_diagnostics_report(
+            output_dir, column, label=label, dv_desc=_dv_desc,
+            n_mice=_n_mice, n_obs=_n_obs,
+            resid_mean=_resid_mean, resid_var=_resid_var, resid_sd=_resid_sd,
+            y_var=_y_var, unexplained=_unexplained, r2=_r2, r2_adj=_r2_adj,
+            r2_pred=_r2_pred, sw_stat=_sw_stat, sw_p=_sw_p,
+            lev_stat=_lev_stat, lev_p=_lev_p,
+            n_cooks_flagged=len(_high_cooks), n_lev_flagged=len(_high_lev),
+            extra_text=_rstatix_text,
+        )
+
     return fig
 # ── end _expl_measure_rm_anova_resid_week_fig (part 2/2) ──────────────────────
 
@@ -2598,7 +2676,7 @@ _EXPL_PLOT_LABELS = [
     ('expl_cap_distfit',           'Exploratory: Capacitive sensor value distribution fit — Normal, Log-normal, Gamma (histogram + Q-Q + AIC comparison)'),
     ('expl_lick_distfit',          'Exploratory: Lick count Poisson vs Negative Binomial distribution fit — rootogram, Q-Q, mean–variance, AIC/χ² comparison'),
     ('expl_lick_boxplot',          'Exploratory: Raw lick count distribution — box and whisker (per-mouse + overall)'),
-    ('expl_lick_rm_anova_resid',   'Exploratory: Raw lick count RM ANOVA residuals — Q-Q plot, histogram, residuals vs fitted (DV = log(1+count), condition × session)'),
+    ('expl_lick_rm_anova_resid',   'Exploratory: Raw lick count RM ANOVA residuals — Q-Q plot, histogram, residuals vs fitted (DV = raw lick count, condition × session)'),
     ('expl_lick_rate_distfit',     'Exploratory: Average lick rate distribution fit — Normal, Log-normal, Gamma (histogram + Q-Q + AIC comparison)'),
     ('expl_distance_histogram',       'Exploratory: Distance per session distribution — histogram (all sessions + per-mouse means, Shapiro-Wilk)'),
     ('expl_distance_distfit',         'Exploratory: Distance per session distribution fit — Normal per starting condition (histogram + Q-Q + box plot)'),
@@ -2607,7 +2685,7 @@ _EXPL_PLOT_LABELS = [
     ('expl_reward_count_histogram',      'Exploratory: Reward count per session distribution — histogram (all sessions + per-mouse means, Shapiro-Wilk)'),
     ('expl_reward_count_distfit',        'Exploratory: Reward count per session distribution fit — Normal per starting condition (histogram + Q-Q + box plot)'),
     ('expl_reward_count_boxplot',        'Exploratory: Raw reward count distribution — box and whisker (per-mouse + overall)'),
-    ('expl_reward_count_rm_anova_resid', 'Exploratory: Reward count RM ANOVA (rstatix, condition × week) residuals — Q-Q plot, histogram, residuals vs fitted (DV = log(1+count))'),
+    ('expl_reward_count_rm_anova_resid', 'Exploratory: Reward count RM ANOVA (rstatix, condition × week) residuals — Q-Q plot, histogram, residuals vs fitted (DV = raw reward count)'),
     ('expl_level_progression_histogram',      'Exploratory: Ending level per session distribution — histogram (all sessions + per-mouse means, Shapiro-Wilk; requires transitions CSV)'),
     ('expl_level_progression_distfit',        'Exploratory: Ending level per session distribution fit — Normal per starting condition (histogram + Q-Q + box plot; requires transitions CSV)'),
     ('expl_level_progression_boxplot',        'Exploratory: Ending level distribution — box and whisker (per-mouse + overall; requires transitions CSV)'),
@@ -4109,7 +4187,7 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
             _ax_t2.set_ylabel('Time to first level change (min)')
             _ax_t2.set_title(
                 'Time to First Level Transition')
-            _ax_t2.set_ylim(bottom=0, top=300)
+            _ax_t2.set_ylim(bottom=0, top=350)
             _ax_t2.tick_params(axis='both', direction='in')
             _ax_t2.spines['top'].set_visible(False)
             _ax_t2.spines['right'].set_visible(False)
@@ -4161,8 +4239,8 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
                             alpha=0.8)
             ax_lpi.set_xlabel('Session')
             ax_lpi.set_ylabel('Ending Level')
-            ax_lpi.set_ylim(0, 40)
-            ax_lpi.set_yticks(range(0, 41, 5))
+            ax_lpi.set_ylim(0, 15)
+            ax_lpi.set_yticks(range(0, 16, 3))
             ax_lpi.set_xlim(0, 13)
             ax_lpi.set_xticks(range(1, 14, 1))
             ax_lpi.set_title('Level Progression — Individual Mice')
@@ -4202,8 +4280,8 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
                              alpha=0.8)
             ax_lpic.set_xlabel('Session')
             ax_lpic.set_ylabel('Ending Level')
-            ax_lpic.set_ylim(0, 40)
-            ax_lpic.set_yticks(range(0, 41, 5))
+            ax_lpic.set_ylim(0, 20)
+            ax_lpic.set_yticks(range(0, 21, 5))
             ax_lpic.set_xlim(0, 13)
             ax_lpic.set_xticks(range(1, 14, 1))
             ax_lpic.set_title('Level Progression — Individual Mice')
@@ -4261,8 +4339,8 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
                 ax_lpc.set_title('Level Progression \u2014 Condition Mean \u00b1 SEM')
                 ax_lpc.set_xlim(0, 13)
                 ax_lpc.set_xticks(range(1, 14))
-                ax_lpc.set_ylim(0, 20)
-                ax_lpc.set_yticks(range(0, 21, 5))
+                ax_lpc.set_ylim(0, 12)
+                ax_lpc.set_yticks(range(0, 13, 4))
                 ax_lpc.tick_params(axis='both', direction='in')
                 ax_lpc.spines['top'].set_visible(False)
                 ax_lpc.spines['right'].set_visible(False)
@@ -4397,8 +4475,8 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
                              linewidth=plt.rcParams['lines.linewidth'],
                              markersize=plt.rcParams['lines.markersize'])
             ax_lsen = plt.gca()
-            ax_lsen.set_xlim(0, 14)  # adjust manually as needed
-            ax_lsen.set_xticks(range(0, 15, 2))
+            ax_lsen.set_xlim(0, 15)  # adjust manually as needed
+            ax_lsen.set_xticks(range(0, 16, 3))
             ax_lsen.set_title('Sensitivity by Level')
             ax_lsen.set_xlabel('Level')
             ax_lsen.set_ylabel('Sensitivity')
@@ -5571,7 +5649,7 @@ def _plot_epoch_panels_by_level(all_results, transitions_csv_path,
         ax.set_title(f'{title_prefix} — {lvl_display}')
         ax.set_xlim(-5, 5)
         ax.set_xticks([-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5])
-        ax.set_ylim(0, 14)
+        ax.set_ylim(0, 12)
         ax.legend()
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
@@ -8775,8 +8853,8 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax_wdcbar.set_xticklabels(_DOW_ORDER)
         ax_wdcbar.set_xlabel('Training Day')
         ax_wdcbar.set_ylabel('Reward Count')
-        ax_wdcbar.set_ylim(bottom=0, top=60)
-        ax_wdcbar.set_yticks(np.arange(0, 61, 20))
+        ax_wdcbar.set_ylim(bottom=0, top=50)
+        ax_wdcbar.set_yticks(np.arange(0, 51, 10))
         ax_wdcbar.tick_params(axis='both', direction='in')
         ax_wdcbar.spines['top'].set_visible(False)
         ax_wdcbar.spines['right'].set_visible(False)
@@ -9852,7 +9930,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             from scipy.stats import shapiro as _shapiro, levene as _levene
             from scipy.stats import probplot as _probplot
 
-            # ── Build long-format DataFrame (log-transformed speed) ───────────
+            # ── Build long-format DataFrame (raw speed, no transform) ─────────
             _rows = []
             for _r in all_results:
                 _df_r = _r['df'].copy()
@@ -9860,15 +9938,14 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                 _df_r['session_num'] = np.arange(1, len(_df_r) + 1, dtype=float)
                 _df_r['mouse']       = _r['mouse']
                 _df_r['condition']   = _r['starting_condition']
-                _raw_spd = pd.to_numeric(_df_r['average_speed'], errors='coerce')
-                _df_r['speed']       = np.where(_raw_spd > 0, np.log(_raw_spd), np.nan)
+                _df_r['speed']       = pd.to_numeric(_df_r['average_speed'], errors='coerce')
                 _rows.append(_df_r[['mouse', 'condition', 'session_num', 'speed']])
             _df_long = pd.concat(_rows, ignore_index=True).dropna(subset=['speed'])
 
             # ── Fit OLS with mouse as fixed-effect blocking factor ────────────
             # Including C(mouse) as a blocking factor gives within-subject
             # residuals equivalent to RM ANOVA residuals.
-            # DV is log(speed) — appropriate for a lognormal response variable.
+            # DV is raw average_speed (no transform).
             _formula = 'speed ~ C(condition) + session_num + C(condition):session_num + C(mouse)'
             with _warnings.catch_warnings():
                 _warnings.simplefilter('ignore')
@@ -9924,7 +10001,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                 _pg_result = _pg.mixed_anova(
                     data=_df_long, dv='speed', within='session_num',
                     between='condition', subject='mouse',
-                )  # dv='speed' is log(speed) at this point
+                )  # dv='speed' is raw average_speed (no transform)
                 # Format key rows
                 _pg_lines = ['Mixed ANOVA (pingouin):']
                 for _, _row in _pg_result.iterrows():
@@ -9994,9 +10071,9 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             # Formula explanation box
             _formula_label = (
                 'Error terms: \u03b5\u1d62 = y\u1d62 \u2212 \u0177\u1d62\n'
-                'y\u1d62 = log(avg speed, session i)\n'
+                'y\u1d62 = avg speed, session i\n'
                 '\u0177\u1d62 = model fitted value\n'
-                'Model: log(speed) ~ condition\n'
+                'Model: speed ~ condition\n'
                 '       + session + condition\u00d7session\n'
                 '       + mouse  (blocking factor)'
             )
@@ -10021,7 +10098,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             ax_rh.axvline(_resid_mean, color='darkorange', linewidth=1.5,
                           linestyle=':', label=f'Mean={_resid_mean:.3f}')
             ax_rh.set_title('Histogram of Residuals')
-            ax_rh.set_xlabel('Residual \u03b5\u1d62  (log cm/s)')
+            ax_rh.set_xlabel('Residual \u03b5\u1d62  (cm/s)')
             ax_rh.set_ylabel('Density')
             ax_rh.tick_params(axis='both', direction='in')
             ax_rh.spines['top'].set_visible(False)
@@ -10064,8 +10141,8 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             except Exception:
                 pass
             ax_rf.set_title('Residuals vs Fitted Values')
-            ax_rf.set_xlabel('Fitted values (log cm/s)')
-            ax_rf.set_ylabel('Residuals (log cm/s)')
+            ax_rf.set_xlabel('Fitted values (cm/s)')
+            ax_rf.set_ylabel('Residuals (cm/s)')
             ax_rf.tick_params(axis='both', direction='in')
             ax_rf.spines['top'].set_visible(False)
             ax_rf.spines['right'].set_visible(False)
@@ -10085,7 +10162,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                 pass
             ax_rs.set_title('Residuals vs Session Number\n(check for time-trend)')
             ax_rs.set_xlabel('Session number')
-            ax_rs.set_ylabel('Residuals (log cm/s)')
+            ax_rs.set_ylabel('Residuals (cm/s)')
             ax_rs.tick_params(axis='both', direction='in')
             ax_rs.spines['top'].set_visible(False)
             ax_rs.spines['right'].set_visible(False)
@@ -10186,7 +10263,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             expl_speed_rm_anova_resid_fig.tight_layout()
             print('\n── RM ANOVA Residual Diagnostics ──')
             print(f'  Formula:          \u03b5\u1d62 = y\u1d62 \u2212 \u0177\u1d62  (observed \u2212 model fitted value)')
-            print(f'  Model DV:         log(average speed)  [log cm/s]')
+            print(f'  Model DV:         average speed  [cm/s]')
             print(f'  N mice:           {_n_mice}')
             print(f'  N observations:   {_n_obs}')
             print(f'  E[\u03b5]  (mean):    {_resid_mean:+.6f}  (\u22480 by OLS construction)')
@@ -10213,6 +10290,18 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                       + (f'  [{", ".join(_lev_strs)}]' if len(_high_lev) else ''))
             if _pg_table_text:
                 print(_pg_table_text)
+
+            _write_expl_ols_diagnostics_report(
+                output_dir, 'speed', label='Average Speed',
+                dv_desc='average speed  [cm/s]',
+                n_mice=_n_mice, n_obs=_n_obs,
+                resid_mean=_resid_mean, resid_var=_resid_var, resid_sd=_resid_sd,
+                y_var=_y_var, unexplained=_unexplained, r2=_r2, r2_adj=_r2_adj,
+                r2_pred=_r2_pred, sw_stat=_sw_stat, sw_p=_sw_p,
+                lev_stat=_lev_stat, lev_p=_lev_p,
+                n_cooks_flagged=len(_high_cooks), n_lev_flagged=len(_high_lev),
+                extra_text=_pg_table_text,
+            )
 
         except ImportError as _e:
             print(f'[expl_speed_rm_anova_resid] Missing dependency: {_e}')
@@ -10366,23 +10455,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             from scipy.stats import shapiro as _shapiro_c, levene as _levene_c
             from scipy.stats import probplot as _probplot_c
 
-            # ── Build long-format DataFrame (z-scored log-transformed mean cap value) ──
-            # Log transform first (lognormal fit), then z-score.
-            # First pass: collect log(avg_cap) values to compute global z-score params
-            _c_all_cv = []
-            for _r in all_results:
-                _df_r = _r['df']
-                _cv = pd.to_numeric(_df_r.get('avg_cap', pd.Series(dtype=float)), errors='coerce')
-                _cv_pos = _cv.dropna()
-                _cv_pos = _cv_pos[_cv_pos > 0]
-                _c_all_cv.extend(np.log(_cv_pos.values).tolist())
-            _c_all_cv = np.array(_c_all_cv, dtype=float)
-            _c_mu = float(np.mean(_c_all_cv)) if len(_c_all_cv) else 0.0
-            _c_sd = float(np.std(_c_all_cv, ddof=1)) if len(_c_all_cv) > 1 else 1.0
-            if _c_sd == 0:
-                _c_sd = 1.0
-
-            # Second pass: build long-format df with z-scored log(avg_cap)
+            # ── Build long-format DataFrame (raw avg_cap, no transform) ───────
             _c_rows = []
             for _r in all_results:
                 _df_r = _r['df'].copy()
@@ -10390,17 +10463,13 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                 _df_r['session_num'] = np.arange(1, len(_df_r) + 1, dtype=float)
                 _df_r['mouse']       = _r['mouse']
                 _df_r['condition']   = _r['starting_condition']
-                _cv = pd.to_numeric(_df_r.get('avg_cap', pd.Series(dtype=float)), errors='coerce')
-                _df_r['z_avg_cap'] = np.where(
-                    _cv.notna() & (_cv > 0),
-                    (np.log(_cv.clip(lower=1e-9)) - _c_mu) / _c_sd,
-                    np.nan,
-                )
-                _c_rows.append(_df_r[['mouse', 'condition', 'session_num', 'z_avg_cap']])
-            _df_c_long = pd.concat(_c_rows, ignore_index=True).dropna(subset=['z_avg_cap'])
+                _df_r['avg_cap_raw'] = pd.to_numeric(
+                    _df_r.get('avg_cap', pd.Series(dtype=float)), errors='coerce')
+                _c_rows.append(_df_r[['mouse', 'condition', 'session_num', 'avg_cap_raw']])
+            _df_c_long = pd.concat(_c_rows, ignore_index=True).dropna(subset=['avg_cap_raw'])
 
             # ── Fit OLS with mouse as fixed-effect blocking factor ────────────
-            _c_formula = 'z_avg_cap ~ C(condition) + session_num + C(condition):session_num + C(mouse)'
+            _c_formula = 'avg_cap_raw ~ C(condition) + session_num + C(condition):session_num + C(mouse)'
             with _warnings_cap.catch_warnings():
                 _warnings_cap.simplefilter('ignore')
                 _c_ols = _smf_cap.ols(_c_formula, data=_df_c_long).fit()
@@ -10413,8 +10482,8 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             _c_resid_sd   = float(np.sqrt(_c_resid_var))
             _c_r2         = float(_c_ols.rsquared)
             _c_r2_adj     = float(_c_ols.rsquared_adj)
-            _c_y_var      = float(_df_c_long['z_avg_cap'].var(ddof=1))
-            _c_y_mean     = float(_df_c_long['z_avg_cap'].mean())
+            _c_y_var      = float(_df_c_long['avg_cap_raw'].var(ddof=1))
+            _c_y_mean     = float(_df_c_long['avg_cap_raw'].mean())
             _c_unexplained = 1.0 - _c_r2
             _c_snr         = float(np.mean(_c_fitted)) / _c_resid_sd if _c_resid_sd > 0 else np.nan
 
@@ -10424,7 +10493,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                 _c_hat       = _c_influence.hat_matrix_diag
                 _c_press_r   = _c_resid / (1.0 - np.clip(_c_hat, None, 0.9999))
                 _c_press     = float(np.sum(_c_press_r ** 2))
-                _c_ss_total  = float(np.sum((_df_c_long['z_avg_cap'].values - _c_y_mean) ** 2))
+                _c_ss_total  = float(np.sum((_df_c_long['avg_cap_raw'].values - _c_y_mean) ** 2))
                 _c_r2_pred   = float(1.0 - _c_press / _c_ss_total) if _c_ss_total > 0 else np.nan
             except Exception:
                 _c_press, _c_r2_pred, _c_hat = np.nan, np.nan, None
@@ -10446,7 +10515,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             try:
                 import pingouin as _pg_c
                 _c_pg_result = _pg_c.mixed_anova(
-                    data=_df_c_long, dv='z_avg_cap', within='session_num',
+                    data=_df_c_long, dv='avg_cap_raw', within='session_num',
                     between='condition', subject='mouse',
                 )
                 _c_pg_lines = ['Mixed ANOVA (pingouin):']
@@ -10510,9 +10579,9 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                                   edgecolor='gray', alpha=0.8))
             _c_formula_label = (
                 'Error terms: \u03b5\u1d62 = y\u1d62 \u2212 \u0177\u1d62\n'
-                'y\u1d62 = z-score(log(mean cap value), session i)\n'
+                'y\u1d62 = mean cap value, session i\n'
                 '\u0177\u1d62 = model fitted value\n'
-                'Model: z(log(avg_cap)) ~ condition\n'
+                'Model: avg_cap ~ condition\n'
                 '       + session + condition\u00d7session\n'
                 '       + mouse  (blocking factor)'
             )
@@ -10537,7 +10606,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             ax_crh.axvline(_c_resid_mean, color='darkorange', linewidth=1.5,
                            linestyle=':', label=f'Mean={_c_resid_mean:.3f}')
             ax_crh.set_title('Histogram of Residuals')
-            ax_crh.set_xlabel('Residual \u03b5\u1d62  [z-score units — z(mean cap value)]')
+            ax_crh.set_xlabel('Residual \u03b5\u1d62  [mean cap value, raw units]')
             ax_crh.set_ylabel('Density')
             ax_crh.tick_params(axis='both', direction='in')
             ax_crh.spines['top'].set_visible(False)
@@ -10577,8 +10646,8 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             except Exception:
                 pass
             ax_crf.set_title('Residuals vs Fitted Values')
-            ax_crf.set_xlabel('Fitted values [z(log(mean cap))]')
-            ax_crf.set_ylabel('Residuals [z(log(mean cap))]')
+            ax_crf.set_xlabel('Fitted values [mean cap value]')
+            ax_crf.set_ylabel('Residuals [mean cap value]')
             ax_crf.tick_params(axis='both', direction='in')
             ax_crf.spines['top'].set_visible(False)
             ax_crf.spines['right'].set_visible(False)
@@ -10598,7 +10667,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                 pass
             ax_crs.set_title('Residuals vs Session Number\n(check for time-trend)')
             ax_crs.set_xlabel('Session number')
-            ax_crs.set_ylabel('Residuals [z(log(mean cap))]')
+            ax_crs.set_ylabel('Residuals [mean cap value]')
             ax_crs.tick_params(axis='both', direction='in')
             ax_crs.spines['top'].set_visible(False)
             ax_crs.spines['right'].set_visible(False)
@@ -10673,7 +10742,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                            if not np.isnan(_c_lev_p)
                            else 'Levene: insufficient groups')
             _c_summary  = (
-                f'Capacitive RM ANOVA residual diagnostics (DV = z(log(mean cap value)))  |  '
+                f'Capacitive RM ANOVA residual diagnostics (DV = mean cap value, raw)  |  '
                 f'n={_c_n_mice} mice, {_c_n_obs} obs  |  '
                 f'E[\u03b5]={_c_resid_mean:+.4f} (\u22480)  '
                 f'Var(\u03b5)={_c_resid_var:.4f}  SD(\u03b5)={_c_resid_sd:.4f}  '
@@ -10694,8 +10763,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             expl_cap_rm_anova_resid_fig.tight_layout()
             print('\n\u2500\u2500 Capacitive RM ANOVA Residual Diagnostics \u2500\u2500')
             print(f'  Formula:          \u03b5\u1d62 = y\u1d62 \u2212 \u0177\u1d62  (observed \u2212 model fitted value)')
-            print(f'  Model DV:         z-score(log(mean capacitive value))  [z(log(cap units))]')
-            print(f'  Global z-score:   \u03bc={_c_mu:.4f} log(cap units), \u03c3={_c_sd:.4f}  (computed on log scale)')
+            print(f'  Model DV:         mean capacitive value  [raw cap units]')
             print(f'  N mice:           {_c_n_mice}')
             print(f'  N observations:   {_c_n_obs}')
             print(f'  E[\u03b5]  (mean):    {_c_resid_mean:+.6f}  (\u22480 by OLS construction)')
@@ -10722,6 +10790,18 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                       + (f'  [{", ".join(_c_lev_strs)}]' if len(_c_high_lev) else ''))
             if _c_pg_text:
                 print(_c_pg_text)
+
+            _write_expl_ols_diagnostics_report(
+                output_dir, 'cap', label='Capacitive Sensor Value',
+                dv_desc='mean capacitive value  [raw cap units]',
+                n_mice=_c_n_mice, n_obs=_c_n_obs,
+                resid_mean=_c_resid_mean, resid_var=_c_resid_var, resid_sd=_c_resid_sd,
+                y_var=_c_y_var, unexplained=_c_unexplained, r2=_c_r2, r2_adj=_c_r2_adj,
+                r2_pred=_c_r2_pred, sw_stat=_c_sw_stat, sw_p=_c_sw_p,
+                lev_stat=_c_lev_stat, lev_p=_c_lev_p,
+                n_cooks_flagged=len(_c_high_cooks), n_lev_flagged=len(_c_high_lev),
+                extra_text=_c_pg_text,
+            )
 
         except ImportError as _e:
             print(f'[expl_cap_rm_anova_resid] Missing dependency: {_e}')
@@ -11402,8 +11482,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         expl_lick_boxplot_fig.tight_layout()
 
     # ── Exploratory: raw lick count RM ANOVA residual diagnostics ─────────────
-    # DV = log(1 + lick_count) — log(1+x) linearises count data for OLS.
-    # The +1 offset avoids log(0) on sessions with zero licks.
+    # DV = raw lick_count (no transform).
     expl_lick_rm_anova_resid_fig = None
     if 'expl_lick_rm_anova_resid' in selected_plots:
         import warnings as _warnings_lk
@@ -11412,7 +11491,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             from scipy.stats import shapiro as _shapiro_lkr, levene as _levene_lkr
             from scipy.stats import probplot as _probplot_lkr
 
-            # ── Build long-format DataFrame (log(1+lick_count)) ──────────────
+            # ── Build long-format DataFrame (raw lick_count, no transform) ────
             _lk_rows = []
             for _r in all_results:
                 _df_r = _r['df'].copy()
@@ -11420,18 +11499,12 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                 _df_r['session_num'] = np.arange(1, len(_df_r) + 1, dtype=float)
                 _df_r['mouse']       = _r['mouse']
                 _df_r['condition']   = _r['starting_condition']
-                _raw_lk = pd.to_numeric(_df_r['lick_count'], errors='coerce')
-                # log(1+x): defined for x >= 0; negative / NaN → NaN
-                _df_r['log1p_lick'] = np.where(
-                    (_raw_lk >= 0) & _raw_lk.notna(),
-                    np.log1p(_raw_lk.values.astype(float)),
-                    np.nan,
-                )
-                _lk_rows.append(_df_r[['mouse', 'condition', 'session_num', 'log1p_lick']])
-            _df_lk_long = pd.concat(_lk_rows, ignore_index=True).dropna(subset=['log1p_lick'])
+                _df_r['lick_raw']    = pd.to_numeric(_df_r['lick_count'], errors='coerce')
+                _lk_rows.append(_df_r[['mouse', 'condition', 'session_num', 'lick_raw']])
+            _df_lk_long = pd.concat(_lk_rows, ignore_index=True).dropna(subset=['lick_raw'])
 
             # ── Fit OLS with mouse as fixed-effect blocking factor ────────────
-            _lk_formula = 'log1p_lick ~ C(condition) + session_num + C(condition):session_num + C(mouse)'
+            _lk_formula = 'lick_raw ~ C(condition) + session_num + C(condition):session_num + C(mouse)'
             with _warnings_lk.catch_warnings():
                 _warnings_lk.simplefilter('ignore')
                 _lk_ols = _smf_lk.ols(_lk_formula, data=_df_lk_long).fit()
@@ -11444,8 +11517,8 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             _lk_resid_sd   = float(np.sqrt(_lk_resid_var))
             _lk_r2         = float(_lk_ols.rsquared)
             _lk_r2_adj     = float(_lk_ols.rsquared_adj)
-            _lk_y_var      = float(_df_lk_long['log1p_lick'].var(ddof=1))
-            _lk_y_mean     = float(_df_lk_long['log1p_lick'].mean())
+            _lk_y_var      = float(_df_lk_long['lick_raw'].var(ddof=1))
+            _lk_y_mean     = float(_df_lk_long['lick_raw'].mean())
             _lk_unexplained = 1.0 - _lk_r2
             _lk_snr         = float(np.mean(_lk_fitted)) / _lk_resid_sd if _lk_resid_sd > 0 else np.nan
 
@@ -11455,7 +11528,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                 _lk_hat       = _lk_influence.hat_matrix_diag
                 _lk_press_r   = _lk_resid / (1.0 - np.clip(_lk_hat, None, 0.9999))
                 _lk_press     = float(np.sum(_lk_press_r ** 2))
-                _lk_ss_total  = float(np.sum((_df_lk_long['log1p_lick'].values - _lk_y_mean) ** 2))
+                _lk_ss_total  = float(np.sum((_df_lk_long['lick_raw'].values - _lk_y_mean) ** 2))
                 _lk_r2_pred   = float(1.0 - _lk_press / _lk_ss_total) if _lk_ss_total > 0 else np.nan
             except Exception:
                 _lk_press, _lk_r2_pred, _lk_hat = np.nan, np.nan, None
@@ -11478,7 +11551,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             try:
                 import pingouin as _pg_lk
                 _lk_pg_result = _pg_lk.mixed_anova(
-                    data=_df_lk_long, dv='log1p_lick', within='session_num',
+                    data=_df_lk_long, dv='lick_raw', within='session_num',
                     between='condition', subject='mouse',
                 )
                 _lk_pg_lines = ['Mixed ANOVA (pingouin):']
@@ -11542,9 +11615,9 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                                    edgecolor='gray', alpha=0.8))
             _lk_formula_label = (
                 'Error terms: \u03b5\u1d62 = y\u1d62 \u2212 \u0177\u1d62\n'
-                'y\u1d62 = log(1 + lick_count, session i)\n'
+                'y\u1d62 = lick_count, session i\n'
                 '\u0177\u1d62 = model fitted value\n'
-                'Model: log(1+lick) ~ condition\n'
+                'Model: lick_count ~ condition\n'
                 '       + session + condition\u00d7session\n'
                 '       + mouse  (blocking factor)'
             )
@@ -11569,7 +11642,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             ax_lkrh.axvline(_lk_resid_mean, color='darkorange', linewidth=1.5,
                             linestyle=':', label=f'Mean={_lk_resid_mean:.3f}')
             ax_lkrh.set_title('Histogram of Residuals')
-            ax_lkrh.set_xlabel('Residual \u03b5\u1d62  [log(1+count) units]')
+            ax_lkrh.set_xlabel('Residual \u03b5\u1d62  [lick count]')
             ax_lkrh.set_ylabel('Density')
             ax_lkrh.tick_params(axis='both', direction='in')
             ax_lkrh.spines['top'].set_visible(False)
@@ -11609,8 +11682,8 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             except Exception:
                 pass
             ax_lkrf.set_title('Residuals vs Fitted Values')
-            ax_lkrf.set_xlabel('Fitted values [log(1+count) units]')
-            ax_lkrf.set_ylabel('Residuals [log(1+count) units]')
+            ax_lkrf.set_xlabel('Fitted values [lick count]')
+            ax_lkrf.set_ylabel('Residuals [lick count]')
             ax_lkrf.tick_params(axis='both', direction='in')
             ax_lkrf.spines['top'].set_visible(False)
             ax_lkrf.spines['right'].set_visible(False)
@@ -11630,7 +11703,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                 pass
             ax_lkrs.set_title('Residuals vs Session Number\n(check for time-trend)')
             ax_lkrs.set_xlabel('Session number')
-            ax_lkrs.set_ylabel('Residuals [log(1+count) units]')
+            ax_lkrs.set_ylabel('Residuals [lick count]')
             ax_lkrs.tick_params(axis='both', direction='in')
             ax_lkrs.spines['top'].set_visible(False)
             ax_lkrs.spines['right'].set_visible(False)
@@ -11706,7 +11779,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                             else 'Levene: insufficient groups')
             _lk_summary  = (
                 f'Raw Lick Count RM ANOVA residual diagnostics  |  '
-                f'DV = log(1+lick_count)  |  '
+                f'DV = raw lick_count  |  '
                 f'n={_lk_n_mice} mice, {_lk_n_obs} obs  |  '
                 f'E[\u03b5]={_lk_resid_mean:+.4f} (\u22480)  '
                 f'Var(\u03b5)={_lk_resid_var:.4f}  SD(\u03b5)={_lk_resid_sd:.4f}  '
@@ -11727,7 +11800,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             expl_lick_rm_anova_resid_fig.tight_layout()
             print('\n\u2500\u2500 Raw Lick Count RM ANOVA Residual Diagnostics \u2500\u2500')
             print(f'  Formula:          \u03b5\u1d62 = y\u1d62 \u2212 \u0177\u1d62  (observed \u2212 model fitted value)')
-            print(f'  Model DV:         log(1 + lick_count)  [log(1+count) units]')
+            print(f'  Model DV:         raw lick count  [count]')
             print(f'  N mice:           {_lk_n_mice}')
             print(f'  N observations:   {_lk_n_obs}')
             print(f'  E[\u03b5]  (mean):    {_lk_resid_mean:+.6f}  (\u22480 by OLS construction)')
@@ -11754,6 +11827,18 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                       + (f'  [{", ".join(_lk_lev_strs)}]' if len(_lk_high_lev) else ''))
             if _lk_pg_text:
                 print(_lk_pg_text)
+
+            _write_expl_ols_diagnostics_report(
+                output_dir, 'lick_count', label='Raw Lick Count',
+                dv_desc='raw lick count  [count]',
+                n_mice=_lk_n_mice, n_obs=_lk_n_obs,
+                resid_mean=_lk_resid_mean, resid_var=_lk_resid_var, resid_sd=_lk_resid_sd,
+                y_var=_lk_y_var, unexplained=_lk_unexplained, r2=_lk_r2, r2_adj=_lk_r2_adj,
+                r2_pred=_lk_r2_pred, sw_stat=_lk_sw_stat, sw_p=_lk_sw_p,
+                lev_stat=_lk_lev_stat, lev_p=_lk_lev_p,
+                n_cooks_flagged=len(_lk_high_cooks), n_lev_flagged=len(_lk_high_lev),
+                extra_text=_lk_pg_text,
+            )
 
         except ImportError as _e:
             print(f'[expl_lick_rm_anova_resid] Missing dependency: {_e}')
@@ -12364,8 +12449,8 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     if 'expl_distance_rm_anova_resid' in selected_plots:
         try:
             expl_distance_rm_anova_resid_fig = _expl_measure_rm_anova_resid_week_fig(
-                all_results, 'total_distance', 'Distance per session', 'log m',
-                transform='log', positive_only=True, scale=1.0 / 1000.0,
+                all_results, 'total_distance', 'Distance per session', 'm',
+                transform=None, positive_only=False, scale=1.0 / 1000.0,
                 output_dir=output_dir,
             )
         except ImportError as _e:
@@ -12412,8 +12497,8 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     if 'expl_reward_count_rm_anova_resid' in selected_plots:
         try:
             expl_reward_count_rm_anova_resid_fig = _expl_measure_rm_anova_resid_week_fig(
-                all_results, 'hits', 'Reward count per session', 'log(1+count)',
-                transform='log1p', positive_only=False, output_dir=output_dir,
+                all_results, 'hits', 'Reward count per session', 'rewards',
+                transform=None, positive_only=False, output_dir=output_dir,
             )
         except ImportError as _e:
             print(f'[expl_reward_count_rm_anova_resid] Missing dependency: {_e}')
