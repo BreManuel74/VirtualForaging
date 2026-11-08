@@ -151,7 +151,7 @@ plt.rcParams.update({
     "figure.titlesize": 10,
     "lines.linewidth": 0.9,
     "lines.markersize": 4,
-    "figure.figsize": (5, 2.5), #5, 2.5 ; 6, 2.5 for survivor ; 5.5, 2.5 weekday, 3.5, 3 time to first transition
+    "figure.figsize": (2.5, 2.5), #5, 2.5 ; 6, 2.5 for survivor ; 5.5, 2.5 weekday, 3.5, 3 time to first transition
 })
 import sys
 import pickle
@@ -231,7 +231,7 @@ _SESSION_CACHE_VERSION = 14  # bump this to invalidate all cached sessions after
 _LEVELS_SESS_CACHE_DIR = os.path.join(SESSION_CACHE_DIR, 'levels')
 if not os.path.exists(_LEVELS_SESS_CACHE_DIR):
     os.makedirs(_LEVELS_SESS_CACHE_DIR)
-_LEVELS_CACHE_VERSION = 5  # bump to invalidate levels cache independently
+_LEVELS_CACHE_VERSION = 6  # bump to invalidate levels cache independently
 
 # ── Diagnostic mode ───────────────────────────────────────────────────────────
 # Set to True to print per-trial matching, lick-latency, and lick-prop traces
@@ -2812,11 +2812,10 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
                 session_end_time = None
                 _gap_info_lvl    = {'has_gaps': False, 'n_gaps': 0, 'total_gap_s': 0.0, 'gaps': []}
                 gap_intervals    = []
+                cap = None
                 if isinstance(capacitive_path, str) and not pd.isna(capacitive_path):
                     try:
                         cap = pd.read_csv(capacitive_path)
-                        if 'elapsed_time' in cap.columns:
-                            session_end_time = float(cap['elapsed_time'].max())
                         if 'capacitive_value' in cap.columns:
                             cap_df = cap.copy()
                             cap_df['Time_sec'] = cap_df['elapsed_time']
@@ -2841,9 +2840,6 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
                             lick_event_times = events_df.loc[mask_evt, 'Time_sec'].values.astype(float)
                     except Exception:
                         pass
-                if session_end_time is None:
-                    tc_vals = tl['texture_change_time'].dropna()
-                    session_end_time = float(tc_vals.max()) if len(tc_vals) else None
 
                 # Load treadmill speed data for this session -------------------
                 treadmill_df = None
@@ -2871,6 +2867,19 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
                                 treadmill_df['speed'] = filtfilt(_b_lvl, _a_lvl, treadmill_df['speed'].values)
                     except Exception:
                         pass
+
+                # Session end time: prefer the treadmill's wall-clock 'global_time',
+                # since trim_baseline_spikes.py can trim samples off the END of the
+                # capacitive file (shortening elapsed_time.max() without actually
+                # shortening the session). The treadmill encoder stream is not
+                # subject to that trimming, so it gives the true session length.
+                if treadmill_df is not None and len(treadmill_df) > 0:
+                    session_end_time = float(treadmill_df['global_time'].max())
+                elif cap is not None and 'elapsed_time' in cap.columns:
+                    session_end_time = float(cap['elapsed_time'].max())
+                if session_end_time is None:
+                    tc_vals = tl['texture_change_time'].dropna()
+                    session_end_time = float(tc_vals.max()) if len(tc_vals) else None
 
                 # Save to cache ------------------------------------------------
                 _save_lvl_sess_cache(_lvl_ckey, {
@@ -4252,8 +4261,8 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
                 ax_lpc.set_title('Level Progression \u2014 Condition Mean \u00b1 SEM')
                 ax_lpc.set_xlim(0, 13)
                 ax_lpc.set_xticks(range(1, 14))
-                ax_lpc.set_ylim(0, 25)
-                ax_lpc.set_yticks(range(0, 26, 5))
+                ax_lpc.set_ylim(0, 20)
+                ax_lpc.set_yticks(range(0, 21, 5))
                 ax_lpc.tick_params(axis='both', direction='in')
                 ax_lpc.spines['top'].set_visible(False)
                 ax_lpc.spines['right'].set_visible(False)
@@ -8766,8 +8775,8 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         ax_wdcbar.set_xticklabels(_DOW_ORDER)
         ax_wdcbar.set_xlabel('Training Day')
         ax_wdcbar.set_ylabel('Reward Count')
-        ax_wdcbar.set_ylim(bottom=0, top=40)
-        ax_wdcbar.set_yticks(np.arange(0, 41, 10))
+        ax_wdcbar.set_ylim(bottom=0, top=60)
+        ax_wdcbar.set_yticks(np.arange(0, 61, 20))
         ax_wdcbar.tick_params(axis='both', direction='in')
         ax_wdcbar.spines['top'].set_visible(False)
         ax_wdcbar.spines['right'].set_visible(False)
@@ -12917,8 +12926,8 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                 hierarchy='session',
                 show_individual_traces=False,
             )
-            epoch_speed_sess_cond_clean_fig.axes[0].set_ylim(-3, 15)
-            epoch_speed_sess_cond_clean_fig.axes[0].set_yticks([-3, 0, 3, 6, 9, 12, 15])
+            epoch_speed_sess_cond_clean_fig.axes[0].set_ylim(0, 12)
+            epoch_speed_sess_cond_clean_fig.axes[0].set_yticks([0, 4, 8, 12])
             epoch_speed_sess_cond_clean_fig.axes[0].set_xlim(-5,5)
             epoch_speed_sess_cond_clean_fig.axes[0].set_xticks([-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5])
             _leg = epoch_speed_sess_cond_clean_fig.axes[0].get_legend()
@@ -13221,8 +13230,8 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                 show_individual_traces=False,
                 reward_delivery_vline=False,
             )
-            punish_speed_sess_cond_clean_fig.axes[0].set_ylim(0, 15)
-            punish_speed_sess_cond_clean_fig.axes[0].set_yticks([0, 5, 10, 15])
+            punish_speed_sess_cond_clean_fig.axes[0].set_ylim(0, 12)
+            punish_speed_sess_cond_clean_fig.axes[0].set_yticks([0, 4, 8, 12])
             punish_speed_sess_cond_clean_fig.axes[0].set_xlim(-5,5)
             punish_speed_sess_cond_clean_fig.axes[0].set_xticks([-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5])
 
