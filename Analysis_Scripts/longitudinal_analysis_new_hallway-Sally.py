@@ -1622,6 +1622,145 @@ def _write_ttest_assumptions_report(
         print(f'  [WARN] _write_ttest_assumptions_report failed for "{filename_stem}": {_ttc_err}')
 
 
+def _write_welch_ttest_report(
+    output_dir,
+    filename_stem: str,
+    measure: str,
+    comparisons: list,
+) -> None:
+    """Write a formatted Welch's t-test report (.txt) to *output_dir* — the
+    parametric counterpart of `_write_mwu_report`, for use once the assumption
+    check (`_write_ttest_assumptions_report`) supports a parametric test for a
+    given bar-plot comparison.
+
+    Parameters
+    ----------
+    output_dir : str | None
+        Directory in which to write the report. Silently skipped if None.
+    filename_stem : str
+        Base filename (no extension, no timestamp).
+    measure : str
+        Human-readable label for the measure being compared.
+    comparisons : list of (str, str, array-like, array-like)
+        One entry per comparison: (label_a, label_b, values_a, values_b) —
+        same format as `_write_mwu_report`, one row per mouse per group.
+    """
+    if output_dir is None:
+        return
+    try:
+        from scipy.stats import ttest_ind as _wt_ttest
+        os.makedirs(output_dir, exist_ok=True)
+
+        rows = []
+        for (la, lb, arr_a, arr_b) in comparisons:
+            a = np.asarray(arr_a, dtype=float)
+            b = np.asarray(arr_b, dtype=float)
+            a = a[~np.isnan(a)]
+            b = b[~np.isnan(b)]
+            if len(a) < 2 or len(b) < 2:
+                continue
+
+            t_stat, p_raw = _wt_ttest(a, b, equal_var=False)
+            n_a, n_b = len(a), len(b)
+            mean_a, mean_b = float(np.mean(a)), float(np.mean(b))
+            var_a, var_b   = float(np.var(a, ddof=1)), float(np.var(b, ddof=1))
+            mean_diff = mean_a - mean_b
+
+            # Welch-Satterthwaite degrees of freedom
+            se_a2, se_b2 = var_a / n_a, var_b / n_b
+            se_diff = np.sqrt(se_a2 + se_b2)
+            df_welch = (se_a2 + se_b2) ** 2 / (
+                (se_a2 ** 2 / (n_a - 1)) + (se_b2 ** 2 / (n_b - 1))
+            ) if (n_a > 1 and n_b > 1) else np.nan
+
+            # 95% CI on the mean difference (Welch)
+            from scipy.stats import t as _wt_tdist
+            if se_diff > 0 and not np.isnan(df_welch):
+                tcrit = float(_wt_tdist.ppf(0.975, df_welch))
+                ci_lo = mean_diff - tcrit * se_diff
+                ci_hi = mean_diff + tcrit * se_diff
+            else:
+                ci_lo = ci_hi = np.nan
+
+            # Cohen's d (pooled SD) for effect-size reference
+            pooled_sd = np.sqrt(((n_a - 1) * var_a + (n_b - 1) * var_b)
+                                 / max(n_a + n_b - 2, 1))
+            cohens_d = mean_diff / pooled_sd if pooled_sd > 0 else np.nan
+
+            rows.append({
+                'la': la, 'lb': lb, 'na': n_a, 'nb': n_b,
+                't': float(t_stat), 'df': float(df_welch), 'p_raw': float(p_raw),
+                'mean_a': mean_a, 'mean_b': mean_b, 'mean_diff': mean_diff,
+                'ci_lo': float(ci_lo), 'ci_hi': float(ci_hi),
+                'cohens_d': float(cohens_d),
+            })
+
+        if not rows:
+            return
+
+        k = len(rows)
+        # Holm-Bonferroni correction (same convention as _write_mwu_report)
+        correction_label = ('Holm-Bonferroni' if k > 1
+                            else 'None (single pairwise comparison)')
+        sorted_idx = sorted(range(k), key=lambda i: rows[i]['p_raw'])
+        p_adjs = [None] * k
+        prev_adj = 0.0
+        for rank, idx in enumerate(sorted_idx):
+            adj = min(rows[idx]['p_raw'] * (k - rank), 1.0)
+            adj = max(adj, prev_adj)
+            p_adjs[idx] = adj
+            prev_adj = adj
+        for i, row in enumerate(rows):
+            row['p_adj'] = p_adjs[i]
+
+        ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        ts_file = datetime.now().strftime('%Y%m%d_%H%M%S')
+        outpath = os.path.join(output_dir, f'{filename_stem}_welch_ttest_{ts_file}.txt')
+        SEP  = '=' * 96
+        SEP2 = '-' * 96
+        hdr = (f'{"Comparison":<44} {"nA":>4} {"nB":>4}  {"t":>8}  {"df":>7}  '
+               f'{"p(raw)":>9}  {"p(adj)":>9}  {"MeanDiff":>9}  {"Cohen_d":>8}  95% CI')
+        lines = [
+            SEP,
+            f"WELCH'S T-TEST RESULTS  --  {measure}",
+            SEP,
+            f'Generated  : {ts}',
+            f'Measure    : {measure}',
+            f'Correction : {correction_label}',
+            '',
+            'Field definitions:',
+            '  t          : Welch\'s t statistic (unequal-variance independent t-test)',
+            '  df         : Welch-Satterthwaite approximate degrees of freedom',
+            '  p(raw)     : Two-sided p-value (uncorrected)',
+            f'  p(adj)     : Adjusted p-value ({correction_label})',
+            '  MeanDiff   : Mean(A) - Mean(B)',
+            '  Cohen_d    : Standardized mean difference (pooled SD);',
+            '               |d| < 0.2 = small, 0.2-0.5 = small-medium, 0.5-0.8 = medium-large, > 0.8 = large',
+            '  95% CI     : Confidence interval on the mean difference (Welch-Satterthwaite df)',
+            '',
+            hdr,
+            SEP2,
+        ]
+        for row in rows:
+            comp_label = f'{row["la"]} vs {row["lb"]}'
+            ci_str = f'[{row["ci_lo"]:.4f}, {row["ci_hi"]:.4f}]'
+            lines.append(
+                f'{comp_label:<44} {row["na"]:>4} {row["nb"]:>4}  '
+                f'{row["t"]:>8.4f}  {row["df"]:>7.2f}  {row["p_raw"]:>9.4f}  {row["p_adj"]:>9.4f}  '
+                f'{row["mean_diff"]:>+9.4f}  {row["cohens_d"]:>+8.4f}  {ci_str}'
+            )
+        lines += [
+            '',
+            'Significance: * p(adj)<0.05   ** p(adj)<0.01   *** p(adj)<0.001',
+            SEP,
+        ]
+        with open(outpath, 'w', encoding='utf-8') as fh:
+            fh.write('\n'.join(lines) + '\n')
+        print(f'  [WELCH T-TEST REPORT] {os.path.basename(outpath)}')
+    except Exception as _wt_err:
+        print(f'  [WARN] _write_welch_ttest_report failed for "{filename_stem}": {_wt_err}')
+
+
 # ── Generic exploratory-plot helpers (distance / reward count / level progression) ──
 # Parameterized counterparts of the expl_speed_* / expl_cap_* / expl_lick_* blocks
 # inside analyze_mouse_data(), reused for the distance ('total_distance', mm),
@@ -2031,6 +2170,7 @@ def _run_rstatix_condition_week_anova_r(weekly_df, condition_levels, week_levels
 
     r_script = (
         'options(warn=1)\n'
+        'options(width=200)\n'
         'if (!require("rstatix", quietly=TRUE, warn.conflicts=FALSE)) {\n'
         '  install.packages("rstatix", repos="https://cran.r-project.org", quiet=TRUE)\n'
         '}\n'
@@ -2052,10 +2192,204 @@ def _run_rstatix_condition_week_anova_r(weekly_df, condition_levels, week_levels
         '  data = data, dv = Response, wid = ID,\n'
         '  between = Condition, within = Week, type = 3\n'
         ')\n'
-        'print(res)\n'
         'tbl <- get_anova_table(res)\n'
+        '\n'
+        'fmt_p2 <- function(p) {\n'
+        '  if (is.na(p)) return("      NA")\n'
+        '  sprintf("%.4g", p)\n'
+        '}\n'
+        '\n'
+        'cat(strrep("-", 72), "\\n", sep="")\n'
+        'cat("QUICK-READ SUMMARY (corrected for sphericity when applicable)\\n")\n'
+        'cat(strrep("-", 72), "\\n", sep="")\n'
+        'cat(sprintf("  %-16s %7s %7s %10s %11s  %-4s %8s\\n",\n'
+        '            "Effect", "DFn", "DFd", "F", "p", "Sig", "ges"))\n'
+        'cat("  ", strrep("-", 68), "\\n", sep="")\n'
+        'for (i in seq_len(nrow(tbl))) {\n'
+        '  eff <- as.character(tbl$Effect[i])\n'
+        '  sig <- tbl[["p<.05"]][i]\n'
+        '  sig <- ifelse(is.na(sig) || sig == "", "", as.character(sig))\n'
+        '  cat(sprintf("  %-16s %7.2f %7.2f %10.4f %11s  %-4s %8.4f\\n",\n'
+        '              eff, tbl$DFn[i], tbl$DFd[i], tbl$F[i], fmt_p2(tbl$p[i]), sig, tbl$ges[i]))\n'
+        '}\n'
         'cat("\\n")\n'
-        'print(tbl)\n'
+        'cat("  Sig: * p<.05   (ges = generalized eta-squared effect size)\\n")\n'
+        'cat("  Note: DFn/DFd reflect the Greenhouse-Geisser-corrected degrees of\\n")\n'
+        'cat("        freedom automatically when Mauchly\'s sphericity test (below) is\\n")\n'
+        'cat("        significant for a within-subjects effect.\\n")\n'
+        '\n'
+        'cat("\\n", strrep("=", 72), "\\n", sep="")\n'
+        'cat("FULL rstatix OUTPUT (ANOVA table, Mauchly\'s sphericity test,\\n")\n'
+        'cat("and Greenhouse-Geisser / Huynh-Feldt sphericity corrections)\\n")\n'
+        'cat(strrep("=", 72), "\\n\\n", sep="")\n'
+        'print(res)\n'
+        '\n'
+        '# ── Post-hoc tests (Welch\'s t-test, Holm corrected) ──────────────────\n'
+        '# Parametric analog of the nparLD post-hoc section: same three\n'
+        '# comparisons (overall between-condition, per-week between-condition,\n'
+        '# across-week condition-agnostic), but using Welch\'s t-test instead of\n'
+        '# Mann-Whitney U / Wilcoxon signed-rank.\n'
+        'fmt_p3 <- function(p) {\n'
+        '  if (is.na(p)) return("      NA")\n'
+        '  sprintf("%.2e", p)\n'
+        '}\n'
+        'sig_fn3 <- function(p) {\n'
+        '  if (is.na(p)) return("")\n'
+        '  if (p<0.001) return("***")\n'
+        '  if (p<0.01)  return("**")\n'
+        '  if (p<0.05)  return("*")\n'
+        '  if (p<0.1)   return(".")\n'
+        '  return("")\n'
+        '}\n'
+        'cohend_unpaired <- function(x, y) {\n'
+        '  nx <- length(x); ny <- length(y)\n'
+        '  sp <- sqrt(((nx-1)*var(x) + (ny-1)*var(y)) / max(nx+ny-2, 1))\n'
+        '  if (sp == 0 || is.na(sp)) return(NA_real_)\n'
+        '  (mean(x) - mean(y)) / sp\n'
+        '}\n'
+        'cohend_paired <- function(d) {\n'
+        '  sdd <- sd(d)\n'
+        '  if (sdd == 0 || is.na(sdd)) return(NA_real_)\n'
+        '  mean(d) / sdd\n'
+        '}\n'
+        '\n'
+        'cat("\\n================================================================\\n")\n'
+        'cat("POST-HOC: Between-condition (Welch\'s t-test, Holm corrected)\\n")\n'
+        'cat("  (per-animal mean across all weeks)\\n")\n'
+        'cat("================================================================\\n")\n'
+        'per_animal <- aggregate(Response ~ ID + Condition, data=data, FUN=mean)\n'
+        'conds_all  <- levels(per_animal$Condition)\n'
+        'if (length(conds_all) >= 2) {\n'
+        '  pairs_all <- combn(length(conds_all), 2)\n'
+        '  tests_all <- apply(pairs_all, 2, function(idx) {\n'
+        '    x <- per_animal$Response[per_animal$Condition == conds_all[idx[1]]]\n'
+        '    y <- per_animal$Response[per_animal$Condition == conds_all[idx[2]]]\n'
+        '    if (length(x)<2 || length(y)<2) return(NULL)\n'
+        '    tryCatch(t.test(x, y, var.equal=FALSE), error=function(e) NULL)\n'
+        '  }, simplify=FALSE)\n'
+        '  p_raw_all  <- sapply(tests_all, function(t) if (is.null(t)) NA_real_ else t$p.value)\n'
+        '  p_holm_all <- p.adjust(p_raw_all, method="holm")\n'
+        '  cat(sprintf("  %-22s  %-22s  %8s  %8s  %8s  %7s  %9s  %-22s  %s\\n",\n'
+        '              "Group A", "Group B", "t", "df", "p_raw", "p_holm", "Cohen_d", "95% CI (diff)", "Sig"))\n'
+        '  cat("  ", strrep("-", 110), "\\n", sep="")\n'
+        '  n_all_pairs <- ncol(pairs_all)\n'
+        '  for (k in seq_len(n_all_pairs)) {\n'
+        '    ca    <- conds_all[pairs_all[1,k]]\n'
+        '    cb    <- conds_all[pairs_all[2,k]]\n'
+        '    x_k   <- per_animal$Response[per_animal$Condition==ca]\n'
+        '    y_k   <- per_animal$Response[per_animal$Condition==cb]\n'
+        '    na_ca <- sum(!is.na(x_k)); nb_cb <- sum(!is.na(y_k))\n'
+        '    tt    <- tests_all[[k]]\n'
+        '    if (is.null(tt) || is.na(p_raw_all[k])) {\n'
+        '      cat(sprintf("  %-22s  %-22s  %8s  %8s\\n",\n'
+        '                  paste0(ca," (n=",na_ca,")"), paste0(cb," (n=",nb_cb,")"),\n'
+        '                  "NA", "NA"))\n'
+        '    } else {\n'
+        '      t_stat <- as.numeric(tt$statistic)\n'
+        '      df_w   <- as.numeric(tt$parameter)\n'
+        '      d_eff  <- cohend_unpaired(x_k, y_k)\n'
+        '      ci_lo  <- tt$conf.int[1]; ci_hi <- tt$conf.int[2]\n'
+        '      ci_str <- sprintf("[%.4f, %.4f]", ci_lo, ci_hi)\n'
+        '      cat(sprintf("  %-22s  %-22s  %8.3f  %8.2f  %8s  %8s  %9.4f  %-22s  %s\\n",\n'
+        '                  paste0(ca," (n=",na_ca,")"), paste0(cb," (n=",nb_cb,")"),\n'
+        '                  t_stat, df_w, fmt_p3(p_raw_all[k]), fmt_p3(p_holm_all[k]),\n'
+        '                  d_eff, ci_str, sig_fn3(p_holm_all[k])))\n'
+        '    }\n'
+        '  }\n'
+        '} else {\n'
+        '  cat("  (only 1 condition -- no pairwise test)\\n")\n'
+        '}\n'
+        '\n'
+        'cat("\\n================================================================\\n")\n'
+        'cat("POST-HOC: Between-condition comparisons at each week\\n")\n'
+        'cat("  (Welch\'s t-test, Holm corrected within each week)\\n")\n'
+        'cat("================================================================\\n")\n'
+        'for (wk in levels(data$Week)) {\n'
+        '  sub <- data[data$Week == wk, ]\n'
+        '  cat("\\nWeek:", wk, "\\n")\n'
+        '  conds <- levels(sub$Condition)\n'
+        '  if (length(conds) < 2) { cat("  (only 1 condition -- no pairwise test)\\n"); next }\n'
+        '  pairs_idx <- combn(length(conds), 2)\n'
+        '  tests_wk <- apply(pairs_idx, 2, function(idx) {\n'
+        '    x <- sub$Response[sub$Condition == conds[idx[1]]]\n'
+        '    y <- sub$Response[sub$Condition == conds[idx[2]]]\n'
+        '    if (length(x) < 2 || length(y) < 2) return(NULL)\n'
+        '    tryCatch(t.test(x, y, var.equal=FALSE), error = function(e) NULL)\n'
+        '  }, simplify=FALSE)\n'
+        '  p_raw <- sapply(tests_wk, function(t) if (is.null(t)) NA_real_ else t$p.value)\n'
+        '  p_holm <- p.adjust(p_raw, method="holm")\n'
+        '  n_pairs <- ncol(pairs_idx)\n'
+        '  for (k in seq_len(n_pairs)) {\n'
+        '    ca <- conds[pairs_idx[1, k]]\n'
+        '    cb <- conds[pairs_idx[2, k]]\n'
+        '    x_k <- sub$Response[sub$Condition == ca]\n'
+        '    y_k <- sub$Response[sub$Condition == cb]\n'
+        '    na_ca <- sum(!is.na(x_k)); nb_cb <- sum(!is.na(y_k))\n'
+        '    tt <- tests_wk[[k]]\n'
+        '    if (is.null(tt) || is.na(p_raw[k])) {\n'
+        '      cat(sprintf("  %s (n=%d) vs %s (n=%d) : NA\\n", ca, na_ca, cb, nb_cb))\n'
+        '    } else {\n'
+        '      t_stat <- as.numeric(tt$statistic)\n'
+        '      df_w   <- as.numeric(tt$parameter)\n'
+        '      d_eff  <- cohend_unpaired(x_k, y_k)\n'
+        '      ci_lo  <- tt$conf.int[1]; ci_hi <- tt$conf.int[2]\n'
+        '      sig <- sig_fn3(p_holm[k])\n'
+        '      cat(sprintf("  %s (n=%d) vs %s (n=%d) : t=%.3f  df=%.2f  p_raw=%s  p_holm=%s  Cohen_d=%.4f  CI=[%.4f,%.4f]  %s\\n",\n'
+        '                  ca, na_ca, cb, nb_cb, t_stat, df_w, fmt_p3(p_raw[k]), fmt_p3(p_holm[k]),\n'
+        '                  d_eff, ci_lo, ci_hi, sig))\n'
+        '    }\n'
+        '  }\n'
+        '}\n'
+        '\n'
+        'cat("\\n================================================================\\n")\n'
+        'cat("POST-HOC: Pairwise week comparisons (condition-agnostic)\\n")\n'
+        'cat("  (Paired t-test, paired by animal, Holm corrected)\\n")\n'
+        'cat("================================================================\\n")\n'
+        'week_levels_r <- levels(data$Week)\n'
+        'if (length(week_levels_r) >= 2) {\n'
+        '  wk_pairs   <- combn(week_levels_r, 2)\n'
+        '  n_wk_pairs <- ncol(wk_pairs)\n'
+        '  wk_tests   <- vector("list", n_wk_pairs)\n'
+        '  wk_n_shared <- integer(n_wk_pairs)\n'
+        '  wk_diffs   <- vector("list", n_wk_pairs)\n'
+        '  for (k in seq_len(n_wk_pairs)) {\n'
+        '    wa <- wk_pairs[1, k]; wb <- wk_pairs[2, k]\n'
+        '    ids_shared <- intersect(data$ID[data$Week==wa], data$ID[data$Week==wb])\n'
+        '    wk_n_shared[k] <- length(ids_shared)\n'
+        '    if (length(ids_shared) < 3) next\n'
+        '    va <- sapply(ids_shared, function(id) mean(data$Response[data$Week==wa & data$ID==id], na.rm=TRUE))\n'
+        '    vb <- sapply(ids_shared, function(id) mean(data$Response[data$Week==wb & data$ID==id], na.rm=TRUE))\n'
+        '    wk_diffs[[k]] <- va - vb\n'
+        '    wk_tests[[k]] <- tryCatch(\n'
+        '      t.test(va, vb, paired=TRUE),\n'
+        '      error=function(e) NULL\n'
+        '    )\n'
+        '  }\n'
+        '  wk_p_raw  <- sapply(wk_tests, function(t) if (is.null(t)) NA_real_ else t$p.value)\n'
+        '  wk_p_holm <- p.adjust(wk_p_raw, method="holm")\n'
+        '  cat(sprintf("  %-10s  %-10s  %6s  %8s  %8s  %8s  %7s  %9s  %-22s  %s\\n",\n'
+        '              "Week A", "Week B", "n", "t", "df", "p_raw", "p_holm", "Cohen_d", "95% CI (diff)", "Sig"))\n'
+        '  cat("  ", strrep("-", 110), "\\n", sep="")\n'
+        '  for (k in seq_len(n_wk_pairs)) {\n'
+        '    wa <- wk_pairs[1, k]; wb <- wk_pairs[2, k]\n'
+        '    np <- wk_n_shared[k]\n'
+        '    tt <- wk_tests[[k]]\n'
+        '    if (is.null(tt) || is.na(wk_p_raw[k])) {\n'
+        '      cat(sprintf("  %-10s  %-10s  %6d  %8s  %8s\\n", wa, wb, np, "NA", "NA"))\n'
+        '    } else {\n'
+        '      t_stat <- as.numeric(tt$statistic)\n'
+        '      df_w   <- as.numeric(tt$parameter)\n'
+        '      d_eff  <- cohend_paired(wk_diffs[[k]])\n'
+        '      ci_lo  <- tt$conf.int[1]; ci_hi <- tt$conf.int[2]\n'
+        '      ci_str <- sprintf("[%.4f, %.4f]", ci_lo, ci_hi)\n'
+        '      cat(sprintf("  %-10s  %-10s  %6d  %8.3f  %8.2f  %8s  %8s  %9.4f  %-22s  %s\\n",\n'
+        '                  wa, wb, np, t_stat, df_w, fmt_p3(wk_p_raw[k]), fmt_p3(wk_p_holm[k]),\n'
+        '                  d_eff, ci_str, sig_fn3(wk_p_holm[k])))\n'
+        '    }\n'
+        '  }\n'
+        '} else {\n'
+        '  cat("  (fewer than 2 weeks -- no pairwise test)\\n")\n'
+        '}\n'
         '\n'
         'p_of <- function(effect) {\n'
         '  v <- tbl$p[tbl$Effect == effect]\n'
@@ -2246,7 +2580,7 @@ def _expl_measure_rm_anova_resid_week_fig(all_results, column, label, unit,
     if weekly.empty or len(complete_mice) < 3:
         raise ValueError(f'Insufficient complete-case mice ({len(complete_mice)}) for RM ANOVA')
 
-    week_levels      = sorted(weekly['week'].unique())
+    week_levels      = sorted(int(w) for w in weekly['week'].unique())
     condition_levels = sorted(weekly['condition'].unique())
 
     # ── Fit OLS with mouse as fixed-effect blocking factor (within-subject residuals) ──
@@ -4358,6 +4692,14 @@ def analyze_levels(data_files, transitions_csv_path, animal_conditions=None, ani
                  for _ia, _ib in _it_t2.combinations(range(len(_t2_conds)), 2)],
             )
             _write_ttest_assumptions_report(
+                output_dir, 'time_to_level2',
+                'Cumulative Time to First Level 1→2 Transition (min)',
+                [(_t2_conds[_ia], _t2_conds[_ib],
+                  list(_t2_by_cond[_t2_conds[_ia]]),
+                  list(_t2_by_cond[_t2_conds[_ib]]))
+                 for _ia, _ib in _it_t2.combinations(range(len(_t2_conds)), 2)],
+            )
+            _write_welch_ttest_report(
                 output_dir, 'time_to_level2',
                 'Cumulative Time to First Level 1→2 Transition (min)',
                 [(_t2_conds[_ia], _t2_conds[_ib],
@@ -8933,6 +9275,14 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
              for (_lc1, _lc2, _, _) in _larp_results],
         )
         _write_ttest_assumptions_report(
+            output_dir, 'lick_after_reward_prop_bar',
+            'Proportion of Reward Deliveries with Post-Delivery Lick (2 s window)',
+            [(_lc1, _lc2,
+              [v for _, v in _condition_mouse_larp[_lc1]],
+              [v for _, v in _condition_mouse_larp[_lc2]])
+             for (_lc1, _lc2, _, _) in _larp_results],
+        )
+        _write_welch_ttest_report(
             output_dir, 'lick_after_reward_prop_bar',
             'Proportion of Reward Deliveries with Post-Delivery Lick (2 s window)',
             [(_lc1, _lc2,
@@ -13587,6 +13937,14 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                       [e[1] for e in _rlde_by_cond[_conds_rlde[_ib]]])
                      for _ia, _ib in _pairs_rlde],
                 )
+                _write_welch_ttest_report(
+                    output_dir, 'epoch_reward_lick_diff_entry_065s',
+                    'Lick Rate Post-minus-Pre Reward Delivery (Reward Zone, 0\u20130.65 s vs 0.65\u20131.3 s after zone entry)',
+                    [(_conds_rlde[_ia], _conds_rlde[_ib],
+                      [e[1] for e in _rlde_by_cond[_conds_rlde[_ia]]],
+                      [e[1] for e in _rlde_by_cond[_conds_rlde[_ib]]])
+                     for _ia, _ib in _pairs_rlde],
+                )
 
         # ── Punishment zone epoch plots ───────────────────────────────────────
         _any_punish_speed = any(r.get('punish_speed_epoch_matrix') is not None for r in all_results)
@@ -13820,6 +14178,14 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                       [e[1] for e in _dlde_by_cond[_conds_dlde[_ib]]])
                      for _ia, _ib in _pairs_dlde],
                 )
+                _write_welch_ttest_report(
+                    output_dir, 'epoch_delivery_lick_diff_065s',
+                    'Lick rate difference (licks/s)',
+                    [(_conds_dlde[_ia], _conds_dlde[_ib],
+                      [e[1] for e in _dlde_by_cond[_conds_dlde[_ia]]],
+                      [e[1] for e in _dlde_by_cond[_conds_dlde[_ib]]])
+                     for _ia, _ib in _pairs_dlde],
+                )
 
         # ── Reward delivery cap: pre/post 1 s difference bar chart ─────────────
         if 'epoch_delivery_cap_diff_entry' in selected_plots and _any_del_cap:
@@ -14005,6 +14371,14 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                      for _ia2, _ib2 in _pairs_dcde2],
                 )
                 _write_ttest_assumptions_report(
+                    output_dir, 'epoch_delivery_cap_diff_065s',
+                    'Lick Rate (licks/s) Post-minus-Pre Reward Delivery (\u00b10.65 s windows)',
+                    [(_conds_dcde2[_ia2], _conds_dcde2[_ib2],
+                      [e[1] for e in _dcde2_by_cond[_conds_dcde2[_ia2]]],
+                      [e[1] for e in _dcde2_by_cond[_conds_dcde2[_ib2]]])
+                     for _ia2, _ib2 in _pairs_dcde2],
+                )
+                _write_welch_ttest_report(
                     output_dir, 'epoch_delivery_cap_diff_065s',
                     'Lick Rate (licks/s) Post-minus-Pre Reward Delivery (\u00b10.65 s windows)',
                     [(_conds_dcde2[_ia2], _conds_dcde2[_ib2],
@@ -14553,6 +14927,14 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                       [e[1] for e in _pde2_by_cond[_conds_de2[_ib]]])
                      for _ia, _ib in _pairs_de2],
                 )
+                _write_welch_ttest_report(
+                    output_dir, 'epoch_punish_speed_diff_entry_2s',
+                    'Speed Post-minus-Pre Zone Entry (Punishment Zone, 2 s windows)',
+                    [(_conds_de2[_ia], _conds_de2[_ib],
+                      [e[1] for e in _pde2_by_cond[_conds_de2[_ia]]],
+                      [e[1] for e in _pde2_by_cond[_conds_de2[_ib]]])
+                     for _ia, _ib in _pairs_de2],
+                )
 
         # ── Punishment zone: pre/post 0.65 s cutoff capacitive bar chart ─────
         if 'epoch_punish_cap_pre_post' in selected_plots and _any_punish_cap:
@@ -15087,6 +15469,14 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                       [e[1] for e in _diff_by_cond[_conds_d[_ib]]])
                      for _ia, _ib in _pairs_d],
                 )
+                _write_welch_ttest_report(
+                    output_dir, 'epoch_reward_speed_diff',
+                    'Speed Post-minus-Pre Reward Delivery (0-0.65 s vs 0.65-1.3 s)',
+                    [(_conds_d[_ia], _conds_d[_ib],
+                      [e[1] for e in _diff_by_cond[_conds_d[_ia]]],
+                      [e[1] for e in _diff_by_cond[_conds_d[_ib]]])
+                     for _ia, _ib in _pairs_d],
+                )
 
         # ── Pre/post-reward delivery capacitive (z-scored) bar chart ──────────
         if 'epoch_reward_cap_pre_post' in selected_plots and _any_cap:
@@ -15261,6 +15651,14 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                      for _ia, _ib in _pairs_cap_d],
                 )
                 _write_ttest_assumptions_report(
+                    output_dir, 'epoch_reward_cap_diff',
+                    'Capacitive (z-scored) Post-minus-Pre Reward Delivery (0-0.65 s vs 0.65-1.3 s)',
+                    [(_conds_cap_d[_ia], _conds_cap_d[_ib],
+                      [e[1] for e in _cap_diff_by_cond[_conds_cap_d[_ia]]],
+                      [e[1] for e in _cap_diff_by_cond[_conds_cap_d[_ib]]])
+                     for _ia, _ib in _pairs_cap_d],
+                )
+                _write_welch_ttest_report(
                     output_dir, 'epoch_reward_cap_diff',
                     'Capacitive (z-scored) Post-minus-Pre Reward Delivery (0-0.65 s vs 0.65-1.3 s)',
                     [(_conds_cap_d[_ia], _conds_cap_d[_ib],
@@ -17548,7 +17946,7 @@ def run_nparld_condition_week_r(
     # Complete-case filter: keep only animals present in every Week
     week_counts = weekly.groupby('ID')['Week'].nunique()
     all_weeks_n = weekly['Week'].nunique()
-    _all_weeks_pre = sorted(weekly['Week'].unique())
+    _all_weeks_pre = sorted(int(w) for w in weekly['Week'].unique())
     complete_ids = week_counts[week_counts == all_weeks_n].index
     n_dropped = weekly['ID'].nunique() - len(complete_ids)
     _dropped_info = None
@@ -17565,7 +17963,7 @@ def run_nparld_condition_week_r(
         print(f"  [NOTE] Dropped {n_dropped} animal(s) with incomplete weekly records; "
               f"{len(complete_ids)} retained")
         for _, _row in _dropped_grp.iterrows():
-            _present = sorted(set(_row['Week']))
+            _present = sorted(int(w) for w in set(_row['Week']))
             _missing = sorted(set(_all_weeks_pre) - set(_present))
             print(f"    Excluded: {_row['ID']:20s}  condition={_row['Condition']}  "
                   f"weeks present={_present}  missing weeks={_missing}")
@@ -17575,7 +17973,7 @@ def run_nparld_condition_week_r(
         print(f"  [ERROR] Insufficient complete-case animals ({len(complete_ids)}) for nparLD.")
         return {}
 
-    week_levels = sorted(weekly['Week'].unique())
+    week_levels = sorted(int(w) for w in weekly['Week'].unique())
     condition_levels = sorted(weekly['Condition'].unique())
     n_subjects = int(weekly['ID'].nunique())
 
@@ -17951,7 +18349,7 @@ def run_nparld_condition_week_r(
             _excl_insert_idx = header_lines.index(f'N excluded  : {n_dropped}') + 1
             header_lines.insert(_excl_insert_idx, 'Excluded animals:')
             for _ei, (_idx, _row) in enumerate(_dropped_info.iterrows()):
-                _present = sorted(set(_row['Week']))
+                _present = sorted(int(w) for w in set(_row['Week']))
                 _missing = sorted(set(_all_weeks_pre) - set(_present))
                 header_lines.insert(
                     _excl_insert_idx + 1 + _ei,
@@ -17972,6 +18370,324 @@ def run_nparld_condition_week_r(
         'box_pvalues': box_pvalues,
         'measure': measure,
     }
+
+
+# =============================================================================
+# R-BASED rstatix: PARAMETRIC TWO-WAY REPEATED-MEASURES (MIXED) ANOVA
+# Design: Condition (between-subjects) x Week (within-subjects)
+# Parametric analog of run_nparld_condition_week_r() above — same weekly
+# per-animal averaging / complete-case filtering, but delegates the actual
+# ANOVA call to _run_rstatix_condition_week_anova_r() (rstatix::anova_test).
+# =============================================================================
+
+def run_rstatix_condition_week_r(
+    all_results,
+    measure: str = 'sensitivity',
+    output_dir=None,
+) -> dict:
+    """
+    Parametric two-way mixed (split-plot) repeated-measures ANOVA via R's
+    rstatix package — the parametric counterpart of run_nparld_condition_week_r(),
+    runnable across dependent measures the same way via _run_rstatix_rm_anova_menu().
+
+    Design  : Condition (between-subjects) x Week (within-subjects)
+    Between : Condition  (starting_condition from master CSV)
+    Within  : Week       (sessions 1-4 = week 1, 5-8 = week 2, etc.)
+    Response: per-animal per-week mean of ``measure``
+
+    Requires R with the rstatix package installed.
+
+    Returns
+    -------
+    dict with keys: 'table_text', 'report_path', 'n_subjects', 'conditions',
+    'weeks', 'pvalues' (Condition / Week / Condition:Week), 'measure'.
+    """
+    # ── Build combined weekly-mean dataset (same logic as nparLD) ─────────────
+    frames = []
+    for result in all_results:
+        df = result['df'].copy()
+        if 'week' not in df.columns:
+            df['week'] = [i // 4 + 1 for i in range(len(df))]
+        if measure not in df.columns:
+            print(f"  [WARNING] '{measure}' not found for {result['mouse']} — skipping")
+            continue
+        df['ID'] = result['mouse']
+        df['Condition'] = result['starting_condition']
+        sub = df[['ID', 'Condition', 'week', measure]].dropna(subset=[measure])
+        frames.append(sub)
+
+    if not frames:
+        print(f"  [ERROR] No data available for measure '{measure}'.")
+        return {}
+
+    combined = pd.concat(frames, ignore_index=True)
+    combined = combined.rename(columns={'week': 'Week', measure: 'Response'})
+
+    # Per-animal per-week mean
+    weekly = (
+        combined
+        .groupby(['ID', 'Condition', 'Week'], as_index=False)['Response']
+        .mean()
+    )
+
+    # Complete-case filter: keep only animals present in every Week
+    # (rstatix's two-way mixed ANOVA requires a balanced within-subjects design)
+    week_counts = weekly.groupby('ID')['Week'].nunique()
+    all_weeks_n = weekly['Week'].nunique()
+    _all_weeks_pre = sorted(int(w) for w in weekly['Week'].unique())
+    complete_ids = week_counts[week_counts == all_weeks_n].index
+    n_dropped = weekly['ID'].nunique() - len(complete_ids)
+    _dropped_info = None
+    if n_dropped:
+        _dropped_grp = (
+            weekly[~weekly['ID'].isin(complete_ids)]
+            [['ID', 'Condition', 'Week']]
+            .groupby(['ID', 'Condition'])['Week']
+            .agg(list)
+            .reset_index()
+            .sort_values('ID')
+        )
+        _dropped_info = _dropped_grp
+        print(f"  [NOTE] Dropped {n_dropped} animal(s) with incomplete weekly records; "
+              f"{len(complete_ids)} retained")
+        for _, _row in _dropped_grp.iterrows():
+            _present = sorted(int(w) for w in set(_row['Week']))
+            _missing = sorted(set(_all_weeks_pre) - set(_present))
+            print(f"    Excluded: {_row['ID']:20s}  condition={_row['Condition']}  "
+                  f"weeks present={_present}  missing weeks={_missing}")
+    weekly = weekly[weekly['ID'].isin(complete_ids)].copy()
+
+    if weekly.empty or len(complete_ids) < 3:
+        print(f"  [ERROR] Insufficient complete-case animals ({len(complete_ids)}) for rstatix RM ANOVA.")
+        return {}
+
+    week_levels = sorted(int(w) for w in weekly['Week'].unique())
+    condition_levels = sorted(weekly['Condition'].unique())
+    n_subjects = int(weekly['ID'].nunique())
+
+    print(f"\nrstatix RM ANOVA: {n_subjects} subjects x {len(week_levels)} weeks x {len(condition_levels)} conditions")
+    print(f"  Conditions : {condition_levels}")
+    print(f"  Weeks      : {week_levels}")
+
+    weekly_r = weekly.rename(columns={'ID': 'ID', 'Condition': 'Condition',
+                                       'Week': 'Week', 'Response': 'Response'})
+    _rres = _run_rstatix_condition_week_anova_r(
+        weekly_r, condition_levels, week_levels, measure,
+    )
+    if not _rres:
+        print(f"  [ERROR] rstatix/R not available or call failed for measure '{measure}'.")
+        return {}
+
+    table_text = _rres.get('table_text', '')
+    pvalues = _rres.get('pvalues', {})
+    print(table_text)
+
+    # ── Save report ───────────────────────────────────────────────────────────
+    report_path = None
+    if table_text.strip() and output_dir is not None:
+        os.makedirs(output_dir, exist_ok=True)
+        _ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        report_path = os.path.join(
+            output_dir, f'rstatix_rm_anova_condition_week_{measure}_{_ts}.txt'
+        )
+        header_lines = [
+            '=' * 72,
+            f'rstatix: {measure} -- Condition x Week (parametric two-way mixed ANOVA)',
+            '=' * 72,
+            f'Generated   : {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
+            f'Measure     : {measure}',
+            f'Conditions  : {", ".join(str(c) for c in condition_levels)}',
+            f'Weeks       : {week_levels}',
+            f'N subjects  : {n_subjects} (complete cases across all weeks)',
+            f'N excluded  : {n_dropped}',
+            '',
+            'Design      : Two-way mixed (split-plot) ANOVA',
+            'Between     : Condition  (starting_condition)',
+            'Within      : Week       (sessions 1-4 = week 1, 5-8 = week 2, etc.)',
+            'Response    : Per-animal per-week mean of measure',
+            '',
+            'Statistics  : rstatix::anova_test (type III SS); Mauchly sphericity test',
+            '              and Greenhouse-Geisser / Huynh-Feldt corrections reported',
+            '              automatically when sphericity is violated.',
+            'Post-hoc    : Between-condition: pairwise Welch\'s t-test, Holm corrected',
+            '              Per-week        : pairwise Welch\'s t-test at each week, Holm corrected',
+            '              Across-week     : pairwise paired t-test (paired by animal, condition-agnostic), Holm corrected',
+            '',
+            'R output:',
+            '-' * 72,
+            '',
+        ]
+        if _dropped_info is not None:
+            _excl_insert_idx = header_lines.index(f'N excluded  : {n_dropped}') + 1
+            header_lines.insert(_excl_insert_idx, 'Excluded animals:')
+            for _ei, (_idx, _row) in enumerate(_dropped_info.iterrows()):
+                _present = sorted(int(w) for w in set(_row['Week']))
+                _missing = sorted(set(_all_weeks_pre) - set(_present))
+                header_lines.insert(
+                    _excl_insert_idx + 1 + _ei,
+                    f'  {_row["ID"]:20s}  condition={_row["Condition"]}  '
+                    f'weeks present={_present}  missing={_missing}',
+                )
+        with open(report_path, 'w', encoding='utf-8') as _fout:
+            _fout.write('\n'.join(header_lines) + table_text + '\n')
+        print(f"\n[OK] rstatix RM ANOVA report saved -> {report_path}")
+
+    return {
+        'table_text': table_text,
+        'report_path': report_path,
+        'n_subjects': n_subjects,
+        'conditions': condition_levels,
+        'weeks': week_levels,
+        'pvalues': pvalues,
+        'measure': measure,
+    }
+
+
+def _write_rstatix_bh_fdr_summary(run_results, output_dir=None,
+                                   effects=None, filename_tag='bh_fdr_summary'):
+    """
+    Apply BH FDR correction across all DVs (one correction per ANOVA effect)
+    for a batch of run_rstatix_condition_week_r() results, and print + save
+    a summary report. Mirrors _write_nparld_bh_fdr_summary() but reads the
+    'pvalues' key (Condition / Week / Condition:Week) produced by rstatix
+    instead of the nparLD ATS/Box pvalues.
+
+    run_results : list of dicts returned by run_rstatix_condition_week_r();
+                  each must have keys 'measure' and 'pvalues'.
+    effects     : list of effect names to correct. Defaults to
+                  ['Condition', 'Week', 'Condition:Week'].
+    """
+    measures = [r['measure'] for r in run_results]
+    if effects is None:
+        effects = ['Condition', 'Week', 'Condition:Week']
+
+    _ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    lines = [
+        '=' * 72,
+        'rstatix RM ANOVA: BH FDR CORRECTION ACROSS DEPENDENT VARIABLES',
+        '=' * 72,
+        f'Generated : {_ts}',
+        f'N DVs     : {len(measures)}',
+        f'DVs       : {", ".join(measures)}',
+        '',
+        'Method : Benjamini-Hochberg FDR applied independently for each',
+        '         ANOVA effect (Condition, Week, Condition:Week) across',
+        '         all dependent variables listed above.',
+        '',
+        'Note   : Correction is across DVs only; the 3 effects within a',
+        '         single model are NOT corrected against each other.',
+        '',
+    ]
+
+    print('\n' + '=' * 72)
+    print('rstatix RM ANOVA: BH FDR CORRECTION ACROSS DEPENDENT VARIABLES')
+    print(f'N DVs: {len(measures)}')
+    print('=' * 72)
+
+    for effect in effects:
+        p_vals = [r.get('pvalues', {}).get(effect, float('nan')) for r in run_results]
+        valid_idx = [i for i, p in enumerate(p_vals) if p == p]  # exclude NaN
+
+        header = f'Effect: {effect}  (n_valid={len(valid_idx)})'
+        lines.append(header)
+        print(f'\n{header}')
+
+        if not valid_idx:
+            msg = '  (no valid p-values for this effect)'
+            lines.append(msg)
+            print(msg)
+            continue
+
+        valid_measures = [measures[i] for i in valid_idx]
+        valid_pvals    = [p_vals[i] for i in valid_idx]
+        adj_pvals      = _bh_fdr(valid_pvals)
+
+        row_hdr = f'  {"Measure":<28} {"p(raw)":>10} {"p(BH-adj)":>10}  Sig'
+        lines.append(row_hdr)
+        print(row_hdr)
+        for m, p_raw, p_adj in sorted(zip(valid_measures, valid_pvals, adj_pvals),
+                                       key=lambda t: t[1]):
+            sig = '***' if p_adj < 0.001 else '**' if p_adj < 0.01 else '*' if p_adj < 0.05 else ''
+            row = f'  {m:<28} {p_raw:>10.4f} {p_adj:>10.4f}  {sig}'
+            lines.append(row)
+            print(row)
+        lines.append('')
+
+    if output_dir is not None:
+        os.makedirs(output_dir, exist_ok=True)
+        _fts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        summary_path = os.path.join(
+            output_dir, f'rstatix_{filename_tag}_{_fts}.txt'
+        )
+        with open(summary_path, 'w', encoding='utf-8') as _fout:
+            _fout.write('\n'.join(lines) + '\n')
+        print(f'[OK] BH FDR summary saved -> {summary_path}')
+
+
+def _run_rstatix_rm_anova_menu(all_results, output_dir=None):
+    """Interactive CLI menu to run rstatix Condition x Week parametric RM ANOVA
+    across dependent measures — the parametric counterpart of _run_nparld_menu()."""
+    _RSTATIX_MEASURES = [
+        'sensitivity',
+        'average_speed',
+        'hits',
+        'lick_count',
+        'avg_cap',
+        'rewards_per_bout',
+        'lick_after_reward_prop',
+        'dprime',
+        'total_distance',
+        'immobility_prop',
+    ]
+    # Append ending_level if it was injected into results_df (requires transitions CSV)
+    if all_results and 'ending_level' in all_results[0].get('df', {}).columns:
+        _RSTATIX_MEASURES.append('ending_level')
+    print('\n' + '=' * 60)
+    print('rstatix: Condition x Week parametric RM ANOVA')
+    print('Sessions 1-4 = Week 1, 5-8 = Week 2, etc.')
+    print('=' * 60)
+    print('Available measures:')
+    for idx, m in enumerate(_RSTATIX_MEASURES, 1):
+        print(f'  {idx:2d}. {m}')
+    print('   0. Run all measures')
+    print('  -1. Cancel / return')
+
+    while True:
+        try:
+            choice = input('Select measure(s) — single number, comma-separated list, 0, or -1: ').strip()
+        except EOFError:
+            print('rstatix RM ANOVA cancelled.')
+            return
+        if choice == '-1':
+            print('rstatix RM ANOVA cancelled.')
+            return
+        if choice == '0':
+            selected_measures = _RSTATIX_MEASURES
+        else:
+            # Accept comma-separated list of indices, e.g. "1,9,10"
+            try:
+                indices = [int(x.strip()) for x in choice.split(',')]
+            except ValueError:
+                print('  Invalid input. Enter a number or comma-separated numbers.')
+                continue
+            invalid = [i for i in indices if not (1 <= i <= len(_RSTATIX_MEASURES))]
+            if invalid:
+                print(f'  Out-of-range: {invalid}. Please enter numbers between 1 and {len(_RSTATIX_MEASURES)}.')
+                continue
+            selected_measures = [_RSTATIX_MEASURES[i - 1] for i in indices]
+
+        all_rstatix_results = []
+        for m in selected_measures:
+            print(f'\n--- Running rstatix RM ANOVA for: {m} ---')
+            res = run_rstatix_condition_week_r(
+                all_results, measure=m, output_dir=output_dir
+            )
+            if res and res.get('pvalues'):
+                all_rstatix_results.append(res)
+        # BH FDR correction across DVs (only meaningful with ≥2 DVs)
+        if len(all_rstatix_results) >= 2:
+            _write_rstatix_bh_fdr_summary(all_rstatix_results, output_dir)
+        return
 
 
 def _bh_fdr(p_values):
@@ -20216,6 +20932,15 @@ def main():
         _nparld_wd_ans = 'n'
     if _nparld_wd_ans == 'y':
         _run_nparld_weekday_menu(all_results, output_dir=output_dir)
+
+    try:
+        _rstatix_rm_ans = input(
+            '\nRun rstatix Condition x Week parametric RM ANOVA? [y/n]: '
+        ).strip().lower()
+    except EOFError:
+        _rstatix_rm_ans = 'n'
+    if _rstatix_rm_ans == 'y':
+        _run_rstatix_rm_anova_menu(all_results, output_dir=output_dir)
 
 if __name__ == "__main__":
     main()
