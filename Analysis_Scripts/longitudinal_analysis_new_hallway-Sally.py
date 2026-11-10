@@ -497,6 +497,20 @@ def _fmt_p(p: float) -> str:
     return f'p={p:.2e}\n(ns)'
 
 
+def _fmt_p_report(p: float) -> str:
+    """Format a p-value for text reports: 3 decimal places, switching to
+    scientific notation (2 significant digits) once 3 decimals can no longer
+    represent the value (i.e. |p| < 0.001), so very small p-values aren't
+    truncated to '0.000'. Used by the MWU / Welch's / Student's t-test
+    report writers.
+    """
+    if p is None or (isinstance(p, float) and np.isnan(p)):
+        return 'n/a'
+    if p != 0 and abs(p) < 0.001:
+        return f'{p:.2e}'
+    return f'{p:.3f}'
+
+
 def _scatter_by_sex(ax, mouse_ids, x_vals, y_vals, marker_map, **kwargs):
     """Scatter individual-mouse points styled by sex: circles ('o') for
     females, squares ('s') for males.
@@ -1469,7 +1483,7 @@ def _write_mwu_report(
             ci_str = f'[{row["ci_lo"]:.4f}, {row["ci_hi"]:.4f}]'
             lines.append(
                 f'{comp_label:<44} {row["na"]:>4} {row["nb"]:>4}  '
-                f'{row["u"]:>10.2f}  {row["p_raw"]:>9.4f}  {row["p_adj"]:>9.4f}  '
+                f'{row["u"]:>10.2f}  {_fmt_p_report(row["p_raw"]):>9}  {_fmt_p_report(row["p_adj"]):>9}  '
                 f'{row["r_rb"]:>7.4f}  {row["hl_est"]:>9.4f}  {ci_str}'
             )
         lines += [
@@ -1597,18 +1611,18 @@ def _write_ttest_assumptions_report(
                 SEP2,
                 f'{comp_label}   (nA={row["na"]}, nB={row["nb"]})',
                 SEP2,
-                f'  Shapiro-Wilk A:     W={row["sw_a_stat"]:.4f}, p={row["sw_a_p"]:.4f}  '
+                f'  Shapiro-Wilk A:     W={row["sw_a_stat"]:.4f}, p={_fmt_p_report(row["sw_a_p"])}  '
                 + ('-> Normal' if row['sw_a_p'] > 0.05 else '-> Non-normal'),
-                f'  Shapiro-Wilk B:     W={row["sw_b_stat"]:.4f}, p={row["sw_b_p"]:.4f}  '
+                f'  Shapiro-Wilk B:     W={row["sw_b_stat"]:.4f}, p={_fmt_p_report(row["sw_b_p"])}  '
                 + ('-> Normal' if row['sw_b_p'] > 0.05 else '-> Non-normal'),
-                f'  Shapiro-Wilk resid: W={row["sw_r_stat"]:.4f}, p={row["sw_r_p"]:.4f}  '
+                f'  Shapiro-Wilk resid: W={row["sw_r_stat"]:.4f}, p={_fmt_p_report(row["sw_r_p"])}  '
                 + ('-> Normal' if row['sw_r_p'] > 0.05 else '-> Non-normal'),
-                f'  Levene (A vs B):    F={row["lev_stat"]:.4f}, p={row["lev_p"]:.4f}  '
+                f'  Levene (A vs B):    F={row["lev_stat"]:.4f}, p={_fmt_p_report(row["lev_p"])}  '
                 + ('-> Equal variances' if row['var_ok'] else '-> Unequal variances'),
                 '',
-                f'  Welch\'s t-test:     t={row["welch_t"]:.4f}, p={row["welch_p"]:.4f}',
-                f'  Student\'s t-test:   t={row["student_t"]:.4f}, p={row["student_p"]:.4f}',
-                f'  Mann-Whitney U:     p={row["mwu_p"]:.4f}  (currently reported in the plot)',
+                f'  Welch\'s t-test:     t={row["welch_t"]:.4f}, p={_fmt_p_report(row["welch_p"])}',
+                f'  Student\'s t-test:   t={row["student_t"]:.4f}, p={_fmt_p_report(row["student_p"])}',
+                f'  Mann-Whitney U:     p={_fmt_p_report(row["mwu_p"])}  (currently reported in the plot)',
                 f'  Cohen\'s d:          {row["cohens_d"]:+.4f}',
                 '',
                 f'  RECOMMENDATION:     {row["recommendation"]}',
@@ -1746,7 +1760,7 @@ def _write_welch_ttest_report(
             ci_str = f'[{row["ci_lo"]:.4f}, {row["ci_hi"]:.4f}]'
             lines.append(
                 f'{comp_label:<44} {row["na"]:>4} {row["nb"]:>4}  '
-                f'{row["t"]:>8.4f}  {row["df"]:>7.2f}  {row["p_raw"]:>9.4f}  {row["p_adj"]:>9.4f}  '
+                f'{row["t"]:>8.4f}  {row["df"]:>7.2f}  {_fmt_p_report(row["p_raw"]):>9}  {_fmt_p_report(row["p_adj"]):>9}  '
                 f'{row["mean_diff"]:>+9.4f}  {row["cohens_d"]:>+8.4f}  {ci_str}'
             )
         lines += [
@@ -2190,30 +2204,38 @@ def _run_rstatix_condition_week_anova_r(weekly_df, condition_levels, week_levels
         '\n'
         'res <- anova_test(\n'
         '  data = data, dv = Response, wid = ID,\n'
-        '  between = Condition, within = Week, type = 3\n'
+        '  between = Condition, within = Week, type = 3,\n'
+        '  effect.size = "pes"\n'
         ')\n'
         'tbl <- get_anova_table(res)\n'
         '\n'
+        '# Unified p-value formatter: always scientific notation (2 sig figs)\n'
+        '# so small p-values are never truncated to "0.000".\n'
+        'fmt_p_r <- function(p) {\n'
+        '  if (is.na(p)) return("NA")\n'
+        '  sprintf("%.2e", p)\n'
+        '}\n'
         'fmt_p2 <- function(p) {\n'
         '  if (is.na(p)) return("      NA")\n'
-        '  sprintf("%.4g", p)\n'
+        '  fmt_p_r(p)\n'
         '}\n'
         '\n'
         'cat(strrep("-", 72), "\\n", sep="")\n'
         'cat("QUICK-READ SUMMARY (corrected for sphericity when applicable)\\n")\n'
         'cat(strrep("-", 72), "\\n", sep="")\n'
         'cat(sprintf("  %-16s %7s %7s %10s %11s  %-4s %8s\\n",\n'
-        '            "Effect", "DFn", "DFd", "F", "p", "Sig", "ges"))\n'
+        '            "Effect", "DFn", "DFd", "F", "p", "Sig", "pes"))\n'
         'cat("  ", strrep("-", 68), "\\n", sep="")\n'
         'for (i in seq_len(nrow(tbl))) {\n'
         '  eff <- as.character(tbl$Effect[i])\n'
         '  sig <- tbl[["p<.05"]][i]\n'
         '  sig <- ifelse(is.na(sig) || sig == "", "", as.character(sig))\n'
-        '  cat(sprintf("  %-16s %7.2f %7.2f %10.4f %11s  %-4s %8.4f\\n",\n'
-        '              eff, tbl$DFn[i], tbl$DFd[i], tbl$F[i], fmt_p2(tbl$p[i]), sig, tbl$ges[i]))\n'
+        '  cat(sprintf("  %-16s %7.2f %7.2f %10s %11s  %-4s %8s\\n",\n'
+        '              eff, tbl$DFn[i], tbl$DFd[i], sprintf("%.2e", tbl$F[i]),\n'
+        '              fmt_p2(tbl$p[i]), sig, sprintf("%.2e", tbl$pes[i])))\n'
         '}\n'
         'cat("\\n")\n'
-        'cat("  Sig: * p<.05   (ges = generalized eta-squared effect size)\\n")\n'
+        'cat("  Sig: * p<.05   (pes = partial eta-squared effect size)\\n")\n'
         'cat("  Note: DFn/DFd reflect the Greenhouse-Geisser-corrected degrees of\\n")\n'
         'cat("        freedom automatically when Mauchly\'s sphericity test (below) is\\n")\n'
         'cat("        significant for a within-subjects effect.\\n")\n'
@@ -2231,7 +2253,7 @@ def _run_rstatix_condition_week_anova_r(weekly_df, condition_levels, week_levels
         '# Mann-Whitney U / Wilcoxon signed-rank.\n'
         'fmt_p3 <- function(p) {\n'
         '  if (is.na(p)) return("      NA")\n'
-        '  sprintf("%.2e", p)\n'
+        '  fmt_p_r(p)\n'
         '}\n'
         'sig_fn3 <- function(p) {\n'
         '  if (is.na(p)) return("")\n'
@@ -18608,7 +18630,7 @@ def _write_rstatix_bh_fdr_summary(run_results, output_dir=None,
         for m, p_raw, p_adj in sorted(zip(valid_measures, valid_pvals, adj_pvals),
                                        key=lambda t: t[1]):
             sig = '***' if p_adj < 0.001 else '**' if p_adj < 0.01 else '*' if p_adj < 0.05 else ''
-            row = f'  {m:<28} {p_raw:>10.4f} {p_adj:>10.4f}  {sig}'
+            row = f'  {m:<28} {_fmt_p_report(p_raw):>10} {_fmt_p_report(p_adj):>10}  {sig}'
             lines.append(row)
             print(row)
         lines.append('')
