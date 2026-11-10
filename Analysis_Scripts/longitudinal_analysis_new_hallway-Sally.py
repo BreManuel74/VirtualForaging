@@ -61,12 +61,32 @@ METRICS COMPUTED (per session)
     circular-shift permutation (200 shuffles) for reward and punishment zones
     per-session, per-level, and collapsed bar charts by condition
 
+  Exploratory distributional analyses (generic, reused across measures)
+    speed, capacitive (z-scored), lick count, lick rate, distance, reward
+    count, level progression, sensitivity, and lick/reward ratio each share
+    a common set of generic helpers (_expl_measure_histogram_fig /
+    _expl_measure_distfit_fig / _expl_measure_boxplot_fig /
+    _expl_measure_rm_anova_resid_week_fig):
+      histogram + KDE + Shapiro-Wilk normality (all-sessions and per-mouse
+      mean panels), per-condition Normal-fit distributions with Q-Q plots,
+      condition x week box-and-whisker plots, and RM-ANOVA residual
+      diagnostics (with optional log / log1p DV transforms)
+    condition x sex and condition x week power analyses
+    (_expl_measure_condition_sex_power_fig / _expl_measure_condition_week_power_fig)
+    report observed effect sizes and achieved/required power per measure
+    OLS diagnostics reports (_write_expl_ols_diagnostics_report) accompany
+    the RM-ANOVA residual figures for each exploratory measure
+
 PLOT CATALOGUE
 --------------
-  > 100 named plot keys in _ALL_PLOT_KEYS / _PLOT_LABELS, selectable at
+  > 150 named plot keys in _ALL_PLOT_KEYS / _PLOT_LABELS, selectable at
   runtime via the Tkinter checklist GUI.  Categories include:
     Individual, Aggregate, Condition, Level, Sex, Weekday,
     Epoch (speed / capacitive / lick), Shuffle Z-score, Exploratory
+    (histogram / distfit / boxplot / RM-ANOVA residuals / power analyses
+    per measure)
+  Sex is distinguished on scatter/individual-point plots by marker shape
+  (circle = female, square = male) via the shared _scatter_by_sex() helper.
 
 CACHING
 -------
@@ -80,10 +100,36 @@ CACHING
 STATISTICAL OUTPUTS
 -------------------
   Mann-Whitney U reports  — saved as TXT to the output directory for all
-                            collapsed bar chart comparisons
+                            collapsed bar chart comparisons; p-values are
+                            formatted via _fmt_p_report() (3 decimals, or
+                            scientific notation below 0.001) with raw and
+                            BH-FDR-adjusted values reported side by side
+  Welch's / Student's     — _write_welch_ttest_report() / the assumptions
+    t-test reports          report writer (_write_ttest_assumptions_report())
+                            accompany two-group comparisons with Shapiro-Wilk
+                            normality and Levene's equal-variance checks, so
+                            the appropriate test (Welch's vs Student's vs
+                            Mann-Whitney U) can be chosen per comparison
   nparLD (R-based)        — nonparametric two-way repeated-measures ANOVA
                             (condition × week and condition × weekday designs);
                             requires R + nparLD package installed
+  rstatix (R-based)       — run_rstatix_condition_week_r() is the parametric
+                            counterpart of run_nparld_condition_week_r(): a
+                            two-way mixed (split-plot) repeated-measures ANOVA
+                            via R's rstatix package, with a BH-FDR summary
+                            across measures (_write_rstatix_bh_fdr_summary())
+                            and an interactive menu (_run_rstatix_rm_anova_menu())
+                            for selecting which measures to run; requires
+                            R + rstatix package installed
+  Power analyses          — condition × sex and condition × week power
+                            analyses for the exploratory measures (distance,
+                            reward count, sensitivity, level progression),
+                            reporting observed effect size and achieved /
+                            required sample size
+  OLS diagnostics reports — accompany the exploratory RM-ANOVA residual
+                            figures for each measure (speed, cap, lick count,
+                            lick rate, distance, reward count, level
+                            progression, sensitivity)
   Descriptive stats CSV   — per-mouse and cohort-level summary statistics
 
 ACROSS-COHORT MODE
@@ -101,6 +147,26 @@ KEY FUNCTIONS
   generate_descriptive_stats_report() — writes summary stats CSV + console table
   run_nparld_condition_week_r()   — R-bridge for nparLD condition × week ANOVA
   run_nparld_condition_weekday_r()— R-bridge for nparLD condition × weekday ANOVA
+  run_rstatix_condition_week_r()  — R-bridge for rstatix condition × week
+                                    mixed RM-ANOVA (parametric counterpart of
+                                    run_nparld_condition_week_r()), with an
+                                    interactive measure-selection menu
+                                    (_run_rstatix_rm_anova_menu()) and a
+                                    BH-FDR summary writer
+                                    (_write_rstatix_bh_fdr_summary())
+  _expl_measure_histogram_fig() / _expl_measure_distfit_fig() /
+  _expl_measure_boxplot_fig() / _expl_measure_rm_anova_resid_week_fig() /
+  _expl_measure_condition_sex_power_fig() /
+  _expl_measure_condition_week_power_fig()
+                                 — generic exploratory-analysis figure
+                                    builders shared across speed, cap, lick
+                                    count/rate, distance, reward count,
+                                    level progression, and sensitivity
+  _scatter_by_sex()               — shared helper for sex-differentiated
+                                    scatter markers (circle=F, square=M)
+  _write_welch_ttest_report() / _write_ttest_assumptions_report()
+                                 — Welch's/Student's t-test reports with
+                                    Shapiro-Wilk/Levene assumption checks
   run_across_cohort_pipeline()    — multi-cohort comparison pipeline
   test_matching_logic()           — unit-test helper for zone/event counting
   main()                          — Tkinter entry point; handles all mode
@@ -2894,6 +2960,1123 @@ def _expl_measure_rm_anova_resid_week_fig(all_results, column, label, unit,
 # ── end _expl_measure_rm_anova_resid_week_fig (part 2/2) ──────────────────────
 
 
+# ── Condition x Sex interaction power analysis (no Week/time factor) ─────────
+# Once the Week factor is dropped, this collapses to a simple 2-way
+# between-subjects design (Condition x Sex), one summary value per mouse.
+# nparLD no longer applies (it specifically requires a within-subjects
+# longitudinal factor); the nonparametric substitute here is the
+# Scheirer-Ray-Hare test (rank-based 2-way ANOVA). Power for the parametric
+# 2-way ANOVA has a closed-form (noncentral-F) solution; power for the
+# nonparametric test has no closed form and is estimated via Monte Carlo
+# simulation, using the REAL (possibly unbalanced) per-cell N and REAL
+# residual variance from the actual data, so the answer reflects the actual
+# animals rather than an idealized balanced design.
+
+def _interaction_row_name(tbl):
+    """Return the ANOVA-table row label for the 2-way interaction term (the
+    only row whose label contains ':' -- robust to exact Sum-coding label
+    text such as 'C(condition, Sum):C(sex, Sum)')."""
+    for name in tbl.index:
+        if ':' in str(name):
+            return name
+    raise ValueError('No interaction term found in ANOVA table')
+
+
+def _fit_two_way_anova_sum_coded(df, dv='value', factor_a='condition', factor_b='sex'):
+    """Two-way between-subjects ANOVA (Type III SS) via statsmodels, using
+    Sum/deviation coding (C(x, Sum)) instead of the default treatment coding
+    so Type III sums of squares stay valid/orthogonal for unbalanced cell
+    sizes (statsmodels' standard recommendation for unbalanced factorial
+    designs).
+
+    Returns (tbl, model, inter_name, df1, df2, ms_error) where df1/df2 are
+    the interaction term's numerator/denominator degrees of freedom and
+    ms_error is the residual mean square (sigma_hat^2).
+    """
+    import statsmodels.formula.api as _smf
+    from statsmodels.stats.anova import anova_lm as _anova_lm
+
+    formula = f'{dv} ~ C({factor_a}, Sum) * C({factor_b}, Sum)'
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        model = _smf.ols(formula, data=df).fit()
+        tbl = _anova_lm(model, typ=3)
+
+    inter_name = _interaction_row_name(tbl)
+    df1 = float(tbl.loc[inter_name, 'df'])
+    df2 = float(tbl.loc['Residual', 'df'])
+    ss_error = float(tbl.loc['Residual', 'sum_sq'])
+    ms_error = ss_error / df2 if df2 > 0 else np.nan
+    return tbl, model, inter_name, df1, df2, ms_error
+
+
+def _scheirer_ray_hare_two_way(df, dv='value', factor_a='condition', factor_b='sex'):
+    """Scheirer-Ray-Hare test (Scheirer, Ray & Hare, 1976): a rank-based
+    nonparametric extension of the 2-way ANOVA, and the correct nonparametric
+    substitute for nparLD once the within-subjects Week factor is dropped
+    (nparLD specifically requires a longitudinal/within-subjects factor).
+
+    Ranks the DV across the whole sample, fits the same Sum-coded 2-way ANOVA
+    to the ranks, and converts each effect's rank sum-of-squares to an H
+    statistic (~ chi-square, df = effect df): H = SS_effect / (SS_total/(N-1)).
+
+    Returns (tbl, inter_name) where tbl has columns ['H', 'df', 'p'].
+    """
+    import statsmodels.formula.api as _smf
+    from statsmodels.stats.anova import anova_lm as _anova_lm
+    from scipy.stats import rankdata as _rankdata, chi2 as _chi2_dist
+
+    d = df.copy()
+    d['_rank'] = _rankdata(d[dv].values)
+    n = len(d)
+
+    formula = f'_rank ~ C({factor_a}, Sum) * C({factor_b}, Sum)'
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        model = _smf.ols(formula, data=d).fit()
+        raw_tbl = _anova_lm(model, typ=3)
+
+    inter_name = _interaction_row_name(raw_tbl)
+    ss_total = float(np.sum((d['_rank'].values - d['_rank'].mean()) ** 2))
+    ms_total = ss_total / (n - 1) if n > 1 else np.nan
+
+    rows = []
+    for name in raw_tbl.index:
+        if name in ('Intercept', 'Residual'):
+            continue
+        ss  = float(raw_tbl.loc[name, 'sum_sq'])
+        deg = float(raw_tbl.loc[name, 'df'])
+        h_stat = ss / ms_total if ms_total else np.nan
+        p = float(_chi2_dist.sf(h_stat, deg)) if deg > 0 and not np.isnan(h_stat) else np.nan
+        rows.append({'Effect': name, 'H': h_stat, 'df': deg, 'p': p})
+    tbl = pd.DataFrame(rows).set_index('Effect')
+    return tbl, inter_name
+
+
+def _condition_sex_collect_df(all_results, column, transform=None,
+                               positive_only=False, scale=1.0):
+    """One row per mouse: condition, sex, and the (optionally transformed)
+    MEAN of `column` across ALL of that mouse's sessions. This fully
+    collapses the repeated-measures structure, since the Condition x Sex
+    design (no Week/time factor) is a simple 2-way between-subjects design."""
+    rows = []
+    n_skipped = 0
+    for _r in all_results:
+        _sv = _expl_get_measure_series(_r, column, scale=scale).dropna()
+        if positive_only:
+            _sv = _sv[_sv > 0]
+        if len(_sv) == 0:
+            n_skipped += 1
+            continue
+        _cond = _r.get('starting_condition')
+        _sex  = _r.get('sex')
+        if _cond is None or _sex is None or pd.isna(_cond) or pd.isna(_sex):
+            n_skipped += 1
+            continue
+        rows.append({'mouse': _r['mouse'], 'condition': _cond, 'sex': _sex,
+                     'value': float(_sv.mean())})
+    out = pd.DataFrame(rows)
+    if not out.empty:
+        out['value'] = _expl_apply_transform(out['value'].values, transform)
+    if n_skipped:
+        print(f'  [NOTE] {n_skipped} mouse/mice excluded from Condition x Sex '
+              f'power analysis (missing {column}/condition/sex data)')
+    return out
+
+
+def _build_interaction_unit_contrast(cond_levels, sex_levels, seed=0):
+    """Build a fixed, reproducible (a x b) matrix representing an arbitrary
+    'pure interaction' pattern -- row- and column-centered, so it carries
+    zero main effect by construction -- used as the base shape for
+    simulating a Condition x Sex interaction effect of any desired
+    magnitude. The specific direction of the pattern does not affect the
+    omnibus interaction F-test's power; only its calibrated magnitude does."""
+    a, b = len(cond_levels), len(sex_levels)
+    rng = np.random.default_rng(seed)
+    mat = rng.normal(size=(a, b))
+    mat -= mat.mean(axis=1, keepdims=True)   # remove condition main effect
+    mat -= mat.mean(axis=0, keepdims=True)   # remove sex main effect
+    return mat
+
+
+def _calibrate_interaction_delta(df, cond_levels, sex_levels, unit_matrix,
+                                  ss_error_real, target_f,
+                                  factor_a='condition', factor_b='sex'):
+    """Solve for the scale factor 'delta' such that simulating
+    value = delta * unit_matrix[cond_idx, sex_idx] (NO noise) and fitting the
+    real 2-way ANOVA model yields an interaction SS_effect for which
+    f^2 = SS_effect / ss_error_real equals target_f^2 -- i.e. delta places
+    the simulated interaction exactly at the requested Cohen's f, given the
+    REAL residual variance/df from the actual data.
+    """
+    cond_idx = {c: i for i, c in enumerate(cond_levels)}
+    sex_idx  = {s: i for i, s in enumerate(sex_levels)}
+    d = df.copy()
+    d['value'] = [unit_matrix[cond_idx[c], sex_idx[s]]
+                  for c, s in zip(d[factor_a], d[factor_b])]
+    tbl, _, inter_name, _, _, _ = _fit_two_way_anova_sum_coded(
+        d, factor_a=factor_a, factor_b=factor_b)
+    ss_effect_unit = float(tbl.loc[inter_name, 'sum_sq'])
+    if ss_effect_unit <= 1e-12:
+        raise ValueError(
+            'Interaction contrast collapsed to ~0 SS -- cannot calibrate '
+            'effect size (check that both condition and sex have >=2 levels '
+            'with data)'
+        )
+    delta = float(np.sqrt((target_f ** 2) * ss_error_real / ss_effect_unit))
+    return delta
+
+
+def _precompute_two_way_design(real_model):
+    """Extract the full and reduced (interaction-dropped) design matrices
+    from an already-fitted statsmodels OLS model, for fast repeated F-tests
+    during Monte Carlo simulation (avoids re-parsing the model formula on
+    every simulated replicate)."""
+    exog  = np.asarray(real_model.model.exog)
+    names = list(real_model.model.exog_names)
+    inter_idx = [i for i, nm in enumerate(names) if ':' in nm]
+    main_idx  = [i for i, nm in enumerate(names) if ':' not in nm]
+    X_full    = exog
+    X_reduced = exog[:, main_idx]
+    df_effect = len(inter_idx)
+    df_resid  = X_full.shape[0] - X_full.shape[1]
+    return {
+        'X_full': X_full, 'X_reduced': X_reduced,
+        'pinv_full': np.linalg.pinv(X_full),
+        'pinv_reduced': np.linalg.pinv(X_reduced),
+        'df_effect': df_effect, 'df_resid': df_resid,
+    }
+
+
+def _simulate_condition_sex_interaction_power_fast(
+    df, cond_levels, sex_levels, unit_matrix, design, sigma_hat, grand_mean,
+    ss_error_real, df1, df2, f_grid, n_simulations=2000, alpha=0.05, seed=123,
+):
+    """Vectorized Monte Carlo power simulation across a grid of assumed
+    Cohen's f Condition x Sex interaction effect sizes. For each f: calibrates
+    the true cell-mean pattern against the REAL residual variance/design
+    (actual, possibly unbalanced, per-cell N), then generates all
+    `n_simulations` replicates as one batched array and re-fits BOTH the
+    parametric 2-way ANOVA and the nonparametric Scheirer-Ray-Hare test to
+    every replicate in a single vectorized pass (no per-replicate formula
+    parsing), tallying the proportion significant (p < alpha) as empirical
+    power for each model. Also reports the closed-form (noncentral-F)
+    analytic power for the parametric model as a fast cross-check (exact for
+    balanced designs, approximate for unbalanced ones).
+    """
+    from scipy.stats import f as _f_dist, ncf as _ncf_dist, chi2 as _chi2_dist, rankdata as _rankdata
+
+    cond_idx = {c: i for i, c in enumerate(cond_levels)}
+    sex_idx  = {s: i for i, s in enumerate(sex_levels)}
+    cell_rows = np.array([cond_idx[c] for c in df['condition']])
+    cell_cols = np.array([sex_idx[s]  for s in df['sex']])
+    n = len(df)
+
+    X_full, X_reduced       = design['X_full'], design['X_reduced']
+    pinv_full, pinv_reduced = design['pinv_full'], design['pinv_reduced']
+    df_effect, df_resid     = design['df_effect'], design['df_resid']
+
+    rng = np.random.default_rng(seed)
+    rows = []
+    for f in f_grid:
+        delta = _calibrate_interaction_delta(
+            df, cond_levels, sex_levels, unit_matrix, ss_error_real, f)
+        true_means = grand_mean + delta * unit_matrix[cell_rows, cell_cols]  # (n,)
+
+        f2   = f ** 2
+        ncp  = f2 * (df1 + df2 + 1)
+        crit = _f_dist.ppf(1 - alpha, df1, df2)
+        closed_form_power = float(1 - _ncf_dist.cdf(crit, df1, df2, ncp))
+
+        noise = rng.normal(0.0, sigma_hat, size=(n_simulations, n))
+        Y = true_means[None, :] + noise  # (n_simulations, n)
+
+        # ── Parametric: batched Type-III F-test via precomputed pseudo-inverses ──
+        Beta_full    = Y @ pinv_full.T
+        Beta_reduced = Y @ pinv_reduced.T
+        SSR_full    = np.sum((Y - Beta_full @ X_full.T) ** 2, axis=1)
+        SSR_reduced = np.sum((Y - Beta_reduced @ X_reduced.T) ** 2, axis=1)
+        SS_effect = np.clip(SSR_reduced - SSR_full, 0.0, None)
+        MS_error  = SSR_full / df_resid
+        with np.errstate(divide='ignore', invalid='ignore'):
+            F_param = (SS_effect / df_effect) / MS_error
+            p_param = _f_dist.sf(F_param, df_effect, df_resid)
+        sig_param = int(np.sum(np.nan_to_num(p_param, nan=1.0) < alpha))
+
+        # ── Scheirer-Ray-Hare: identical machinery applied to per-replicate ranks ──
+        Ranks = np.apply_along_axis(_rankdata, 1, Y)
+        Beta_full_r    = Ranks @ pinv_full.T
+        Beta_reduced_r = Ranks @ pinv_reduced.T
+        SSR_full_r    = np.sum((Ranks - Beta_full_r @ X_full.T) ** 2, axis=1)
+        SSR_reduced_r = np.sum((Ranks - Beta_reduced_r @ X_reduced.T) ** 2, axis=1)
+        SS_effect_r = np.clip(SSR_reduced_r - SSR_full_r, 0.0, None)
+        MS_total_r  = np.sum((Ranks - Ranks.mean(axis=1, keepdims=True)) ** 2, axis=1) / (n - 1)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            H = SS_effect_r / MS_total_r
+            p_srh = _chi2_dist.sf(H, df_effect)
+        sig_srh = int(np.sum(np.nan_to_num(p_srh, nan=1.0) < alpha))
+
+        rows.append({
+            'f': f, 'delta': delta,
+            'closed_form_param_power': closed_form_power,
+            'sim_param_power': sig_param / n_simulations,
+            'sim_srh_power':   sig_srh   / n_simulations,
+        })
+    return pd.DataFrame(rows)
+
+
+def _interp_mdes(f_values, power_values, target_power):
+    """Linear interpolation to find the smallest f where a power curve
+    crosses target_power. Returns np.nan if the curve never reaches
+    target_power within the provided grid (caller should widen the grid)."""
+    f_arr = np.asarray(f_values, dtype=float)
+    p_arr = np.asarray(power_values, dtype=float)
+    if np.all(p_arr < target_power):
+        return float('nan')
+    if p_arr[0] >= target_power:
+        return float(f_arr[0])
+    idx = int(np.argmax(p_arr >= target_power))
+    f0, f1 = f_arr[idx - 1], f_arr[idx]
+    p0, p1 = p_arr[idx - 1], p_arr[idx]
+    if p1 == p0:
+        return float(f1)
+    return float(f0 + (target_power - p0) * (f1 - f0) / (p1 - p0))
+
+
+def _expl_measure_condition_sex_power_fig(
+    all_results, column, label, unit, transform=None, positive_only=False,
+    scale=1.0, f_grid=None, n_simulations=2000, alpha=0.05, target_power=0.80,
+    output_dir=None, seed=42,
+):
+    """
+    Condition x Sex interaction power / sensitivity analysis for `column`,
+    collapsed to a simple 2-way between-subjects design: one (optionally
+    transformed) MEAN value per mouse across all sessions, no Week/time
+    factor. For a grid of assumed Cohen's f interaction effect sizes,
+    reports:
+      - closed-form (noncentral-F) power for a parametric 2-way ANOVA
+        (approximate for unbalanced designs, exact for balanced ones)
+      - Monte Carlo simulated power for that SAME parametric 2-way ANOVA
+        (exact for your actual, possibly unbalanced, per-cell N)
+      - Monte Carlo simulated power for the Scheirer-Ray-Hare test -- the
+        nonparametric substitute for nparLD once Week/time is dropped
+        (nparLD requires a within-subjects longitudinal factor)
+
+    All three use your REAL per-Condition x Sex cell sizes and REAL
+    empirical residual variance, so the result reflects your actual animals
+    rather than an idealized balanced design. Also reports the minimum
+    detectable effect size (MDES) at `target_power` given your current N --
+    the defensible way to state "we are underpowered to detect anything
+    smaller than X" (observed/post-hoc power from the single fitted model is
+    NOT computed here, since it is a deterministic function of the p-value
+    and adds no new information).
+
+    Returns the matplotlib Figure; also prints a text report to the console
+    and saves it to `output_dir` if provided.
+    """
+    if f_grid is None:
+        f_grid = [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.50, 0.60, 0.80]
+
+    df = _condition_sex_collect_df(all_results, column, transform=transform,
+                                    positive_only=positive_only, scale=scale)
+    if df.empty:
+        raise ValueError(f'No valid {label} data found for any mouse')
+
+    cond_levels = sorted(df['condition'].unique())
+    sex_levels  = sorted(df['sex'].unique())
+    if len(cond_levels) < 2:
+        raise ValueError(f'Need >=2 starting_condition levels; found {cond_levels}')
+    if len(sex_levels) < 2:
+        raise ValueError(f'Need >=2 sex levels; found {sex_levels}')
+
+    cell_counts = df.groupby(['condition', 'sex']).size().unstack(fill_value=0)
+    cell_counts = cell_counts.reindex(index=cond_levels, columns=sex_levels, fill_value=0)
+    if (cell_counts < 1).any().any():
+        _empty = [(c, s) for c in cond_levels for s in sex_levels
+                  if cell_counts.loc[c, s] == 0]
+        raise ValueError(
+            f'Empty Condition x Sex cell(s): {_empty} -- cannot fit the '
+            f'interaction term. Need >=1 mouse in every cell (ideally >=2).'
+        )
+
+    # ── Fit REAL data (for reporting only -- NOT used for power) ─────────────
+    real_tbl, real_model, inter_name, df1, df2, ms_error = _fit_two_way_anova_sum_coded(df)
+    real_srh_tbl, srh_inter_name = _scheirer_ray_hare_two_way(df)
+    sigma_hat     = float(np.sqrt(ms_error))
+    grand_mean    = float(df['value'].mean())
+    ss_error_real = ms_error * df2
+    n_total       = len(df)
+
+    # ── Precompute fast design matrices + interaction contrast pattern ───────
+    design = _precompute_two_way_design(real_model)
+    unit_matrix = _build_interaction_unit_contrast(cond_levels, sex_levels, seed=seed)
+
+    # ── Monte Carlo power simulation across the effect-size grid ─────────────
+    power_df = _simulate_condition_sex_interaction_power_fast(
+        df, cond_levels, sex_levels, unit_matrix, design,
+        sigma_hat, grand_mean, ss_error_real, df1, df2,
+        f_grid, n_simulations=n_simulations, alpha=alpha, seed=seed,
+    )
+
+    # ── MDES at target_power (linear interpolation across the grid) ─────────
+    mdes_param_closed = _interp_mdes(power_df['f'], power_df['closed_form_param_power'], target_power)
+    mdes_param_sim     = _interp_mdes(power_df['f'], power_df['sim_param_power'], target_power)
+    mdes_srh_sim       = _interp_mdes(power_df['f'], power_df['sim_srh_power'], target_power)
+    _mdes_str = lambda v: (f'f={v:.3f}' if not np.isnan(v) else f'>{f_grid[-1]:.2f} (extend grid)')
+
+    # ── Build figure ──────────────────────────────────────────────────────────
+    from matplotlib.gridspec import GridSpec as _GridSpec_pw
+    fig = plt.figure(figsize=(14, 9))
+    gs = _GridSpec_pw(2, 2, figure=fig, height_ratios=[2.2, 1.3], hspace=0.45, wspace=0.30)
+    ax_curve = fig.add_subplot(gs[0, :])
+    ax_cells = fig.add_subplot(gs[1, 0])
+    ax_text  = fig.add_subplot(gs[1, 1])
+
+    ax_curve.plot(power_df['f'], power_df['closed_form_param_power'],
+                  '--', color='steelblue', linewidth=1.5,
+                  label='Parametric 2-way ANOVA (closed-form)')
+    ax_curve.plot(power_df['f'], power_df['sim_param_power'],
+                  '-o', color='steelblue', linewidth=2, markersize=5,
+                  label='Parametric 2-way ANOVA (simulated)')
+    ax_curve.plot(power_df['f'], power_df['sim_srh_power'],
+                  '-s', color='darkorange', linewidth=2, markersize=5,
+                  label='Scheirer\u2013Ray\u2013Hare (simulated)')
+    ax_curve.axhline(target_power, color='crimson', linestyle=':', linewidth=1.5,
+                      label=f'Target power = {target_power:.0%}')
+    for f_bench, bench_label in [(0.10, 'small'), (0.25, 'medium'), (0.40, 'large')]:
+        ax_curve.axvline(f_bench, color='gray', linestyle=':', linewidth=0.8, alpha=0.6)
+        ax_curve.text(f_bench, 0.02, bench_label, rotation=90, fontsize=7,
+                      ha='right', va='bottom', color='gray')
+    ax_curve.set_xlabel("Assumed Condition \u00d7 Sex interaction effect size (Cohen's f)")
+    ax_curve.set_ylabel('Power  (P[reject H0 | true effect])')
+    ax_curve.set_ylim(0, 1.02)
+    ax_curve.set_title(
+        f'{label} \u2014 Condition \u00d7 Sex Interaction Power Curve\n'
+        f'(N={n_total} mice; \u03b1={alpha}; n_sim={n_simulations}/point)',
+        fontsize=10,
+    )
+    ax_curve.legend(fontsize=8, loc='lower right')
+    ax_curve.spines['top'].set_visible(False)
+    ax_curve.spines['right'].set_visible(False)
+    ax_curve.tick_params(direction='in')
+
+    # Cell-count table
+    ax_cells.axis('off')
+    _cell_tbl_rows = [[c] + [str(int(cell_counts.loc[c, s])) for s in sex_levels]
+                      for c in cond_levels]
+    _tbl = ax_cells.table(
+        cellText=_cell_tbl_rows, colLabels=['Condition'] + [str(s) for s in sex_levels],
+        cellLoc='center', loc='center', bbox=[0, 0.15, 1, 0.75],
+    )
+    _tbl.auto_set_font_size(False)
+    _tbl.set_fontsize(9)
+    for (_ri, _ci2), _cell in _tbl.get_celld().items():
+        if _ri == 0:
+            _cell.set_facecolor('#d0d8e8')
+            _cell.set_text_props(fontweight='bold')
+    ax_cells.set_title('Actual N per Condition \u00d7 Sex cell', fontsize=9, pad=4)
+
+    # Text summary
+    ax_text.axis('off')
+    _real_p_param = float(real_tbl.loc[inter_name, 'PR(>F)'])
+    _real_f_param = float(real_tbl.loc[inter_name, 'F'])
+    _real_p_srh   = float(real_srh_tbl.loc[srh_inter_name, 'p'])
+    _real_h_srh   = float(real_srh_tbl.loc[srh_inter_name, 'H'])
+    _summary_text = (
+        'OBSERVED data (reference only \u2014 NOT a valid post-hoc power estimate):\n'
+        f'  Parametric interaction:  F({df1:.0f},{df2:.0f})={_real_f_param:.3f}, p={_real_p_param:.4f}\n'
+        f'  Scheirer-Ray-Hare:       H={_real_h_srh:.3f}, p={_real_p_srh:.4f}\n'
+        f'  Residual SD (\u03c3\u0302):         {sigma_hat:.4g}  {unit}\n'
+        '\n'
+        f'Minimum detectable effect size (MDES) at {target_power:.0%} power,\n'
+        f'given your ACTUAL N:\n'
+        f'  Parametric (closed-form): {_mdes_str(mdes_param_closed)}\n'
+        f'  Parametric (simulated):   {_mdes_str(mdes_param_sim)}\n'
+        f'  Scheirer-Ray-Hare:        {_mdes_str(mdes_srh_sim)}\n'
+        '\n'
+        "Cohen's f benchmarks: small=0.10, medium=0.25, large=0.40"
+    )
+    ax_text.text(0.0, 1.0, _summary_text, transform=ax_text.transAxes,
+                 fontsize=8.5, va='top', ha='left', family='monospace',
+                 bbox=dict(boxstyle='round,pad=0.4', facecolor='#f5f5f5',
+                           edgecolor='gray', alpha=0.9))
+
+    fig.suptitle(f'{label} \u2014 Power to Detect a Condition \u00d7 Sex Interaction',
+                 fontsize=12, y=1.02)
+    fig.tight_layout()
+
+    # ── Console + text report ─────────────────────────────────────────────────
+    print(f'\n\u2500\u2500 {label} \u2014 Condition x Sex Interaction Power Analysis \u2500\u2500')
+    print(f'N mice: {n_total}')
+    print(f'Cells (condition x sex):\n{cell_counts}')
+    print(f'Residual SD (sigma_hat): {sigma_hat:.4g} {unit}')
+    print(f'Observed parametric interaction: F({df1:.0f},{df2:.0f})={_real_f_param:.3f}, p={_real_p_param:.4f}')
+    print(f'Observed Scheirer-Ray-Hare:      H={_real_h_srh:.3f}, p={_real_p_srh:.4f}')
+    print(power_df.to_string(index=False))
+    print(f'MDES @ {target_power:.0%} power -- parametric (closed-form): {_mdes_str(mdes_param_closed)}')
+    print(f'MDES @ {target_power:.0%} power -- parametric (simulated):   {_mdes_str(mdes_param_sim)}')
+    print(f'MDES @ {target_power:.0%} power -- Scheirer-Ray-Hare:        {_mdes_str(mdes_srh_sim)}')
+
+    if output_dir:
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+            _ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+            _report_path = os.path.join(output_dir, f'condition_sex_power_{column}_{_ts}.txt')
+            with open(_report_path, 'w', encoding='utf-8') as _fh:
+                _fh.write(f'Condition x Sex Interaction Power Analysis -- {label}\n')
+                _fh.write('=' * 72 + '\n')
+                _fh.write(f'N mice: {n_total}\n')
+                _fh.write(f'Cells (condition x sex):\n{cell_counts}\n\n')
+                _fh.write(f'Residual SD (sigma_hat): {sigma_hat:.4g} {unit}\n')
+                _fh.write(f'Observed parametric interaction: F({df1:.0f},{df2:.0f})={_real_f_param:.3f}, p={_real_p_param:.4f}\n')
+                _fh.write(f'Observed Scheirer-Ray-Hare:      H={_real_h_srh:.3f}, p={_real_p_srh:.4f}\n\n')
+                _fh.write(power_df.to_string(index=False) + '\n\n')
+                _fh.write(f'MDES @ {target_power:.0%} power -- parametric (closed-form): {_mdes_str(mdes_param_closed)}\n')
+                _fh.write(f'MDES @ {target_power:.0%} power -- parametric (simulated):   {_mdes_str(mdes_param_sim)}\n')
+                _fh.write(f'MDES @ {target_power:.0%} power -- Scheirer-Ray-Hare:        {_mdes_str(mdes_srh_sim)}\n')
+            print(f'[OK] Power analysis report saved -> {_report_path}')
+        except Exception as _save_err:
+            print(f'[WARN] Could not save power analysis report: {_save_err}')
+
+    return fig
+# ── end _expl_measure_condition_sex_power_fig ─────────────────────────────────
+
+
+# ── Condition x Week interaction power analysis (repeated-measures) ──────────
+# The repeated-measures analog of the Condition x Sex power analysis above.
+# Week remains a genuine within-subjects factor here (unlike the Sex case,
+# where dropping Week collapsed the design entirely). The parametric model is
+# a classical compound-symmetric split-plot ANOVA (computed directly in
+# Python, no R needed for the simulation); the nonparametric model is the
+# EXACT nparLD::f1.ld.f1 test already used by run_nparld_condition_week_r()
+# in this file's production pipeline (requires R; the full Monte Carlo sweep
+# runs inside a single batched R script to avoid per-replicate subprocess
+# overhead). The REAL observed Condition x Week interaction is reported using
+# the exact production rstatix + nparLD calls (not the classical
+# approximation), so "observed" numbers always match what the rest of this
+# pipeline reports.
+
+def _condition_week_collect_df(all_results, column, transform=None,
+                                positive_only=False, scale=1.0):
+    """One row per mouse per week: the (optionally transformed) mean of
+    `column` across that week's sessions. Complete cases only (mice missing
+    any week are dropped) -- identical construction to the weekly dataframe
+    built inside _expl_measure_rm_anova_resid_week_fig(), so this power
+    analysis exactly matches the design already used for the production
+    Condition x Week RM-ANOVA / nparLD models.
+
+    Returns (weekly_df, n_dropped) where weekly_df has columns
+    ['mouse', 'condition', 'week', 'value'].
+    """
+    rows = []
+    for _r in all_results:
+        _df_r = _r['df']
+        if 'week' in _df_r.columns:
+            _week_col = _df_r['week'].values
+        else:
+            _week_col = [i // 4 + 1 for i in range(len(_df_r))]
+        _sv = _expl_get_measure_series(_r, column, scale=scale)
+        if positive_only:
+            _sv = _sv.where(_sv > 0)
+        _tv = _expl_apply_transform(_sv.values, transform)
+        _sub = pd.DataFrame({
+            'mouse':     _r['mouse'],
+            'condition': _r.get('starting_condition', 'Unknown'),
+            'week':      _week_col,
+            'value':     _tv,
+        }).dropna(subset=['value'])
+        if not _sub.empty:
+            rows.append(_sub)
+
+    if not rows:
+        raise ValueError(f'No valid {column} data found')
+
+    weekly = (
+        pd.concat(rows, ignore_index=True)
+        .groupby(['mouse', 'condition', 'week'], as_index=False)['value'].mean()
+    )
+
+    week_counts   = weekly.groupby('mouse')['week'].nunique()
+    all_weeks_n   = weekly['week'].nunique()
+    complete_mice = week_counts[week_counts == all_weeks_n].index
+    n_dropped     = weekly['mouse'].nunique() - len(complete_mice)
+    weekly = weekly[weekly['mouse'].isin(complete_mice)].copy()
+    weekly['week'] = weekly['week'].astype(int)
+
+    if weekly.empty or len(complete_mice) < 3:
+        raise ValueError(f'Insufficient complete-case mice ({len(complete_mice)}) for power analysis')
+
+    return weekly, n_dropped
+
+
+def _split_plot_moments(df, dv='value', factor_a='condition', factor_b='week', subject='mouse'):
+    """
+    Classical (compound-symmetric) split-plot ANOVA decomposition for a
+    Condition (between) x Week (within) design, computed directly from the
+    real per-mouse-per-week data (complete cases only) without requiring R.
+    Used ONLY to derive the compound-symmetric variance components
+    (between-subject sigma_u^2, within-subject sigma_e^2) and df1/df2 needed
+    to simulate realistic repeated-measures data for the Monte Carlo power
+    analysis -- the 'observed' Condition x Week interaction reported to the
+    user elsewhere uses the EXACT production rstatix/nparLD calls instead.
+
+    NOTE: this classical mean-square decomposition exactly matches Type III
+    SS when the design is balanced (equal N per condition); for unbalanced
+    designs it is the standard textbook approximation used throughout the
+    repeated-measures power-analysis literature (e.g. Potvin & Schutz 2000).
+    """
+    cond_levels = sorted(df[factor_a].unique())
+    week_levels = sorted(df[factor_b].unique())
+    a, b = len(cond_levels), len(week_levels)
+    if a < 2:
+        raise ValueError(f'Need >=2 starting_condition levels; found {cond_levels}')
+    if b < 2:
+        raise ValueError(f'Need >=2 weeks; found {week_levels}')
+
+    grand_mean = float(df[dv].mean())
+    cond_means = df.groupby(factor_a)[dv].mean()
+    week_means = df.groupby(factor_b)[dv].mean()
+    cell_means = df.groupby([factor_a, factor_b])[dv].mean()
+    subj_means = df.groupby(subject)[dv].mean()
+    subj_cond  = df.groupby(subject)[factor_a].first()
+
+    n_per_cond = df.groupby(factor_a)[subject].nunique()
+    N = df[subject].nunique()
+    if (n_per_cond < 1).any():
+        raise ValueError(f'Empty condition level(s) found: {n_per_cond}')
+
+    ss_condition = float(sum(
+        n_per_cond[c] * b * (cond_means[c] - grand_mean) ** 2 for c in cond_levels
+    ))
+    ss_subj_within = float(sum(
+        b * (subj_means[m] - cond_means[subj_cond[m]]) ** 2 for m in subj_means.index
+    ))
+    ss_week = float(sum(
+        N * (week_means[k] - grand_mean) ** 2 for k in week_levels
+    ))
+    ss_cw = 0.0
+    for c in cond_levels:
+        for k in week_levels:
+            if (c, k) not in cell_means.index:
+                raise ValueError(f'Empty Condition x Week cell: ({c!r}, {k!r})')
+            ss_cw += n_per_cond[c] * (
+                cell_means[(c, k)] - cond_means[c] - week_means[k] + grand_mean
+            ) ** 2
+    ss_total = float(np.sum((df[dv].values - grand_mean) ** 2))
+    ss_error_w = max(ss_total - ss_condition - ss_subj_within - ss_week - ss_cw, 0.0)
+
+    df_condition   = a - 1
+    df_subj_within = N - a
+    df_cw          = (a - 1) * (b - 1)
+    df_error_w     = (N - a) * (b - 1)
+    if df_subj_within <= 0 or df_error_w <= 0:
+        raise ValueError(
+            f'Insufficient residual degrees of freedom (N={N}, conditions={a}, '
+            f'weeks={b}) -- need more mice per condition.'
+        )
+
+    ms_subj_within = ss_subj_within / df_subj_within
+    ms_error_w     = ss_error_w / df_error_w
+    ms_cw          = ss_cw / df_cw if df_cw > 0 else np.nan
+
+    sigma_e2 = max(ms_error_w, 1e-12)
+    sigma_u2 = max((ms_subj_within - ms_error_w) / b, 0.0)
+
+    from scipy.stats import f as _f_dist
+    F_interaction = ms_cw / ms_error_w if ms_error_w > 0 else np.nan
+    p_interaction = float(_f_dist.sf(F_interaction, df_cw, df_error_w)) if not np.isnan(F_interaction) else np.nan
+
+    return {
+        'cond_levels': cond_levels, 'week_levels': week_levels, 'a': a, 'b': b,
+        'n_per_cond': n_per_cond, 'N': N, 'grand_mean': grand_mean,
+        'df1': df_cw, 'df2': df_error_w,
+        'sigma_u2': sigma_u2, 'sigma_e2': sigma_e2,
+        'sigma_u': float(np.sqrt(sigma_u2)), 'sigma_e': float(np.sqrt(sigma_e2)),
+        'F_interaction': F_interaction, 'p_interaction': p_interaction,
+    }
+
+
+def _build_split_plot_unit_contrast(cond_levels, week_levels, n_per_cond, seed=0):
+    """Build a fixed, reproducible (a x b) 'pure interaction' pattern for the
+    split-plot Condition x Week design: zero condition main effect (plain
+    row-centering -- weeks are equally represented within every mouse's own
+    condition) AND zero week main effect under the REAL per-condition N
+    weighting (weighted column-centering by n_per_cond, matching how
+    _split_plot_moments computes the week main effect). The row-centering
+    step is provably preserved by the subsequent weighted column-centering
+    (since the weighted column means of an already row-centered matrix sum
+    to zero), so a single pass -- no iteration -- is exact."""
+    a, b = len(cond_levels), len(week_levels)
+    rng = np.random.default_rng(seed)
+    mat = rng.normal(size=(a, b))
+    mat -= mat.mean(axis=1, keepdims=True)  # zero condition main effect (unweighted)
+    n_arr = np.array([n_per_cond[c] for c in cond_levels], dtype=float)
+    N = n_arr.sum()
+    weighted_col_mean = (n_arr[:, None] * mat).sum(axis=0) / N
+    mat -= weighted_col_mean[None, :]        # zero week main effect (N-weighted)
+    return mat
+
+
+def _calibrate_split_plot_delta(moments, unit_matrix, target_f):
+    """Solve for delta such that a no-noise dataset with cell value
+    delta * unit_matrix[cond_idx, week_idx] (replicated for every mouse in
+    that condition) yields an interaction SS such that
+    f^2 = SS_cw / SS_error_w equals target_f^2, using the REAL per-condition
+    N and REAL Error(w) sum of squares estimated from the data."""
+    cond_levels = moments['cond_levels']
+    n_per_cond  = moments['n_per_cond']
+    ss_cw_unit = float(sum(
+        n_per_cond[c] * np.sum(unit_matrix[ci, :] ** 2)
+        for ci, c in enumerate(cond_levels)
+    ))
+    if ss_cw_unit <= 1e-12:
+        raise ValueError(
+            'Interaction contrast collapsed to ~0 SS -- cannot calibrate '
+            'effect size (check that condition and week both have >=2 levels)'
+        )
+    ss_error_real = moments['sigma_e2'] * moments['df2']
+    delta = float(np.sqrt((target_f ** 2) * ss_error_real / ss_cw_unit))
+    return delta
+
+
+def _simulate_split_plot_parametric_power_fast(
+    moments, unit_matrix, f_grid, n_simulations=2000, alpha=0.05, seed=123,
+):
+    """Vectorized Monte Carlo power simulation for the parametric split-plot
+    Condition x Week interaction (classical compound-symmetric mixed-model
+    ANOVA F-test), across a grid of assumed Cohen's f effect sizes. Uses the
+    REAL per-condition N and REAL compound-symmetric variance components
+    (sigma_u^2 between-subject, sigma_e^2 within-subject) estimated from the
+    actual data. Also reports the closed-form (noncentral-F) analytic power
+    as a fast cross-check (exact for balanced designs, approximate for
+    unbalanced ones -- same convention as the Condition x Sex power analysis
+    elsewhere in this file)."""
+    from scipy.stats import f as _f_dist, ncf as _ncf_dist
+
+    cond_levels = moments['cond_levels']
+    n_per_cond  = moments['n_per_cond']
+    a, b, N     = moments['a'], moments['b'], moments['N']
+    grand_mean  = moments['grand_mean']
+    sigma_u, sigma_e = moments['sigma_u'], moments['sigma_e']
+    df1, df2    = moments['df1'], moments['df2']
+
+    cond_idx_per_mouse = np.repeat(np.arange(a), [int(n_per_cond[c]) for c in cond_levels])
+    O = np.zeros((N, a))
+    O[np.arange(N), cond_idx_per_mouse] = 1.0
+    n_arr = O.sum(axis=0)
+
+    rng = np.random.default_rng(seed)
+    rows = []
+    for f in f_grid:
+        delta = _calibrate_split_plot_delta(moments, unit_matrix, f)
+        true_means_per_mouse = grand_mean + delta * unit_matrix[cond_idx_per_mouse, :]  # (N, b)
+
+        f2   = f ** 2
+        ncp  = f2 * (df1 + df2 + 1)
+        crit = _f_dist.ppf(1 - alpha, df1, df2)
+        closed_form_power = float(1 - _ncf_dist.cdf(crit, df1, df2, ncp))
+
+        u = rng.normal(0.0, sigma_u, size=(n_simulations, N))
+        e = rng.normal(0.0, sigma_e, size=(n_simulations, N, b))
+        Y = true_means_per_mouse[None, :, :] + u[:, :, None] + e  # (n_sim, N, b)
+
+        grand_rep = Y.mean(axis=(1, 2))                                    # (n_sim,)
+        cell_sum  = np.einsum('rjk,ji->rik', Y, O)                         # (n_sim, a, b)
+        cell_mean = cell_sum / n_arr[None, :, None]
+        cond_mean = cell_mean.mean(axis=2)                                  # (n_sim, a)
+        week_mean = Y.mean(axis=1)                                         # (n_sim, b)
+
+        ss_cw = np.sum(
+            n_arr[None, :, None] * (
+                cell_mean - cond_mean[:, :, None] - week_mean[:, None, :]
+                + grand_rep[:, None, None]
+            ) ** 2,
+            axis=(1, 2),
+        )
+        subj_mean      = Y.mean(axis=2)                                     # (n_sim, N)
+        subj_cond_mean = cond_mean[:, cond_idx_per_mouse]                   # (n_sim, N)
+        ss_subj_within = np.sum(b * (subj_mean - subj_cond_mean) ** 2, axis=1)
+        ss_condition   = np.sum(n_arr[None, :] * b * (cond_mean - grand_rep[:, None]) ** 2, axis=1)
+        ss_week        = np.sum(N * (week_mean - grand_rep[:, None]) ** 2, axis=1)
+        ss_total       = np.sum((Y - grand_rep[:, None, None]) ** 2, axis=(1, 2))
+        ss_error_w     = np.clip(ss_total - ss_condition - ss_subj_within - ss_week - ss_cw, 0.0, None)
+
+        with np.errstate(divide='ignore', invalid='ignore'):
+            ms_cw      = ss_cw / df1
+            ms_error_w = ss_error_w / df2
+            F_param    = ms_cw / ms_error_w
+            p_param    = _f_dist.sf(F_param, df1, df2)
+        sig_param = int(np.sum(np.nan_to_num(p_param, nan=1.0) < alpha))
+
+        rows.append({
+            'f': f, 'delta': delta,
+            'closed_form_param_power': closed_form_power,
+            'sim_param_power': sig_param / n_simulations,
+        })
+    return pd.DataFrame(rows)
+
+
+def _simulate_split_plot_nparld_power_r(
+    moments, unit_matrix, f_grid, n_simulations=300, alpha=0.05, seed=123,
+):
+    """
+    Monte Carlo power simulation for the NONPARAMETRIC Condition x Week
+    interaction (nparLD::f1.ld.f1 -- the EXACT test used by
+    run_nparld_condition_week_r() elsewhere in this file), using the SAME
+    compound-symmetric data-generating model as the parametric simulation
+    above (REAL per-condition N, REAL sigma_u/sigma_e). The entire sweep
+    (all f values x all replicates) runs inside a SINGLE R script invocation
+    to avoid per-replicate subprocess startup overhead.
+
+    Returns a DataFrame with columns ['f', 'nparld_sim_power'], or an empty
+    DataFrame if R/nparLD is unavailable.
+    """
+    import glob as _glob
+    import re as _re
+    from io import StringIO as _StringIO
+
+    cond_levels = moments['cond_levels']
+    week_levels = moments['week_levels']
+    n_per_cond  = moments['n_per_cond']
+    a, b        = moments['a'], moments['b']
+    grand_mean  = moments['grand_mean']
+    sigma_u, sigma_e = moments['sigma_u'], moments['sigma_e']
+
+    _co_levels  = ', '.join(f'"{c}"' for c in cond_levels)
+    _wk_levels  = ', '.join(str(w) for w in week_levels)
+    _n_per_cond = ', '.join(str(int(n_per_cond[c])) for c in cond_levels)
+    _unit_flat  = ', '.join(f'{v:.10g}' for v in unit_matrix.flatten(order='C'))
+    _f_grid_str = ', '.join(f'{v:.10g}' for v in f_grid)
+
+    r_script = (
+        'options(warn=-1)\n'
+        'suppressWarnings(suppressPackageStartupMessages({\n'
+        '  if (!require("nparLD", quietly=TRUE, warn.conflicts=FALSE)) {\n'
+        '    install.packages("nparLD", repos="https://cran.r-project.org", quiet=TRUE)\n'
+        '    library(nparLD)\n'
+        '  }\n'
+        '}))\n'
+        f'set.seed({int(seed)})\n'
+        '\n'
+        f'cond_levels <- c({_co_levels})\n'
+        f'week_levels <- c({_wk_levels})\n'
+        f'n_per_cond  <- c({_n_per_cond})\n'
+        f'a <- {a}L; b <- {b}L\n'
+        f'grand_mean <- {grand_mean:.10g}\n'
+        f'sigma_u <- {sigma_u:.10g}\n'
+        f'sigma_e <- {sigma_e:.10g}\n'
+        f'unit_matrix <- matrix(c({_unit_flat}), nrow=a, ncol=b, byrow=TRUE)\n'
+        f'f_grid <- c({_f_grid_str})\n'
+        f'n_simulations <- {int(n_simulations)}L\n'
+        f'alpha <- {alpha:.10g}\n'
+        '\n'
+        'N <- sum(n_per_cond)\n'
+        'mouse_cond_idx <- rep(seq_len(a), times=n_per_cond)\n'
+        '\n'
+        'df_cw <- (a-1)*(b-1)\n'
+        'df_error_w <- (N-a)*(b-1)\n'
+        '\n'
+        'results <- data.frame(f=numeric(0), power=numeric(0))\n'
+        'for (fi in seq_along(f_grid)) {\n'
+        '  f_val <- f_grid[fi]\n'
+        '  ss_cw_unit <- sum(sapply(seq_len(a), function(i) n_per_cond[i] * sum(unit_matrix[i,]^2)))\n'
+        '  ss_error_real <- (sigma_e^2) * df_error_w\n'
+        '  delta <- sqrt((f_val^2) * ss_error_real / ss_cw_unit)\n'
+        '  true_means <- grand_mean + delta * unit_matrix[mouse_cond_idx, , drop=FALSE]\n'
+        '\n'
+        '  sig_count <- 0\n'
+        '  valid_count <- 0\n'
+        '  for (rep_i in seq_len(n_simulations)) {\n'
+        '    u <- rnorm(N, 0, sigma_u)\n'
+        '    e_mat <- matrix(rnorm(N * b, 0, sigma_e), nrow=N, ncol=b)\n'
+        '    Y <- true_means + u + e_mat\n'
+        '    long_df <- data.frame(\n'
+        '      ID        = factor(rep(seq_len(N), times=b)),\n'
+        '      Condition = factor(rep(cond_levels[mouse_cond_idx], times=b), levels=cond_levels),\n'
+        '      Week      = factor(rep(week_levels, each=N), levels=week_levels),\n'
+        '      Response  = as.vector(Y)\n'
+        '    )\n'
+        '    res <- tryCatch(\n'
+        '      f1.ld.f1(y=long_df$Response, time=long_df$Week, group=long_df$Condition,\n'
+        '               subject=long_df$ID, time.name="Week", group.name="Condition",\n'
+        '               description=FALSE),\n'
+        '      error=function(e) NULL, warning=function(w) NULL\n'
+        '    )\n'
+        '    if (!is.null(res)) {\n'
+        '      ats_df <- res$ANOVA.test\n'
+        '      if ("Condition:Week" %in% rownames(ats_df)) {\n'
+        '        p_val <- ats_df["Condition:Week", ncol(ats_df)]\n'
+        '        if (!is.na(p_val)) {\n'
+        '          valid_count <- valid_count + 1\n'
+        '          if (p_val < alpha) sig_count <- sig_count + 1\n'
+        '        }\n'
+        '      }\n'
+        '    }\n'
+        '  }\n'
+        '  pw <- if (valid_count > 0) sig_count / valid_count else NA_real_\n'
+        '  results <- rbind(results, data.frame(f=f_val, power=pw))\n'
+        '}\n'
+        '\n'
+        'cat("__POWER_TABLE_START__\\n")\n'
+        'write.csv(results, row.names=FALSE)\n'
+        'cat("__POWER_TABLE_END__\\n")\n'
+    )
+
+    tmp_r = Path(tempfile.mktemp(suffix='.R'))
+    tmp_r.write_text(r_script, encoding='utf-8')
+
+    rscript = shutil.which('Rscript') or shutil.which('Rscript.exe')
+    if rscript is None:
+        for _pat in (
+            r'C:\Program Files\R\R-*\bin\Rscript.exe',
+            r'C:\Program Files\R\R-*\bin\x64\Rscript.exe',
+        ):
+            _m = sorted(_glob.glob(_pat))
+            if _m:
+                rscript = _m[-1]
+                break
+    if rscript is None:
+        print('[nparLD power simulation] Rscript not found -- skipping nonparametric power curve.')
+        tmp_r.unlink(missing_ok=True)
+        return pd.DataFrame(columns=['f', 'nparld_sim_power'])
+
+    r_output = ''
+    try:
+        proc = subprocess.run(
+            [rscript, '--vanilla', str(tmp_r)],
+            capture_output=True, text=True, timeout=1800,
+        )
+        r_output = proc.stdout
+        r_stderr = proc.stderr.strip()
+        if r_stderr:
+            _non_trivial = [ln for ln in r_stderr.splitlines()
+                             if not ln.startswith('Loading') and ln.strip()]
+            if _non_trivial:
+                print('R messages (nparLD power sim):\n' + '\n'.join(_non_trivial))
+    except (FileNotFoundError, subprocess.TimeoutExpired) as _r_err:
+        print(f'[nparLD power simulation] R call failed: {_r_err}')
+        tmp_r.unlink(missing_ok=True)
+        return pd.DataFrame(columns=['f', 'nparld_sim_power'])
+    finally:
+        tmp_r.unlink(missing_ok=True)
+
+    _match = _re.search(r'__POWER_TABLE_START__\n(.*?)__POWER_TABLE_END__', r_output, _re.S)
+    if not _match:
+        print('[nparLD power simulation] Could not parse R output -- skipping nonparametric power curve.')
+        return pd.DataFrame(columns=['f', 'nparld_sim_power'])
+
+    csv_text = _match.group(1).strip()
+    power_df = pd.read_csv(_StringIO(csv_text))
+    power_df = power_df.rename(columns={'power': 'nparld_sim_power'})
+    return power_df
+
+
+def _expl_measure_condition_week_power_fig(
+    all_results, column, label, unit, transform=None, positive_only=False,
+    scale=1.0, f_grid=None, n_simulations=2000, n_simulations_nparld=300,
+    alpha=0.05, target_power=0.80, output_dir=None, seed=42,
+):
+    """
+    Condition x Week interaction power / sensitivity analysis for `column` --
+    the repeated-measures analog of _expl_measure_condition_sex_power_fig(),
+    with Week as a genuine within-subjects factor (complete-case mice only,
+    identical construction to the production expl_*_rm_anova_resid plots).
+    For a grid of assumed Cohen's f Condition x Week interaction effect
+    sizes, reports:
+      - closed-form (noncentral-F) power for the parametric split-plot ANOVA
+        (compound-symmetric approximation; exact for balanced designs)
+      - Monte Carlo simulated power for that SAME parametric model (exact
+        for your actual, possibly unbalanced, per-condition N)
+      - Monte Carlo simulated power for nparLD::f1.ld.f1 -- the EXACT
+        nonparametric test used by run_nparld_condition_week_r() in this
+        file's production pipeline (requires R; single batched R script)
+
+    Also reports the REAL observed Condition x Week interaction from BOTH
+    production models (rstatix + nparLD, via the existing R-bridge
+    functions) for reference -- NOT used for power, since post-hoc/observed
+    power is a deterministic function of the p-value and adds no new
+    information.
+
+    Returns the matplotlib Figure.
+    """
+    if f_grid is None:
+        f_grid = [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.50, 0.60, 0.80]
+
+    weekly, n_dropped = _condition_week_collect_df(
+        all_results, column, transform=transform, positive_only=positive_only, scale=scale)
+    cond_levels = sorted(weekly['condition'].unique())
+    week_levels = sorted(int(w) for w in weekly['week'].unique())
+    n_per_cond_display = weekly.groupby('condition')['mouse'].nunique()
+
+    # ── REAL observed Condition x Week interaction (production models) ──────
+    _real_p_param = float('nan')
+    try:
+        _rres = _run_rstatix_condition_week_anova_r(
+            weekly.rename(columns={'mouse': 'ID', 'condition': 'Condition',
+                                    'week': 'Week', 'value': 'Response'}),
+            cond_levels, week_levels, label,
+        )
+        _real_p_param = _rres.get('pvalues', {}).get('Condition:Week', float('nan'))
+    except Exception as _e:
+        print(f'[condition_week_power] rstatix observed fit failed: {_e}')
+
+    _real_p_nparld = float('nan')
+    try:
+        _nres = run_nparld_condition_week_r(all_results, measure=column, output_dir=None)
+        _real_p_nparld = _nres.get('ats_pvalues', {}).get('Condition:Week', float('nan'))
+    except Exception as _e:
+        print(f'[condition_week_power] nparLD observed fit failed: {_e}')
+
+    # ── Classical split-plot moments (for simulation calibration) ───────────
+    moments = _split_plot_moments(weekly)
+    unit_matrix = _build_split_plot_unit_contrast(
+        moments['cond_levels'], moments['week_levels'], moments['n_per_cond'], seed=seed)
+
+    # ── Parametric power: closed-form + fast vectorized simulation ─────────
+    param_power_df = _simulate_split_plot_parametric_power_fast(
+        moments, unit_matrix, f_grid, n_simulations=n_simulations, alpha=alpha, seed=seed)
+
+    # ── Nonparametric (nparLD) simulated power via single batched R script ──
+    nparld_power_df = _simulate_split_plot_nparld_power_r(
+        moments, unit_matrix, f_grid, n_simulations=n_simulations_nparld, alpha=alpha, seed=seed)
+
+    power_df = param_power_df.copy()
+    if not nparld_power_df.empty:
+        power_df = power_df.merge(nparld_power_df, on='f', how='left')
+    else:
+        power_df['nparld_sim_power'] = np.nan
+
+    mdes_param_closed = _interp_mdes(power_df['f'], power_df['closed_form_param_power'], target_power)
+    mdes_param_sim     = _interp_mdes(power_df['f'], power_df['sim_param_power'], target_power)
+    mdes_nparld_sim    = (_interp_mdes(power_df['f'], power_df['nparld_sim_power'], target_power)
+                          if power_df['nparld_sim_power'].notna().any() else float('nan'))
+    _mdes_str = lambda v: (f'f={v:.3f}' if not np.isnan(v) else f'>{f_grid[-1]:.2f} (extend grid)')
+
+    # ── Build figure ──────────────────────────────────────────────────────────
+    from matplotlib.gridspec import GridSpec as _GridSpec_pw
+    fig = plt.figure(figsize=(14, 9))
+    gs = _GridSpec_pw(2, 2, figure=fig, height_ratios=[2.2, 1.3], hspace=0.45, wspace=0.30)
+    ax_curve = fig.add_subplot(gs[0, :])
+    ax_cells = fig.add_subplot(gs[1, 0])
+    ax_text  = fig.add_subplot(gs[1, 1])
+
+    ax_curve.plot(power_df['f'], power_df['closed_form_param_power'],
+                  '--', color='steelblue', linewidth=1.5,
+                  label='Parametric split-plot ANOVA (closed-form)')
+    ax_curve.plot(power_df['f'], power_df['sim_param_power'],
+                  '-o', color='steelblue', linewidth=2, markersize=5,
+                  label='Parametric split-plot ANOVA (simulated)')
+    if power_df['nparld_sim_power'].notna().any():
+        ax_curve.plot(power_df['f'], power_df['nparld_sim_power'],
+                      '-s', color='darkorange', linewidth=2, markersize=5,
+                      label='nparLD F1-LD-F1 (simulated)')
+    ax_curve.axhline(target_power, color='crimson', linestyle=':', linewidth=1.5,
+                      label=f'Target power = {target_power:.0%}')
+    for f_bench, bench_label in [(0.10, 'small'), (0.25, 'medium'), (0.40, 'large')]:
+        ax_curve.axvline(f_bench, color='gray', linestyle=':', linewidth=0.8, alpha=0.6)
+        ax_curve.text(f_bench, 0.02, bench_label, rotation=90, fontsize=7,
+                      ha='right', va='bottom', color='gray')
+    ax_curve.set_xlabel("Assumed Condition \u00d7 Week interaction effect size (Cohen's f)")
+    ax_curve.set_ylabel('Power  (P[reject H0 | true effect])')
+    ax_curve.set_ylim(0, 1.02)
+    ax_curve.set_title(
+        f'{label} \u2014 Condition \u00d7 Week Interaction Power Curve\n'
+        f'(N={moments["N"]} mice; {moments["b"]} weeks; \u03b1={alpha}; '
+        f'n_sim={n_simulations}/{n_simulations_nparld})',
+        fontsize=10,
+    )
+    ax_curve.legend(fontsize=8, loc='lower right')
+    ax_curve.spines['top'].set_visible(False)
+    ax_curve.spines['right'].set_visible(False)
+    ax_curve.tick_params(direction='in')
+
+    # N per condition table
+    ax_cells.axis('off')
+    _tbl_rows = [[c, str(int(n_per_cond_display[c]))] for c in cond_levels]
+    _tbl = ax_cells.table(
+        cellText=_tbl_rows, colLabels=['Condition', 'N mice (complete-case)'],
+        cellLoc='center', loc='center', bbox=[0, 0.15, 1, 0.75],
+    )
+    _tbl.auto_set_font_size(False)
+    _tbl.set_fontsize(9)
+    for (_ri, _ci2), _cell in _tbl.get_celld().items():
+        if _ri == 0:
+            _cell.set_facecolor('#d0d8e8')
+            _cell.set_text_props(fontweight='bold')
+    ax_cells.set_title(
+        f'Actual N per Condition (complete-case, {moments["b"]} weeks)\n'
+        f'({n_dropped} mice dropped for incomplete weeks)', fontsize=9, pad=4,
+    )
+
+    # Text summary
+    ax_text.axis('off')
+    _p_param_str  = f'{_real_p_param:.4f}' if not np.isnan(_real_p_param) else 'n/a'
+    _p_nparld_str = f'{_real_p_nparld:.4f}' if not np.isnan(_real_p_nparld) else 'n/a'
+    _summary_text = (
+        'OBSERVED data (reference only \u2014 NOT a valid post-hoc power estimate):\n'
+        f'  rstatix (parametric) Condition:Week p  = {_p_param_str}\n'
+        f'  nparLD (nonparametric) Condition:Week p = {_p_nparld_str}\n'
+        f'  Between-subject SD (\u03c3\u0302_u): {moments["sigma_u"]:.4g}  {unit}\n'
+        f'  Within-subject SD  (\u03c3\u0302_e): {moments["sigma_e"]:.4g}  {unit}\n'
+        '\n'
+        f'Minimum detectable effect size (MDES) at {target_power:.0%} power,\n'
+        f'given your ACTUAL N:\n'
+        f'  Parametric (closed-form): {_mdes_str(mdes_param_closed)}\n'
+        f'  Parametric (simulated):   {_mdes_str(mdes_param_sim)}\n'
+        f'  nparLD (simulated):       {_mdes_str(mdes_nparld_sim)}\n'
+        '\n'
+        "Cohen's f benchmarks: small=0.10, medium=0.25, large=0.40\n"
+        'Note: parametric power assumes compound symmetry (exact for\n'
+        'balanced N; standard approximation otherwise).'
+    )
+    ax_text.text(0.0, 1.0, _summary_text, transform=ax_text.transAxes,
+                 fontsize=8, va='top', ha='left', family='monospace',
+                 bbox=dict(boxstyle='round,pad=0.4', facecolor='#f5f5f5',
+                           edgecolor='gray', alpha=0.9))
+
+    fig.suptitle(f'{label} \u2014 Power to Detect a Condition \u00d7 Week Interaction',
+                 fontsize=12, y=1.02)
+    fig.tight_layout()
+
+    # ── Console + text report ─────────────────────────────────────────────────
+    print(f'\n\u2500\u2500 {label} \u2014 Condition x Week Interaction Power Analysis \u2500\u2500')
+    print(f'N mice (complete-case): {moments["N"]}  (dropped {n_dropped})  |  Weeks: {moments["b"]}')
+    print(f'N per condition:\n{n_per_cond_display}')
+    print(f'sigma_u (between-subject SD): {moments["sigma_u"]:.4g} {unit}')
+    print(f'sigma_e (within-subject SD):  {moments["sigma_e"]:.4g} {unit}')
+    print(f'Observed rstatix Condition:Week p = {_p_param_str}')
+    print(f'Observed nparLD   Condition:Week p = {_p_nparld_str}')
+    print(power_df.to_string(index=False))
+    print(f'MDES @ {target_power:.0%} power -- parametric (closed-form): {_mdes_str(mdes_param_closed)}')
+    print(f'MDES @ {target_power:.0%} power -- parametric (simulated):   {_mdes_str(mdes_param_sim)}')
+    print(f'MDES @ {target_power:.0%} power -- nparLD (simulated):       {_mdes_str(mdes_nparld_sim)}')
+
+    if output_dir:
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+            _ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+            _report_path = os.path.join(output_dir, f'condition_week_power_{column}_{_ts}.txt')
+            with open(_report_path, 'w', encoding='utf-8') as _fh:
+                _fh.write(f'Condition x Week Interaction Power Analysis -- {label}\n')
+                _fh.write('=' * 72 + '\n')
+                _fh.write(f'N mice (complete-case): {moments["N"]}  (dropped {n_dropped})  |  Weeks: {moments["b"]}\n')
+                _fh.write(f'N per condition:\n{n_per_cond_display}\n\n')
+                _fh.write(f'sigma_u (between-subject SD): {moments["sigma_u"]:.4g} {unit}\n')
+                _fh.write(f'sigma_e (within-subject SD):  {moments["sigma_e"]:.4g} {unit}\n')
+                _fh.write(f'Observed rstatix Condition:Week p = {_p_param_str}\n')
+                _fh.write(f'Observed nparLD   Condition:Week p = {_p_nparld_str}\n\n')
+                _fh.write(power_df.to_string(index=False) + '\n\n')
+                _fh.write(f'MDES @ {target_power:.0%} power -- parametric (closed-form): {_mdes_str(mdes_param_closed)}\n')
+                _fh.write(f'MDES @ {target_power:.0%} power -- parametric (simulated):   {_mdes_str(mdes_param_sim)}\n')
+                _fh.write(f'MDES @ {target_power:.0%} power -- nparLD (simulated):       {_mdes_str(mdes_nparld_sim)}\n')
+            print(f'[OK] Power analysis report saved -> {_report_path}')
+        except Exception as _save_err:
+            print(f'[WARN] Could not save power analysis report: {_save_err}')
+
+    return fig
+# ── end _expl_measure_condition_week_power_fig ────────────────────────────────
+
+
 # ── Plot selection ────────────────────────────────────────────────────────────
 _ALL_PLOT_KEYS = {
     'speed', 'sensitivity', 'lick_count', 'reward_count',
@@ -3009,6 +4192,14 @@ _ALL_PLOT_KEYS = {
     'expl_sensitivity_distfit',
     'expl_sensitivity_boxplot',
     'expl_sensitivity_rm_anova_resid',
+    'expl_distance_condition_sex_power',
+    'expl_reward_count_condition_sex_power',
+    'expl_sensitivity_condition_sex_power',
+    'expl_level_progression_condition_sex_power',
+    'expl_distance_condition_week_power',
+    'expl_reward_count_condition_week_power',
+    'expl_sensitivity_condition_week_power',
+    'expl_level_progression_condition_week_power',
 }
 
 _PLOT_LABELS = [
@@ -3196,6 +4387,14 @@ _EXPL_PLOT_LABELS = [
     ('expl_sensitivity_distfit',          'Exploratory: Sensitivity per session distribution fit — Normal per starting condition (histogram + Q-Q + box plot)'),
     ('expl_sensitivity_boxplot',          'Exploratory: Sensitivity distribution — box and whisker (per-mouse + overall)'),
     ('expl_sensitivity_rm_anova_resid',   'Exploratory: Sensitivity RM ANOVA (rstatix, condition × week) residuals — Q-Q plot, histogram, residuals vs fitted (DV = raw sensitivity)'),
+    ('expl_distance_condition_sex_power',          'Exploratory: Distance — Condition × Sex interaction power analysis (2-way ANOVA + Scheirer–Ray–Hare, power curve + MDES; no Week factor)'),
+    ('expl_reward_count_condition_sex_power',      'Exploratory: Reward count — Condition × Sex interaction power analysis (2-way ANOVA + Scheirer–Ray–Hare, power curve + MDES; no Week factor)'),
+    ('expl_sensitivity_condition_sex_power',        'Exploratory: Sensitivity — Condition × Sex interaction power analysis (2-way ANOVA + Scheirer–Ray–Hare, power curve + MDES; no Week factor)'),
+    ('expl_level_progression_condition_sex_power',  'Exploratory: Ending level — Condition × Sex interaction power analysis (2-way ANOVA + Scheirer–Ray–Hare, power curve + MDES; no Week factor; requires transitions CSV)'),
+    ('expl_distance_condition_week_power',          'Exploratory: Distance — Condition × Week interaction power analysis (split-plot ANOVA + nparLD, power curve + MDES; repeated measures)'),
+    ('expl_reward_count_condition_week_power',      'Exploratory: Reward count — Condition × Week interaction power analysis (split-plot ANOVA + nparLD, power curve + MDES; repeated measures)'),
+    ('expl_sensitivity_condition_week_power',        'Exploratory: Sensitivity — Condition × Week interaction power analysis (split-plot ANOVA + nparLD, power curve + MDES; repeated measures)'),
+    ('expl_level_progression_condition_week_power',  'Exploratory: Ending level — Condition × Week interaction power analysis (split-plot ANOVA + nparLD, power curve + MDES; repeated measures; requires transitions CSV)'),
 ]
 
 
@@ -13109,6 +14308,34 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         except Exception as _e:
             print(f'[expl_distance_rm_anova_resid] Error: {_e}')
 
+    expl_distance_condition_sex_power_fig = None
+    if 'expl_distance_condition_sex_power' in selected_plots:
+        try:
+            expl_distance_condition_sex_power_fig = _expl_measure_condition_sex_power_fig(
+                all_results, 'total_distance', 'Distance per session', 'm',
+                transform=None, positive_only=False, scale=1.0 / 1000.0,
+                output_dir=output_dir,
+            )
+        except ImportError as _e:
+            print(f'[expl_distance_condition_sex_power] Missing dependency: {_e}')
+            print('  Install statsmodels: conda install statsmodels')
+        except Exception as _e:
+            print(f'[expl_distance_condition_sex_power] Error: {_e}')
+
+    expl_distance_condition_week_power_fig = None
+    if 'expl_distance_condition_week_power' in selected_plots:
+        try:
+            expl_distance_condition_week_power_fig = _expl_measure_condition_week_power_fig(
+                all_results, 'total_distance', 'Distance per session', 'm',
+                transform=None, positive_only=False, scale=1.0 / 1000.0,
+                output_dir=output_dir,
+            )
+        except ImportError as _e:
+            print(f'[expl_distance_condition_week_power] Missing dependency: {_e}')
+            print('  Install statsmodels: conda install statsmodels')
+        except Exception as _e:
+            print(f'[expl_distance_condition_week_power] Error: {_e}')
+
     # ── Exploratory: reward count (hits) per session ───────────────────────────
     # DV = log(1+hits); hits is count data like lick_count, but follows the
     # Normal-fit distfit convention used for speed/cap for consistency across
@@ -13156,6 +14383,32 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         except Exception as _e:
             print(f'[expl_reward_count_rm_anova_resid] Error: {_e}')
 
+    expl_reward_count_condition_sex_power_fig = None
+    if 'expl_reward_count_condition_sex_power' in selected_plots:
+        try:
+            expl_reward_count_condition_sex_power_fig = _expl_measure_condition_sex_power_fig(
+                all_results, 'hits', 'Reward count per session', 'rewards',
+                transform=None, positive_only=False, output_dir=output_dir,
+            )
+        except ImportError as _e:
+            print(f'[expl_reward_count_condition_sex_power] Missing dependency: {_e}')
+            print('  Install statsmodels: conda install statsmodels')
+        except Exception as _e:
+            print(f'[expl_reward_count_condition_sex_power] Error: {_e}')
+
+    expl_reward_count_condition_week_power_fig = None
+    if 'expl_reward_count_condition_week_power' in selected_plots:
+        try:
+            expl_reward_count_condition_week_power_fig = _expl_measure_condition_week_power_fig(
+                all_results, 'hits', 'Reward count per session', 'rewards',
+                transform=None, positive_only=False, output_dir=output_dir,
+            )
+        except ImportError as _e:
+            print(f'[expl_reward_count_condition_week_power] Missing dependency: {_e}')
+            print('  Install statsmodels: conda install statsmodels')
+        except Exception as _e:
+            print(f'[expl_reward_count_condition_week_power] Error: {_e}')
+
     # ── Exploratory: sensitivity per session ────────────────────────────────────
     # DV = sensitivity (reward_count / opportunities); a bounded [0, 1] ratio,
     # no transform applied (parallels ending_level convention).
@@ -13201,6 +14454,32 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
             print('  Install statsmodels: conda install statsmodels')
         except Exception as _e:
             print(f'[expl_sensitivity_rm_anova_resid] Error: {_e}')
+
+    expl_sensitivity_condition_sex_power_fig = None
+    if 'expl_sensitivity_condition_sex_power' in selected_plots:
+        try:
+            expl_sensitivity_condition_sex_power_fig = _expl_measure_condition_sex_power_fig(
+                all_results, 'sensitivity', 'Sensitivity per session', 'proportion',
+                transform=None, positive_only=False, output_dir=output_dir,
+            )
+        except ImportError as _e:
+            print(f'[expl_sensitivity_condition_sex_power] Missing dependency: {_e}')
+            print('  Install statsmodels: conda install statsmodels')
+        except Exception as _e:
+            print(f'[expl_sensitivity_condition_sex_power] Error: {_e}')
+
+    expl_sensitivity_condition_week_power_fig = None
+    if 'expl_sensitivity_condition_week_power' in selected_plots:
+        try:
+            expl_sensitivity_condition_week_power_fig = _expl_measure_condition_week_power_fig(
+                all_results, 'sensitivity', 'Sensitivity per session', 'proportion',
+                transform=None, positive_only=False, output_dir=output_dir,
+            )
+        except ImportError as _e:
+            print(f'[expl_sensitivity_condition_week_power] Missing dependency: {_e}')
+            print('  Install statsmodels: conda install statsmodels')
+        except Exception as _e:
+            print(f'[expl_sensitivity_condition_week_power] Error: {_e}')
 
     # Create collapsed condition bar plot for bout count
     condition_bout_count_bar_fig = None
@@ -17121,7 +18400,9 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
                                                                    'expl_level_progression_histogram',
                                                                    'expl_level_progression_distfit',
                                                                    'expl_level_progression_boxplot',
-                                                                   'expl_level_progression_rm_anova_resid')):
+                                                                   'expl_level_progression_rm_anova_resid',
+                                                                   'expl_level_progression_condition_sex_power',
+                                                                   'expl_level_progression_condition_week_power')):
         level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, \
         level_lick_collapsed_fig, level_lick_condition_fig, \
         level_sensitivity_fig, level_sensitivity_cohort_fig, \
@@ -17205,6 +18486,32 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
         except Exception as _e:
             print(f'[expl_level_progression_rm_anova_resid] Error: {_e}')
 
+    expl_level_progression_condition_sex_power_fig = None
+    if 'expl_level_progression_condition_sex_power' in selected_plots:
+        try:
+            expl_level_progression_condition_sex_power_fig = _expl_measure_condition_sex_power_fig(
+                all_results, 'ending_level', 'Ending level per session', 'level',
+                transform=None, positive_only=False, output_dir=output_dir,
+            )
+        except ImportError as _e:
+            print(f'[expl_level_progression_condition_sex_power] Missing dependency: {_e}')
+            print('  Install statsmodels: conda install statsmodels')
+        except Exception as _e:
+            print(f'[expl_level_progression_condition_sex_power] Error: {_e}')
+
+    expl_level_progression_condition_week_power_fig = None
+    if 'expl_level_progression_condition_week_power' in selected_plots:
+        try:
+            expl_level_progression_condition_week_power_fig = _expl_measure_condition_week_power_fig(
+                all_results, 'ending_level', 'Ending level per session', 'level',
+                transform=None, positive_only=False, output_dir=output_dir,
+            )
+        except ImportError as _e:
+            print(f'[expl_level_progression_condition_week_power] Missing dependency: {_e}')
+            print('  Install statsmodels: conda install statsmodels')
+        except Exception as _e:
+            print(f'[expl_level_progression_condition_week_power] Error: {_e}')
+
     # ── Missing data report ───────────────────────────────────────────────────
     all_session_dates = set(
         d.date() for result in all_results for d in result['df']['date']
@@ -17263,7 +18570,7 @@ def analyze_mouse_data(data_files, markers, starting_conditions, transitions_csv
     # Print weekday alignment table so the user can verify Mon→Tue→Thu→Fri cycle
     print_session_weekday_alignment(all_results)
 
-    return speed_fig, sensitivity_fig, lick_fig, reward_fig, lick_reward_ratio_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, avg_sex_speed_fig, distance_fig, immobility_prop_fig, bout_count_fig, avg_bout_count_fig, rewards_per_bout_fig, first_lick_latency_fig, condition_rewards_per_bout_fig, condition_rewards_per_bout_bar_fig, condition_first_lick_latency_fig, condition_first_lick_latency_bar_fig, condition_lick_after_reward_prop_fig, condition_lick_after_reward_prop_bar_fig, condition_lick_after_reward_prop_5s_bar_fig, weekday_reward_bar_fig, weekday_reward_bar_condition_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_lick_reward_ratio_fig, condition_lick_reward_ratio_bar_fig, condition_punish_zone_pct_bar_fig, condition_bar_fig, condition_speed_bar_fig, condition_sensitivity_fig, condition_sensitivity_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_sensitivity_fig, level_sensitivity_cohort_fig, level_sensitivity_condition_fig, level_sensitivity_condition_line_fig, level_immobility_prop_fig, level_rew_zone_immobility_prop_fig, level_rew_zone_immobility_prop_cond_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, last_level_bar_fig, level_survivor_fig, time_to_level2_fig, level_progression_indiv_fig, level_progression_indiv_cohort_fig, level_progression_condition_fig, level_progression_bar_fig, epoch_del_speed_per_mouse_fig, epoch_del_speed_cond_fig, epoch_del_cap_per_mouse_fig, epoch_del_cap_cond_fig, epoch_del_lick_per_mouse_fig, epoch_del_lick_cond_fig, epoch_del_cap_diff_entry_fig, epoch_del_cap_diff_065s_fig, epoch_del_lick_diff_065s_fig, condition_shuffle_zscore_fig, condition_shuffle_zscore_bar_fig, level_shuffle_zscore_fig, level_shuffle_zscore_line_fig, level_shuffle_zscore_cond_fig, condition_punish_shuffle_zscore_fig, condition_punish_shuffle_zscore_bar_fig, level_punish_shuffle_zscore_fig, level_punish_shuffle_zscore_line_fig, level_punish_shuffle_zscore_cond_fig, epoch_speed_per_mouse_fig, epoch_speed_cond_fig, epoch_cap_per_mouse_fig, epoch_cap_cond_fig, epoch_speed_sess_per_mouse_fig, epoch_speed_sess_cond_fig, epoch_cap_sess_per_mouse_fig, epoch_cap_sess_cond_fig, epoch_speed_early_per_mouse_fig, epoch_speed_late_per_mouse_fig, epoch_speed_early_cond_fig, epoch_speed_late_cond_fig, epoch_cap_early_per_mouse_fig, epoch_cap_late_per_mouse_fig, epoch_cap_early_cond_fig, epoch_cap_late_cond_fig, epoch_speed_early_ev_per_mouse_fig, epoch_speed_late_ev_per_mouse_fig, epoch_speed_early_ev_cond_fig, epoch_speed_late_ev_cond_fig, epoch_cap_early_ev_per_mouse_fig, epoch_cap_late_ev_per_mouse_fig, epoch_cap_early_ev_cond_fig, epoch_cap_late_ev_cond_fig, epoch_speed_early_ev_cond_clean_fig, epoch_speed_late_ev_cond_clean_fig, epoch_cap_early_ev_cond_clean_fig, epoch_cap_late_ev_cond_clean_fig, epoch_speed_sess_cond_clean_fig, epoch_cap_sess_cond_clean_fig, epoch_speed_early_cond_clean_fig, epoch_speed_late_cond_clean_fig, epoch_cap_early_cond_clean_fig, epoch_cap_late_cond_clean_fig, punish_speed_per_mouse_fig, punish_speed_cond_fig, punish_cap_per_mouse_fig, punish_cap_cond_fig, punish_speed_sess_per_mouse_fig, punish_speed_sess_cond_fig, punish_cap_sess_per_mouse_fig, punish_cap_sess_cond_fig, punish_speed_sess_cond_clean_fig, punish_cap_sess_cond_clean_fig,     sex_speed_fig, sex_distance_indiv_fig, cohort_distance_indiv_fig, sex_reward_indiv_fig, epoch_speed_sess_sex_per_mouse_fig, epoch_speed_sess_sex_fig, epoch_cap_sess_sex_per_mouse_fig, epoch_cap_sess_sex_fig, epoch_punish_speed_sess_sex_per_mouse_fig, epoch_punish_speed_sess_sex_fig, epoch_punish_cap_sess_sex_per_mouse_fig, epoch_punish_cap_sess_sex_fig, epoch_reward_speed_pre_post_fig, epoch_reward_speed_diff_fig, epoch_reward_cap_pre_post_fig, epoch_reward_cap_diff_fig, epoch_reward_speed_pre_post_entry_fig, epoch_reward_speed_diff_entry_fig, epoch_reward_speed_pre_post_entry_1s_fig, epoch_reward_speed_diff_entry_1s_fig, epoch_reward_speed_diff_entry_2s_fig, epoch_reward_lick_count_sess_per_mouse_fig, epoch_reward_lick_count_sess_cond_fig, epoch_reward_lick_count_sess_cond_clean_fig, epoch_reward_lick_diff_entry_065s_fig, epoch_punish_lick_count_sess_per_mouse_fig, epoch_punish_lick_count_sess_cond_fig, epoch_punish_lick_count_sess_cond_clean_fig, epoch_punish_speed_pre_post_fig, epoch_punish_speed_diff_fig, epoch_punish_speed_pre_post_entry_fig, epoch_punish_speed_diff_entry_fig, epoch_punish_speed_diff_entry_2s_fig, epoch_punish_cap_pre_post_fig, epoch_punish_cap_diff_fig, epoch_punish_cap_pre_post_entry_fig, epoch_punish_cap_diff_entry_fig, expl_speed_histogram_fig, expl_speed_distfit_fig, expl_speed_boxplot_fig, expl_speed_rm_anova_resid_fig, expl_cap_histogram_fig, expl_cap_boxplot_fig, expl_cap_rm_anova_resid_fig, expl_cap_distfit_fig, expl_lick_distfit_fig, expl_lick_boxplot_fig, expl_lick_rm_anova_resid_fig, expl_lick_rate_distfit_fig,     expl_lick_reward_ratio_distfit_fig, expl_distance_histogram_fig, expl_distance_distfit_fig, expl_distance_boxplot_fig, expl_distance_rm_anova_resid_fig, expl_reward_count_histogram_fig, expl_reward_count_distfit_fig, expl_reward_count_boxplot_fig, expl_reward_count_rm_anova_resid_fig, expl_level_progression_histogram_fig, expl_level_progression_distfit_fig, expl_level_progression_boxplot_fig, expl_level_progression_rm_anova_resid_fig, expl_sensitivity_histogram_fig, expl_sensitivity_distfit_fig, expl_sensitivity_boxplot_fig, expl_sensitivity_rm_anova_resid_fig, all_results, _level_stats_data
+    return speed_fig, sensitivity_fig, lick_fig, reward_fig, lick_reward_ratio_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, avg_sex_speed_fig, distance_fig, immobility_prop_fig, bout_count_fig, avg_bout_count_fig, rewards_per_bout_fig, first_lick_latency_fig, condition_rewards_per_bout_fig, condition_rewards_per_bout_bar_fig, condition_first_lick_latency_fig, condition_first_lick_latency_bar_fig, condition_lick_after_reward_prop_fig, condition_lick_after_reward_prop_bar_fig, condition_lick_after_reward_prop_5s_bar_fig, weekday_reward_bar_fig, weekday_reward_bar_condition_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_lick_reward_ratio_fig, condition_lick_reward_ratio_bar_fig, condition_punish_zone_pct_bar_fig, condition_bar_fig, condition_speed_bar_fig, condition_sensitivity_fig, condition_sensitivity_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_sensitivity_fig, level_sensitivity_cohort_fig, level_sensitivity_condition_fig, level_sensitivity_condition_line_fig, level_immobility_prop_fig, level_rew_zone_immobility_prop_fig, level_rew_zone_immobility_prop_cond_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, last_level_bar_fig, level_survivor_fig, time_to_level2_fig, level_progression_indiv_fig, level_progression_indiv_cohort_fig, level_progression_condition_fig, level_progression_bar_fig, epoch_del_speed_per_mouse_fig, epoch_del_speed_cond_fig, epoch_del_cap_per_mouse_fig, epoch_del_cap_cond_fig, epoch_del_lick_per_mouse_fig, epoch_del_lick_cond_fig, epoch_del_cap_diff_entry_fig, epoch_del_cap_diff_065s_fig, epoch_del_lick_diff_065s_fig, condition_shuffle_zscore_fig, condition_shuffle_zscore_bar_fig, level_shuffle_zscore_fig, level_shuffle_zscore_line_fig, level_shuffle_zscore_cond_fig, condition_punish_shuffle_zscore_fig, condition_punish_shuffle_zscore_bar_fig, level_punish_shuffle_zscore_fig, level_punish_shuffle_zscore_line_fig, level_punish_shuffle_zscore_cond_fig, epoch_speed_per_mouse_fig, epoch_speed_cond_fig, epoch_cap_per_mouse_fig, epoch_cap_cond_fig, epoch_speed_sess_per_mouse_fig, epoch_speed_sess_cond_fig, epoch_cap_sess_per_mouse_fig, epoch_cap_sess_cond_fig, epoch_speed_early_per_mouse_fig, epoch_speed_late_per_mouse_fig, epoch_speed_early_cond_fig, epoch_speed_late_cond_fig, epoch_cap_early_per_mouse_fig, epoch_cap_late_per_mouse_fig, epoch_cap_early_cond_fig, epoch_cap_late_cond_fig, epoch_speed_early_ev_per_mouse_fig, epoch_speed_late_ev_per_mouse_fig, epoch_speed_early_ev_cond_fig, epoch_speed_late_ev_cond_fig, epoch_cap_early_ev_per_mouse_fig, epoch_cap_late_ev_per_mouse_fig, epoch_cap_early_ev_cond_fig, epoch_cap_late_ev_cond_fig, epoch_speed_early_ev_cond_clean_fig, epoch_speed_late_ev_cond_clean_fig, epoch_cap_early_ev_cond_clean_fig, epoch_cap_late_ev_cond_clean_fig, epoch_speed_sess_cond_clean_fig, epoch_cap_sess_cond_clean_fig, epoch_speed_early_cond_clean_fig, epoch_speed_late_cond_clean_fig, epoch_cap_early_cond_clean_fig, epoch_cap_late_cond_clean_fig, punish_speed_per_mouse_fig, punish_speed_cond_fig, punish_cap_per_mouse_fig, punish_cap_cond_fig, punish_speed_sess_per_mouse_fig, punish_speed_sess_cond_fig, punish_cap_sess_per_mouse_fig, punish_cap_sess_cond_fig, punish_speed_sess_cond_clean_fig, punish_cap_sess_cond_clean_fig,     sex_speed_fig, sex_distance_indiv_fig, cohort_distance_indiv_fig, sex_reward_indiv_fig, epoch_speed_sess_sex_per_mouse_fig, epoch_speed_sess_sex_fig, epoch_cap_sess_sex_per_mouse_fig, epoch_cap_sess_sex_fig, epoch_punish_speed_sess_sex_per_mouse_fig, epoch_punish_speed_sess_sex_fig, epoch_punish_cap_sess_sex_per_mouse_fig, epoch_punish_cap_sess_sex_fig, epoch_reward_speed_pre_post_fig, epoch_reward_speed_diff_fig, epoch_reward_cap_pre_post_fig, epoch_reward_cap_diff_fig, epoch_reward_speed_pre_post_entry_fig, epoch_reward_speed_diff_entry_fig, epoch_reward_speed_pre_post_entry_1s_fig, epoch_reward_speed_diff_entry_1s_fig, epoch_reward_speed_diff_entry_2s_fig, epoch_reward_lick_count_sess_per_mouse_fig, epoch_reward_lick_count_sess_cond_fig, epoch_reward_lick_count_sess_cond_clean_fig, epoch_reward_lick_diff_entry_065s_fig, epoch_punish_lick_count_sess_per_mouse_fig, epoch_punish_lick_count_sess_cond_fig, epoch_punish_lick_count_sess_cond_clean_fig, epoch_punish_speed_pre_post_fig, epoch_punish_speed_diff_fig, epoch_punish_speed_pre_post_entry_fig, epoch_punish_speed_diff_entry_fig, epoch_punish_speed_diff_entry_2s_fig, epoch_punish_cap_pre_post_fig, epoch_punish_cap_diff_fig, epoch_punish_cap_pre_post_entry_fig, epoch_punish_cap_diff_entry_fig, expl_speed_histogram_fig, expl_speed_distfit_fig, expl_speed_boxplot_fig, expl_speed_rm_anova_resid_fig, expl_cap_histogram_fig, expl_cap_boxplot_fig, expl_cap_rm_anova_resid_fig, expl_cap_distfit_fig, expl_lick_distfit_fig, expl_lick_boxplot_fig, expl_lick_rm_anova_resid_fig, expl_lick_rate_distfit_fig,     expl_lick_reward_ratio_distfit_fig, expl_distance_histogram_fig, expl_distance_distfit_fig, expl_distance_boxplot_fig, expl_distance_rm_anova_resid_fig, expl_reward_count_histogram_fig, expl_reward_count_distfit_fig, expl_reward_count_boxplot_fig, expl_reward_count_rm_anova_resid_fig, expl_level_progression_histogram_fig, expl_level_progression_distfit_fig, expl_level_progression_boxplot_fig, expl_level_progression_rm_anova_resid_fig, expl_sensitivity_histogram_fig, expl_sensitivity_distfit_fig, expl_sensitivity_boxplot_fig,     expl_sensitivity_rm_anova_resid_fig, expl_distance_condition_sex_power_fig, expl_reward_count_condition_sex_power_fig, expl_sensitivity_condition_sex_power_fig,     expl_level_progression_condition_sex_power_fig, expl_distance_condition_week_power_fig, expl_reward_count_condition_week_power_fig, expl_sensitivity_condition_week_power_fig, expl_level_progression_condition_week_power_fig, all_results, _level_stats_data
 
 def _run_weight_correlations(root, file_paths, animal_info):
     """Load a weight CSV, match to session data by mouse ID + date, and produce
@@ -20420,7 +21727,9 @@ def main():
                                           'expl_level_progression_histogram',
                                           'expl_level_progression_distfit',
                                           'expl_level_progression_boxplot',
-                                          'expl_level_progression_rm_anova_resid')):
+                                          'expl_level_progression_rm_anova_resid',
+                                          'expl_level_progression_condition_sex_power',
+                                          'expl_level_progression_condition_week_power')):
         transitions_csv_path = filedialog.askopenfilename(
             title='Select transitions CSV (from level_sorter.py) — cancel to skip level plot',
             filetypes=[('CSV files', '*.csv'), ('All files', '*.*')],
@@ -20438,7 +21747,7 @@ def main():
         os.path.dirname(os.path.abspath(file_paths[0])),
         f'stats_reports_{_report_ts}',
     )
-    speed_fig, sensitivity_fig, lick_fig, reward_fig, lick_reward_ratio_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, avg_sex_speed_fig, distance_fig, immobility_prop_fig, bout_count_fig, avg_bout_count_fig, rewards_per_bout_fig, first_lick_latency_fig, condition_rewards_per_bout_fig, condition_rewards_per_bout_bar_fig, condition_first_lick_latency_fig, condition_first_lick_latency_bar_fig, condition_lick_after_reward_prop_fig, condition_lick_after_reward_prop_bar_fig, condition_lick_after_reward_prop_5s_bar_fig, weekday_reward_bar_fig, weekday_reward_bar_condition_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_lick_reward_ratio_fig, condition_lick_reward_ratio_bar_fig, condition_punish_zone_pct_bar_fig, condition_bar_fig, condition_speed_bar_fig, condition_sensitivity_fig, condition_sensitivity_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_sensitivity_fig, level_sensitivity_cohort_fig, level_sensitivity_condition_fig, level_sensitivity_condition_line_fig, level_immobility_prop_fig, level_rew_zone_immobility_prop_fig, level_rew_zone_immobility_prop_cond_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, last_level_bar_fig, level_survivor_fig, time_to_level2_fig, level_progression_indiv_fig, level_progression_indiv_cohort_fig, level_progression_condition_fig, level_progression_bar_fig, epoch_del_speed_per_mouse_fig, epoch_del_speed_cond_fig, epoch_del_cap_per_mouse_fig, epoch_del_cap_cond_fig, epoch_del_lick_per_mouse_fig, epoch_del_lick_cond_fig, epoch_del_cap_diff_entry_fig, epoch_del_cap_diff_065s_fig, epoch_del_lick_diff_065s_fig, condition_shuffle_zscore_fig, condition_shuffle_zscore_bar_fig, level_shuffle_zscore_fig, level_shuffle_zscore_line_fig, level_shuffle_zscore_cond_fig, condition_punish_shuffle_zscore_fig, condition_punish_shuffle_zscore_bar_fig, level_punish_shuffle_zscore_fig, level_punish_shuffle_zscore_line_fig, level_punish_shuffle_zscore_cond_fig, epoch_speed_per_mouse_fig, epoch_speed_cond_fig, epoch_cap_per_mouse_fig, epoch_cap_cond_fig, epoch_speed_sess_per_mouse_fig, epoch_speed_sess_cond_fig, epoch_cap_sess_per_mouse_fig, epoch_cap_sess_cond_fig, epoch_speed_early_per_mouse_fig, epoch_speed_late_per_mouse_fig, epoch_speed_early_cond_fig, epoch_speed_late_cond_fig, epoch_cap_early_per_mouse_fig, epoch_cap_late_per_mouse_fig, epoch_cap_early_cond_fig, epoch_cap_late_cond_fig, epoch_speed_early_ev_per_mouse_fig, epoch_speed_late_ev_per_mouse_fig, epoch_speed_early_ev_cond_fig, epoch_speed_late_ev_cond_fig, epoch_cap_early_ev_per_mouse_fig, epoch_cap_late_ev_per_mouse_fig, epoch_cap_early_ev_cond_fig, epoch_cap_late_ev_cond_fig, epoch_speed_early_ev_cond_clean_fig, epoch_speed_late_ev_cond_clean_fig, epoch_cap_early_ev_cond_clean_fig, epoch_cap_late_ev_cond_clean_fig, epoch_speed_sess_cond_clean_fig, epoch_cap_sess_cond_clean_fig, epoch_speed_early_cond_clean_fig, epoch_speed_late_cond_clean_fig, epoch_cap_early_cond_clean_fig, epoch_cap_late_cond_clean_fig, punish_speed_per_mouse_fig, punish_speed_cond_fig, punish_cap_per_mouse_fig, punish_cap_cond_fig, punish_speed_sess_per_mouse_fig, punish_speed_sess_cond_fig, punish_cap_sess_per_mouse_fig, punish_cap_sess_cond_fig, punish_speed_sess_cond_clean_fig, punish_cap_sess_cond_clean_fig,     sex_speed_fig, sex_distance_indiv_fig, cohort_distance_indiv_fig, sex_reward_indiv_fig, epoch_speed_sess_sex_per_mouse_fig, epoch_speed_sess_sex_fig, epoch_cap_sess_sex_per_mouse_fig, epoch_cap_sess_sex_fig, epoch_punish_speed_sess_sex_per_mouse_fig, epoch_punish_speed_sess_sex_fig, epoch_punish_cap_sess_sex_per_mouse_fig, epoch_punish_cap_sess_sex_fig, epoch_reward_speed_pre_post_fig, epoch_reward_speed_diff_fig, epoch_reward_cap_pre_post_fig, epoch_reward_cap_diff_fig, epoch_reward_speed_pre_post_entry_fig, epoch_reward_speed_diff_entry_fig, epoch_reward_speed_pre_post_entry_1s_fig, epoch_reward_speed_diff_entry_1s_fig, epoch_reward_speed_diff_entry_2s_fig, epoch_reward_lick_count_sess_per_mouse_fig, epoch_reward_lick_count_sess_cond_fig, epoch_reward_lick_count_sess_cond_clean_fig, epoch_reward_lick_diff_entry_065s_fig, epoch_punish_lick_count_sess_per_mouse_fig, epoch_punish_lick_count_sess_cond_fig, epoch_punish_lick_count_sess_cond_clean_fig, epoch_punish_speed_pre_post_fig, epoch_punish_speed_diff_fig, epoch_punish_speed_pre_post_entry_fig, epoch_punish_speed_diff_entry_fig, epoch_punish_speed_diff_entry_2s_fig, epoch_punish_cap_pre_post_fig, epoch_punish_cap_diff_fig, epoch_punish_cap_pre_post_entry_fig, epoch_punish_cap_diff_entry_fig, expl_speed_histogram_fig, expl_speed_distfit_fig, expl_speed_boxplot_fig, expl_speed_rm_anova_resid_fig, expl_cap_histogram_fig, expl_cap_boxplot_fig, expl_cap_rm_anova_resid_fig, expl_cap_distfit_fig, expl_lick_distfit_fig, expl_lick_boxplot_fig, expl_lick_rm_anova_resid_fig, expl_lick_rate_distfit_fig, expl_lick_reward_ratio_distfit_fig, expl_distance_histogram_fig, expl_distance_distfit_fig, expl_distance_boxplot_fig, expl_distance_rm_anova_resid_fig, expl_reward_count_histogram_fig, expl_reward_count_distfit_fig, expl_reward_count_boxplot_fig, expl_reward_count_rm_anova_resid_fig, expl_level_progression_histogram_fig, expl_level_progression_distfit_fig, expl_level_progression_boxplot_fig, expl_level_progression_rm_anova_resid_fig, expl_sensitivity_histogram_fig, expl_sensitivity_distfit_fig, expl_sensitivity_boxplot_fig, expl_sensitivity_rm_anova_resid_fig, all_results, _level_stats_data = analyze_mouse_data(
+    speed_fig, sensitivity_fig, lick_fig, reward_fig, lick_reward_ratio_fig, false_alarm_fig, correct_rejection_fig, specificity_fig, dprime_fig, avg_reward_fig, sex_reward_fig, avg_sex_speed_fig, distance_fig, immobility_prop_fig, bout_count_fig, avg_bout_count_fig, rewards_per_bout_fig, first_lick_latency_fig, condition_rewards_per_bout_fig, condition_rewards_per_bout_bar_fig, condition_first_lick_latency_fig, condition_first_lick_latency_bar_fig, condition_lick_after_reward_prop_fig, condition_lick_after_reward_prop_bar_fig, condition_lick_after_reward_prop_5s_bar_fig, weekday_reward_bar_fig, weekday_reward_bar_condition_fig, bout_avg_speed_fig, bout_avg_dist_fig, sex_distance_fig, condition_distance_fig, condition_distance_bar_fig, total_distance_bar_fig, avg_lick_rate_fig, sex_lick_rate_fig, condition_reward_fig, condition_speed_fig, condition_bout_count_fig, condition_bout_avg_speed_fig, condition_bout_avg_dist_fig, condition_lick_fig, condition_lick_rate_fig, condition_lick_reward_ratio_fig, condition_lick_reward_ratio_bar_fig, condition_punish_zone_pct_bar_fig, condition_bar_fig, condition_speed_bar_fig, condition_sensitivity_fig, condition_sensitivity_bar_fig, condition_bout_count_bar_fig, condition_bout_avg_speed_bar_fig, condition_bout_avg_dist_bar_fig, condition_lick_bar_fig, level_reward_fig, level_speed_collapsed_fig, level_speed_condition_fig, level_lick_collapsed_fig, level_lick_condition_fig, level_sensitivity_fig, level_sensitivity_cohort_fig, level_sensitivity_condition_fig, level_sensitivity_condition_line_fig, level_immobility_prop_fig, level_rew_zone_immobility_prop_fig, level_rew_zone_immobility_prop_cond_fig, level_dist_collapsed_fig, level_dist_condition_fig, level_dist_condition_excl_last_fig, level_bout_collapsed_fig, level_bout_condition_fig, level_bout_avg_speed_collapsed_fig, level_bout_avg_speed_condition_fig, level_bout_avg_dist_collapsed_fig, level_bout_avg_dist_condition_fig, last_level_bar_fig, level_survivor_fig, time_to_level2_fig, level_progression_indiv_fig, level_progression_indiv_cohort_fig, level_progression_condition_fig, level_progression_bar_fig, epoch_del_speed_per_mouse_fig, epoch_del_speed_cond_fig, epoch_del_cap_per_mouse_fig, epoch_del_cap_cond_fig, epoch_del_lick_per_mouse_fig, epoch_del_lick_cond_fig, epoch_del_cap_diff_entry_fig, epoch_del_cap_diff_065s_fig, epoch_del_lick_diff_065s_fig, condition_shuffle_zscore_fig, condition_shuffle_zscore_bar_fig, level_shuffle_zscore_fig, level_shuffle_zscore_line_fig, level_shuffle_zscore_cond_fig, condition_punish_shuffle_zscore_fig, condition_punish_shuffle_zscore_bar_fig, level_punish_shuffle_zscore_fig, level_punish_shuffle_zscore_line_fig, level_punish_shuffle_zscore_cond_fig, epoch_speed_per_mouse_fig, epoch_speed_cond_fig, epoch_cap_per_mouse_fig, epoch_cap_cond_fig, epoch_speed_sess_per_mouse_fig, epoch_speed_sess_cond_fig, epoch_cap_sess_per_mouse_fig, epoch_cap_sess_cond_fig, epoch_speed_early_per_mouse_fig, epoch_speed_late_per_mouse_fig, epoch_speed_early_cond_fig, epoch_speed_late_cond_fig, epoch_cap_early_per_mouse_fig, epoch_cap_late_per_mouse_fig, epoch_cap_early_cond_fig, epoch_cap_late_cond_fig, epoch_speed_early_ev_per_mouse_fig, epoch_speed_late_ev_per_mouse_fig, epoch_speed_early_ev_cond_fig, epoch_speed_late_ev_cond_fig, epoch_cap_early_ev_per_mouse_fig, epoch_cap_late_ev_per_mouse_fig, epoch_cap_early_ev_cond_fig, epoch_cap_late_ev_cond_fig, epoch_speed_early_ev_cond_clean_fig, epoch_speed_late_ev_cond_clean_fig, epoch_cap_early_ev_cond_clean_fig, epoch_cap_late_ev_cond_clean_fig, epoch_speed_sess_cond_clean_fig, epoch_cap_sess_cond_clean_fig, epoch_speed_early_cond_clean_fig, epoch_speed_late_cond_clean_fig, epoch_cap_early_cond_clean_fig, epoch_cap_late_cond_clean_fig, punish_speed_per_mouse_fig, punish_speed_cond_fig, punish_cap_per_mouse_fig, punish_cap_cond_fig, punish_speed_sess_per_mouse_fig, punish_speed_sess_cond_fig, punish_cap_sess_per_mouse_fig, punish_cap_sess_cond_fig, punish_speed_sess_cond_clean_fig, punish_cap_sess_cond_clean_fig,     sex_speed_fig, sex_distance_indiv_fig, cohort_distance_indiv_fig, sex_reward_indiv_fig, epoch_speed_sess_sex_per_mouse_fig, epoch_speed_sess_sex_fig, epoch_cap_sess_sex_per_mouse_fig, epoch_cap_sess_sex_fig, epoch_punish_speed_sess_sex_per_mouse_fig, epoch_punish_speed_sess_sex_fig, epoch_punish_cap_sess_sex_per_mouse_fig, epoch_punish_cap_sess_sex_fig, epoch_reward_speed_pre_post_fig, epoch_reward_speed_diff_fig, epoch_reward_cap_pre_post_fig, epoch_reward_cap_diff_fig, epoch_reward_speed_pre_post_entry_fig, epoch_reward_speed_diff_entry_fig, epoch_reward_speed_pre_post_entry_1s_fig, epoch_reward_speed_diff_entry_1s_fig, epoch_reward_speed_diff_entry_2s_fig, epoch_reward_lick_count_sess_per_mouse_fig, epoch_reward_lick_count_sess_cond_fig, epoch_reward_lick_count_sess_cond_clean_fig, epoch_reward_lick_diff_entry_065s_fig, epoch_punish_lick_count_sess_per_mouse_fig, epoch_punish_lick_count_sess_cond_fig, epoch_punish_lick_count_sess_cond_clean_fig, epoch_punish_speed_pre_post_fig, epoch_punish_speed_diff_fig, epoch_punish_speed_pre_post_entry_fig, epoch_punish_speed_diff_entry_fig, epoch_punish_speed_diff_entry_2s_fig, epoch_punish_cap_pre_post_fig, epoch_punish_cap_diff_fig, epoch_punish_cap_pre_post_entry_fig, epoch_punish_cap_diff_entry_fig, expl_speed_histogram_fig, expl_speed_distfit_fig, expl_speed_boxplot_fig, expl_speed_rm_anova_resid_fig, expl_cap_histogram_fig, expl_cap_boxplot_fig, expl_cap_rm_anova_resid_fig, expl_cap_distfit_fig, expl_lick_distfit_fig, expl_lick_boxplot_fig, expl_lick_rm_anova_resid_fig, expl_lick_rate_distfit_fig, expl_lick_reward_ratio_distfit_fig, expl_distance_histogram_fig, expl_distance_distfit_fig, expl_distance_boxplot_fig, expl_distance_rm_anova_resid_fig, expl_reward_count_histogram_fig, expl_reward_count_distfit_fig, expl_reward_count_boxplot_fig, expl_reward_count_rm_anova_resid_fig, expl_level_progression_histogram_fig, expl_level_progression_distfit_fig, expl_level_progression_boxplot_fig, expl_level_progression_rm_anova_resid_fig, expl_sensitivity_histogram_fig, expl_sensitivity_distfit_fig, expl_sensitivity_boxplot_fig, expl_sensitivity_rm_anova_resid_fig, expl_distance_condition_sex_power_fig, expl_reward_count_condition_sex_power_fig, expl_sensitivity_condition_sex_power_fig, expl_level_progression_condition_sex_power_fig, expl_distance_condition_week_power_fig, expl_reward_count_condition_week_power_fig, expl_sensitivity_condition_week_power_fig, expl_level_progression_condition_week_power_fig, all_results, _level_stats_data = analyze_mouse_data(
         file_paths, markers, starting_conditions,
         transitions_csv_path=transitions_csv_path,
         selected_plots=selected_plots,
@@ -20551,6 +21860,10 @@ def main():
         expl_reward_count_boxplot_fig, expl_reward_count_rm_anova_resid_fig,
         expl_level_progression_histogram_fig, expl_level_progression_distfit_fig,
         expl_level_progression_boxplot_fig, expl_level_progression_rm_anova_resid_fig,
+        expl_distance_condition_sex_power_fig, expl_reward_count_condition_sex_power_fig,
+        expl_sensitivity_condition_sex_power_fig, expl_level_progression_condition_sex_power_fig,
+        expl_distance_condition_week_power_fig, expl_reward_count_condition_week_power_fig,
+        expl_sensitivity_condition_week_power_fig, expl_level_progression_condition_week_power_fig,
     ] if f is not None]
 
     # Configure all figures (add legend only when labeled artists exist, then tight layout)
@@ -20787,6 +22100,14 @@ def main():
         (expl_sensitivity_distfit_fig,                 'expl_sensitivity_distfit',                 'Exploratory: sensitivity per session distribution fit by cohort (Normal)'),
         (expl_sensitivity_boxplot_fig,                 'expl_sensitivity_boxplot',                 'Exploratory: sensitivity box-and-whisker (per-mouse + overall)'),
         (expl_sensitivity_rm_anova_resid_fig,          'expl_sensitivity_rm_anova_resid',          'Exploratory: Sensitivity RM ANOVA (rstatix, condition x week) residual diagnostics'),
+        (expl_distance_condition_sex_power_fig,        'expl_distance_condition_sex_power',        'Exploratory: Distance Condition x Sex interaction power analysis (2-way ANOVA + Scheirer-Ray-Hare)'),
+        (expl_reward_count_condition_sex_power_fig,    'expl_reward_count_condition_sex_power',    'Exploratory: Reward count Condition x Sex interaction power analysis (2-way ANOVA + Scheirer-Ray-Hare)'),
+        (expl_sensitivity_condition_sex_power_fig,     'expl_sensitivity_condition_sex_power',     'Exploratory: Sensitivity Condition x Sex interaction power analysis (2-way ANOVA + Scheirer-Ray-Hare)'),
+        (expl_level_progression_condition_sex_power_fig, 'expl_level_progression_condition_sex_power', 'Exploratory: Level progression Condition x Sex interaction power analysis (2-way ANOVA + Scheirer-Ray-Hare)'),
+        (expl_distance_condition_week_power_fig,        'expl_distance_condition_week_power',        'Exploratory: Distance Condition x Week interaction power analysis (split-plot ANOVA + nparLD)'),
+        (expl_reward_count_condition_week_power_fig,    'expl_reward_count_condition_week_power',    'Exploratory: Reward count Condition x Week interaction power analysis (split-plot ANOVA + nparLD)'),
+        (expl_sensitivity_condition_week_power_fig,     'expl_sensitivity_condition_week_power',     'Exploratory: Sensitivity Condition x Week interaction power analysis (split-plot ANOVA + nparLD)'),
+        (expl_level_progression_condition_week_power_fig, 'expl_level_progression_condition_week_power', 'Exploratory: Level progression Condition x Week interaction power analysis (split-plot ANOVA + nparLD)'),
     ]
 
     for fig, name, title in plot_configs:
